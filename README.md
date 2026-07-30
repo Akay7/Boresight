@@ -197,7 +197,9 @@ What exists today is the smallest possible proof that the injection
 primitive works: a FastAPI server with one endpoint,
 `POST /cursor/move`, that takes normalized `{"x": 0.0-1.0, "y": 0.0-1.0}`
 and moves the real OS cursor via a Linux `uinput` virtual absolute
-pointer. No detection, homography, video, or trigger handling yet.
+pointer. No video or trigger handling yet, and homography solving
+(`solve.py`) exists but isn't wired into the server — see "Homography
+solving (standalone)" below.
 
 **Setup**
 
@@ -244,11 +246,56 @@ cursor to screen center:
 The suite runs entirely against a fake backend and never touches
 `/dev/uinput`.
 
+## Homography solving (standalone)
+
+`solve.py` implements the Pipeline section's homography step: given
+marker correspondences (a known screen-plane position in mm paired with
+a detected image-plane position in px), it solves `findHomography`
+(RANSAC, all correspondences), inverts it, and maps the image centre
+through the inverse to get the screen-space aim point. It takes plain
+correspondence data — no config file or detector call of its own — so
+it composes with whatever produces those correspondences.
+
+There's no camera or video source yet — markers aren't even printed
+(see Milestones) — so it's tested entirely with synthetic data, in
+increasingly realistic stages: pure synthetic geometry (a known
+ground-truth homography generates synthetic correspondences directly,
+`tests/test_solve.py`); a synthetic rendered image (ArUco markers drawn
+onto a canvas and warped by a known homography, run through the real
+detector in `detect.py`, then through `solve.py`,
+`tests/test_solve_synthetic_image.py`); and that same rendered image
+degraded with the failure modes the "Known failure modes" section below
+names as dominant in practice — uneven exposure, blur, sensor noise —
+run through the full detect-then-solve pipeline end to end
+(`tests/test_solve_e2e_realistic.py`), the closest available
+approximation to "solve.py against a real photo" until an actual camera
+exists. All three assert the recovered aim point against the known
+ground truth within a documented tolerance. Run them with the same
+`uv run pytest` as the rest of the suite.
+
+The third stage's photo is checked in, not regenerated per test run —
+`tests/fixtures/synthetic_photo.png` plus its ground-truth metadata,
+`tests/fixtures/synthetic_photo.json` — so it's a real regression test:
+a `detect.py`/`solve.py` change that alters the result against this
+exact image is a signal worth investigating, not noise from a
+re-rolled random seed. Regenerate it (only for a deliberate change to
+the layout or degradation model) with:
+
+    uv run python tests/generate_synthetic_photo_fixture.py
+
+`detect.py` currently wraps `cv2.aruco.ArucoDetector` only — dictionary
+match and corner extraction, no cornerSubPix refinement or
+undistortPoints yet (those are separate Pipeline steps, still future
+work). Applying `solve.py` per-frame to a real or synthetic video
+stream — performance budget, frame-to-frame stability — is intentionally
+not built yet; it's the natural next step once a video source exists.
+
 ## Repo layout
 
 Target layout for the full pipeline — most of this doesn't exist yet.
-Today there's just `src/boresight/{server,inject}.py` and `tests/`; see
-"Running the server" above for what's actually built.
+Today there's `src/boresight/{server,inject,solve,detect}.py` and
+`tests/`; see "Running the server" and "Homography solving (standalone)"
+above for what's actually built.
 
     boresight/
       pyproject.toml
@@ -303,7 +350,12 @@ mean the tag sits on the bezel outside the panel.
 - [ ] Web server: phone connects over Wi-Fi, streams video, PC decodes frames
 - [ ] Detection on a tripod against streamed frames, print raw marker IDs and corners
 - [ ] Marker map calibration tool
-- [ ] Homography solve, print screen coordinates
+- [x] Homography solve, print screen coordinates: `solve.py` implements
+      `findHomography` + RANSAC + inverse-mapped aim point, tested
+      against synthetic correspondences and a synthetic rendered image
+      (see "Homography solving (standalone)") — built ahead of the
+      pipeline above, like cursor injection; not yet wired to a real
+      video/detection source or applied per-frame
 - [ ] Debug overlay with per-frame reprojection error
 - [ ] 1-euro filter tuning
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
