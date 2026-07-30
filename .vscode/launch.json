@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: boresight server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/boresight/server.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: boresight server (uvicorn --reload)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": [
+                "boresight.server:app",
+                "--reload",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}
