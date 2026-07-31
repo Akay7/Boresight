@@ -37,7 +37,11 @@ from boresight.solve import (
     solve,
 )
 
-DEFAULT_CONFIG_PATH = Path("config/markers.toml")
+# Resolved relative to this module, not the working directory, and kept
+# inside the package so it ships in the wheel. As a bare relative path
+# it was neither: an installed Boresight had no layout file at all, and
+# a checkout resolved it against wherever you happened to be standing.
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config" / "markers.toml"
 
 Point = tuple[float, float]
 Detector = Callable[[np.ndarray], Sequence[DetectedMarker]]

@@ -30,9 +30,8 @@ import pytest
 
 from boresight.inject import FakeCursorBackend
 from boresight.marker_map import load_marker_map
-from boresight.pipeline import AimPipeline, FrameOutcome, replay
+from boresight.pipeline import DEFAULT_CONFIG_PATH, AimPipeline, FrameOutcome, replay
 
-CONFIG_PATH = Path("config/markers.toml")
 VIDEO_DIR = Path(__file__).parent / "fixtures" / "synthetic_video"
 CLOSE_RANGE_DIR = Path(__file__).parent / "fixtures" / "close_range"
 
@@ -57,7 +56,7 @@ def _manifest(fixture_dir: Path) -> dict:
 def _run(fixture_dir: Path) -> tuple[list, FakeCursorBackend, dict]:
     manifest = _manifest(fixture_dir)
     backend = FakeCursorBackend()
-    pipeline = AimPipeline(load_marker_map(CONFIG_PATH), backend)
+    pipeline = AimPipeline(load_marker_map(DEFAULT_CONFIG_PATH), backend)
     return replay(fixture_dir, pipeline), backend, manifest
 
 

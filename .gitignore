@@ -1,1 +1,7 @@
 *.pyc
+__pycache__/
+dist/
+
+# Generated TLS certificate and key for the phone path. Machine-local,
+# regenerated on demand, and the key must never be committed.
+.boresight/

@@ -9,6 +9,12 @@ dependencies = [
     "evdev>=1.9; sys_platform == 'linux'",
     "opencv-python-headless>=4.10",
     "numpy>=2.1",
+    # Generates the self-signed certificate the phone path needs.
+    # Browsers expose getUserMedia only in a secure context, so a LAN
+    # IP over plain HTTP has no camera API at all. Shelling out to the
+    # openssl binary would avoid this dependency but is not present on
+    # Windows, which the SendInput path targets.
+    "cryptography>=44.0",
 ]
 
 [dependency-groups]

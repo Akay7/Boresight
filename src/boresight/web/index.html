@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Boresight camera</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --ok: #6fcf6f;
+        --warn: #e0b34a;
+        --bad: #e06a6a;
+        --dim: #8a8f98;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        padding: 0.75rem;
+        font: 15px/1.45 system-ui, -apple-system, sans-serif;
+        background: #14161a;
+        color: #e8eaed;
+        -webkit-text-size-adjust: 100%;
+      }
+      h1 { font-size: 1.05rem; margin: 0 0 0.5rem; font-weight: 600; }
+      /* The preview is a check that the camera is aimed and in focus,
+         not the product. Kept small so the numbers stay on screen. */
+      #preview {
+        width: 100%;
+        max-height: 34vh;
+        background: #000;
+        border-radius: 6px;
+        display: block;
+        object-fit: contain;
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        padding: 0.7rem 1.1rem;
+        margin: 0.6rem 0;
+        width: 100%;
+        border: 0;
+        border-radius: 6px;
+        background: #3d7dd8;
+        color: #fff;
+      }
+      button[disabled] { background: #3a3f47; color: var(--dim); }
+      .panel {
+        background: #1c1f25;
+        border-radius: 6px;
+        padding: 0.6rem 0.75rem;
+        margin-top: 0.6rem;
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.15rem 0;
+      }
+      .row span:first-child { color: var(--dim); }
+      .row span:last-child { font-variant-numeric: tabular-nums; }
+      #message {
+        padding: 0.7rem 0.85rem;
+        border-radius: 6px;
+        margin-top: 0.6rem;
+        display: none;
+        white-space: pre-wrap;
+      }
+      #message.show { display: block; }
+      #message.error { background: #3a1f22; border-left: 3px solid var(--bad); }
+      #message.warn { background: #3a3320; border-left: 3px solid var(--warn); }
+      #message.info { background: #1c2b3a; border-left: 3px solid #3d7dd8; }
+      code { background: #0e1013; padding: 0.1rem 0.3rem; border-radius: 3px; }
+      .links {
+        margin-top: 0.8rem;
+        padding-bottom: 1rem;
+        font-size: 0.9rem;
+      }
+      .links a { color: #7fb0f0; }
+      .links p { color: var(--dim); margin: 0.25rem 0 0; }
+    </style>
+  </head>
+  <body>
+    <h1>Boresight camera</h1>
+
+    <video id="preview" playsinline muted autoplay></video>
+    <button id="start">Start streaming</button>
+
+    <div id="message"></div>
+
+    <div class="panel">
+      <div class="row"><span>Connection</span><span id="stat-connection">idle</span></div>
+      <div class="row"><span>Camera</span><span id="stat-camera">—</span></div>
+      <div class="row"><span>Exposure</span><span id="stat-exposure">—</span></div>
+    </div>
+
+    <div class="panel">
+      <div class="row"><span>Round trip</span><span id="stat-rtt">—</span></div>
+      <div class="row"><span>Markers</span><span id="stat-markers">—</span></div>
+      <div class="row"><span>Aim</span><span id="stat-aim">—</span></div>
+      <div class="row"><span>Sent / processed</span><span id="stat-frames">—</span></div>
+      <div class="row"><span>Dropped / failed</span><span id="stat-lost">—</span></div>
+      <div class="row"><span>Skipped (local)</span><span id="stat-skipped">—</span></div>
+      <div class="row"><span>Decode / solve</span><span id="stat-timing">—</span></div>
+    </div>
+
+    <div class="links">
+      <!-- href is set in capture.js so the token survives the click.
+           A static href would 401 whenever the server is token-guarded,
+           which is every time it is reachable from this phone. -->
+      <a id="marker-sheet" href="markers">Printable marker sheet →</a>
+      <p>Print at 100% scale — never "fit to page".</p>
+    </div>
+
+    <script src="capture.js"></script>
+  </body>
+</html>

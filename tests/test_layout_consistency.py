@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 
 from boresight.marker_map import load_marker_map
+from boresight.pipeline import DEFAULT_CONFIG_PATH
 
-CONFIG_PATH = Path("config/markers.toml")
 FIXTURE_DIRS = [
     Path(__file__).parent / "fixtures" / "synthetic_video",
     Path(__file__).parent / "fixtures" / "close_range",
@@ -31,7 +31,7 @@ FIXTURE_DIRS = [
 
 @pytest.fixture(scope="module")
 def layout():
-    return load_marker_map(CONFIG_PATH)
+    return load_marker_map(DEFAULT_CONFIG_PATH)
 
 
 @pytest.mark.parametrize("fixture_dir", FIXTURE_DIRS, ids=lambda p: p.name)

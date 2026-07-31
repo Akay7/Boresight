@@ -258,14 +258,11 @@ nudges from wherever the cursor happens to be.
 
 ## Running the server (current slice)
 
-What exists today is the smallest possible proof that the injection
-primitive works: a FastAPI server with one endpoint,
-`POST /cursor/move`, that takes normalized `{"x": 0.0-1.0, "y": 0.0-1.0}`
-and moves the real OS cursor via a Linux `uinput` virtual absolute
-pointer. No video or trigger handling yet. The detect-solve-inject path
-does exist and is replayable (see "Frame to cursor" below), but nothing
-connects it to the server, because there is no video source to connect —
-that arrives with the phone client.
+The server does three things: serves the phone client, receives its
+camera frames over a WebSocket and drives them through the pipeline to
+the OS cursor, and exposes `POST /cursor/move` (normalized
+`{"x": 0.0-1.0, "y": 0.0-1.0}`) plus the printable marker sheets. The
+trigger is not wired yet — see Milestones.
 
 **Setup**
 
@@ -297,9 +294,9 @@ then re-login) and reload udev rules
 Binds to `127.0.0.1:8000` only — fine for now since the only client is
 `curl` on the same machine. This will need to change once the phone is
 actually in the loop: a phone on Wi-Fi is a separate device and can't
-reach loopback at all, so that future work needs both a LAN-reachable
-bind address and a real auth story before it's safe to open up. Move the
-cursor to screen center:
+reach loopback at all. Serving one means binding an address the LAN can
+route to — see "The phone client" below, which is also where the token
+comes in. Move the cursor to screen center:
 
     curl -X POST http://127.0.0.1:8000/cursor/move \
       -H 'Content-Type: application/json' \
@@ -310,7 +307,9 @@ cursor to screen center:
     uv run pytest
 
 The suite runs entirely against a fake backend and never touches
-`/dev/uinput`.
+`/dev/uinput`. It exercises the WebSocket path too, by replaying the
+checked-in fixtures through it — Starlette's test client drives the ASGI
+app directly, so no socket is opened and no camera is involved.
 
 ## Homography solving (standalone)
 
@@ -493,42 +492,164 @@ tolerance, because RANSAC averages a per-marker permutation away across
 there the permutation is the entire fit. Corner order is pinned exactly
 in a unit test; the full-visibility numbers should not be trusted for it.
 
+## The phone client
+
+The phone loads a page in its browser, which captures from the rear
+camera and streams frames to the PC. Nothing is installed on the phone.
+The page also links to the printable marker sheet (`GET /markers`), with
+the token carried through, so the tags can be reached from whichever
+device is in front of a printer without hunting for the URL.
+
+### Read this first: the camera needs a secure context
+
+**A phone loading `http://192.168.1.20:8000` will find no camera API at
+all.** Not a denied permission — `navigator.mediaDevices` is simply
+absent. Browsers expose capture only in a secure context, and a LAN IP
+over plain HTTP is not one. `localhost` is the sole exemption.
+
+This is the first thing that will stop you, and the symptom does not
+suggest the cause, so the client detects it and says so on screen.
+There are two ways through:
+
+**1. USB, no certificate** — the better path, and the one to measure
+with. Plug the phone in and forward the port:
+
+    adb reverse tcp:8000 tcp:8000
+    uv run python -m boresight.server
+
+Then open `http://localhost:8000` on the phone. `localhost` is a secure
+context, so there is no certificate, no interstitial, and no Wi-Fi hop
+in the latency you are trying to measure.
+
+**2. TLS over Wi-Fi** — how it is actually meant to be played:
+
+    uv run python -m boresight.server --host 0.0.0.0 --token-auto --tls
+
+which prints the exact URL to open, token included:
+
+    Open this on the phone:  https://192.168.1.20:8000/?token=xK3f...
+
+The certificate is self-signed, so the phone shows a warning the first
+time. It is generated once into `.boresight/` and reused, so accepting
+it is a one-time cost rather than a per-restart one.
+
+### The server will not open itself up without a token
+
+Binding a non-loopback address without `--token` or `--token-auto` is a
+startup failure, not a warning:
+
+    refusing to bind 0.0.0.0: a token is required to serve a
+    network-reachable address.
+
+The thing being prevented is severe and has no local symptom: an
+endpoint on your network that moves your mouse, reachable by anything
+that joins the Wi-Fi. Once set, the token is required on *every*
+endpoint — the client page, the marker sheets, `/cursor/move`, and the
+frame socket. It travels as a `?token=` query parameter, because a
+browser cannot set headers on a WebSocket handshake; HTTP callers may
+use `Authorization: Bearer` instead.
+
+Loopback with no token keeps working exactly as before. Nothing is
+exposed, so nothing is demanded.
+
+### Wire protocol
+
+One binary WebSocket message per frame, to `/ws/frames`:
+
+    [8 bytes: float64 LE, client capture time in ms][JPEG bytes...]
+
+Text messages on the same socket carry JSON — telemetry from the server,
+control from the client. The trigger will land there without needing a
+second connection or any change to frame handling.
+
+JPEG rather than a video codec: `MediaRecorder` produces chunks whose
+boundaries do not align to frames, so the server would have to demux a
+running stream to recover the per-frame images the pipeline needs. JPEG
+costs bandwidth and buys frame clarity — and it is what the rendered
+fixtures already are, so a fixture file is a wire payload, and the
+end-to-end test streams the checked-in frames down a real socket and
+asserts the cursor track is *identical* to replaying them from disk.
+
+The timestamp is echoed back untouched. The server cannot compute
+round-trip time itself — the two clocks share no epoch — so the phone
+subtracts against its own monotonic clock and reports the result back.
+
+### Frames that arrive too fast are dropped, newest first
+
+If the pipeline falls behind, the server keeps only the most recent
+unprocessed frame and discards whatever was waiting. It does not queue.
+
+A queue turns a throughput shortfall into unbounded, monotonically
+growing lag: ten seconds into a session the cursor follows where you
+aimed a second ago, and it never recovers. Dropping costs nothing,
+because the frame being discarded is strictly worse information than the
+one replacing it. The client applies the same rule one hop earlier,
+skipping a capture when the socket's `bufferedAmount` has not drained.
+
+Every drop is counted and reported rather than hidden.
+
+### Telemetry
+
+The phone displays, per frame: round-trip time, markers detected,
+normalized aim point (flagged when extrapolated), frames sent /
+processed / dropped / failed, and server-side decode and solve times.
+
+**No latency figure has been measured yet.** This change builds the
+instrument; reading it needs a real phone on a real network. Locally,
+decode and solve are each around 5 ms on the 1280x720 fixtures, which
+bounds the PC-side cost and says nothing at all about the hop. README's
+condition for moving to WebRTC is that WebSocket latency proves too
+high — that is now a measurement rather than an assumption.
+
+Every capture default (resolution, rate, JPEG quality, exposure value)
+is a guess made without hardware. They are all in `CONFIG` at the top of
+`capture.js`, and the telemetry exists to replace them.
+
+Still absent, deliberately: **no filtering and no dropout decay.** An
+unsolvable frame leaves the cursor where it was rather than inventing a
+position; holding the last good pose and decaying it needs state the
+per-frame path does not have, and is the next thing to build.
+
 ## Repo layout
 
-Target layout for the full pipeline — much of this doesn't exist yet.
-Today there's
-`src/boresight/{server,inject,solve,detect,marker_map,pipeline,markers}.py`,
-`config/markers.toml`, and `tests/`; see "Running the server",
-"Homography solving (standalone)" and "Frame to cursor" above for what's
-actually built.
+Target layout for the full pipeline — some of this doesn't exist yet.
+Everything not marked `# future` is built; see "Running the server",
+"Homography solving (standalone)", "Frame to cursor" and "The phone
+client" above.
+
+Data files live **inside** `src/boresight/`, not beside it. The wheel
+packages that directory and nothing else, so a layout or client file
+one level up works from a checkout and 404s from an installed copy —
+a defect invisible to a test suite that always runs from a checkout.
 
     boresight/
       pyproject.toml
-      config/
-        markers.toml          # id -> (x, y) in screen mm
-        camera.toml           # intrinsics + distortion
       src/boresight/
-        server.py             # WebSocket/RPC endpoint, serves web/ to the phone
-        detect.py             # ArUco detection + subpixel refinement
+        config/
+          markers.toml        # id -> (x, y) in screen mm; reference layout
+          camera.toml         # future: intrinsics + distortion
+        web/
+          index.html          # phone client: capture, status, telemetry
+          capture.js          # getUserMedia, JPEG encode, WebSocket send
+        server.py             # HTTP + frame socket, serves web/ to the phone
+        stream.py             # frame codec, drop slot, per-session counters
+        netaccess.py          # bind address, shared token, TLS certificate
+        detect.py             # ArUco detection (+ future subpixel refinement)
         marker_map.py         # markers.toml -> id to screen-plane corners
         markers.py            # printable marker SVG, served over HTTP
         solve.py              # homography, RANSAC, aim point
         pipeline.py           # frame -> detect -> solve -> normalize -> inject
-        filter.py             # 1-euro
-        inject.py             # SendInput / uinput backends
-        serial_link.py        # optional ESP32 HID path (future)
-        debug_overlay.py      # quads, IDs, reprojection error
-      web/
-        index.html             # phone client: video capture + trigger button
-        capture.js              # getUserMedia, encode, WebSocket send
+        inject.py             # uinput backend (+ future SendInput)
+        filter.py             # future: 1-euro
+        serial_link.py        # future: optional ESP32 HID path
+        debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
-        calibrate.py          # chessboard intrinsics
-        map_markers.py        # build markers.toml
+        calibrate.py          # future: chessboard intrinsics
+        map_markers.py        # future: build markers.toml for a real TV
       firmware/
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
       tests/
-        fixtures/             # recorded capture clips
-        test_detection.py
+        fixtures/             # rendered frame sequences (Git LFS)
 
 ### markers.toml
 
@@ -556,13 +677,17 @@ eight of them are.
 `size_mm` is per marker rather than per layout, so the inner ring for
 close play can use smaller tags without a format change.
 
-`config/markers.toml` ships the **reference layout**: the one the
-checked-in Blender fixtures render and every accuracy figure below was
-measured against. It is not a layout for your TV — a real installation
-needs its own measurements, which is what the (unbuilt) marker map
-calibration tool is for. A test asserts the shipped file and the fixture
-manifests stay in agreement, so the config and the rendered scene cannot
-drift apart silently.
+`src/boresight/config/markers.toml` ships the **reference layout**: the
+one the checked-in Blender fixtures render and every accuracy figure
+below was measured against. It is not a layout for your TV — a real
+installation needs its own measurements, which is what the (unbuilt)
+marker map calibration tool is for. A test asserts the shipped file and
+the fixture manifests stay in agreement, so the config and the rendered
+scene cannot drift apart silently.
+
+It sits inside the package and is resolved relative to the module, not
+the working directory, so it ships in the wheel and loads the same from
+anywhere.
 
 `marker_map.py` loads and validates the file and answers the one
 question detection cannot: given a detected marker ID, where are that
@@ -577,7 +702,12 @@ in, so the two sequences pair positionally.
       print-ready vector tags at exact mm dimensions from the browser;
       verifying a physical print against a ruler is still a manual step
 - [ ] Camera intrinsic calibration (phone camera)
-- [ ] Web server: phone connects over Wi-Fi, streams video, PC decodes frames
+- [x] Web server: phone connects over Wi-Fi, streams video, PC decodes
+      frames — the client page, the frame socket, the newest-wins drop
+      policy, token auth and TLS all exist and are tested by replaying
+      the checked-in fixtures through a real socket (see "The phone
+      client"). Never yet run against an actual phone, so every capture
+      default is an untested guess and no latency has been measured
 - [ ] Detection on a tripod against streamed frames, print raw marker IDs and corners
 - [ ] Marker map calibration tool — the file format and its loader
       (`markers.toml`, `marker_map.py`) exist and ship a reference
@@ -592,17 +722,21 @@ in, so the two sequences pair positionally.
 - [x] Frame-to-cursor pipeline: `pipeline.py` composes detection, the
       marker map, the solver and cursor injection into one stateless
       per-frame call, replayable over the checked-in fixtures with
-      `python -m boresight.pipeline` (see "Frame to cursor") — still fed
-      by recorded frames rather than a camera, and still unfiltered
+      `python -m boresight.pipeline` (see "Frame to cursor"), and now
+      also fed live by the phone over a WebSocket — still unfiltered
 - [ ] Debug overlay with per-frame reprojection error
 - [ ] 1-euro filter tuning
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
       directly (uinput, Linux) — built ahead of the pipeline above as a
       standalone proof; not yet wired to real aim data or Mesen
 - [ ] SendInput injection (Windows), test in Mesen
-- [ ] On-screen trigger button wired to click injection
+- [ ] On-screen trigger button wired to click injection — the frame
+      socket already reserves text messages for it, so it needs no
+      second connection
 - [ ] Integrate phone mount into shell
-- [ ] Wi-Fi latency/jitter measurement and tuning
+- [ ] Wi-Fi latency/jitter measurement and tuning — the instrument
+      exists (round-trip time and drop counts are on the phone's
+      screen); nobody has read it against real hardware yet
 - [ ] (Future) ESP32 hardware HID round-trip path
 - [ ] (Future) IMU dropout bridging
 - [ ] (Future) Recoil solenoid

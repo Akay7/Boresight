@@ -15,9 +15,8 @@ import pytest
 from boresight.detect import DetectedMarker
 from boresight.inject import FakeCursorBackend
 from boresight.marker_map import MarkerMap, load_marker_map
-from boresight.pipeline import AimPipeline, FrameOutcome
+from boresight.pipeline import DEFAULT_CONFIG_PATH, AimPipeline, FrameOutcome
 
-CONFIG_PATH = "config/markers.toml"
 IMAGE_SIZE = (1280, 720)
 PANEL_CENTRE_MM = (610.0, 343.0)
 
@@ -29,7 +28,7 @@ SCALE_PX_PER_MM = 0.7
 
 @pytest.fixture(scope="module")
 def marker_map() -> MarkerMap:
-    return load_marker_map(CONFIG_PATH)
+    return load_marker_map(DEFAULT_CONFIG_PATH)
 
 
 @pytest.fixture
