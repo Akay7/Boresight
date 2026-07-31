@@ -262,9 +262,10 @@ What exists today is the smallest possible proof that the injection
 primitive works: a FastAPI server with one endpoint,
 `POST /cursor/move`, that takes normalized `{"x": 0.0-1.0, "y": 0.0-1.0}`
 and moves the real OS cursor via a Linux `uinput` virtual absolute
-pointer. No video or trigger handling yet, and homography solving
-(`solve.py`) exists but isn't wired into the server — see "Homography
-solving (standalone)" below.
+pointer. No video or trigger handling yet. The detect-solve-inject path
+does exist and is replayable (see "Frame to cursor" below), but nothing
+connects it to the server, because there is no video source to connect —
+that arrives with the phone client.
 
 **Setup**
 
@@ -428,12 +429,78 @@ work). Per-frame behaviour over a synthetic frame sequence is covered
 below; what's still missing is a real video source, 1-euro filtering,
 and any wiring into `server.py`.
 
+## Frame to cursor
+
+`pipeline.py` is the composition: one frame in, one cursor move out. It
+converts to greyscale, runs `detect.py`, looks each detected ID up in
+the marker map, pairs its corners into correspondences, calls
+`solve.py`, divides the millimetre aim point by the configured screen
+size, and hands the normalized result to an `inject.py` backend. It
+holds no state between frames.
+
+Replay a recorded sequence through it — this is the whole path, and it
+moves the real cursor:
+
+    uv run python -m boresight.pipeline tests/fixtures/synthetic_video
+
+Add `--dry-run` to print the aim track instead:
+
+    frame    1  8 markers  aim (   300.7,    201.0) mm  cursor (0.2465, 0.2930)
+    ...
+    frame    3  1 markers  aim (    86.2,    342.1) mm  cursor (0.0707, 0.4987) EXTRAPOLATED
+    frame    1  0 markers  no emission: no_markers
+
+`solve.py` deliberately decides nothing about a low-confidence aim
+point, leaving it to whoever consumes one. `pipeline.py` is that
+consumer, so it has to answer four questions, and being stateless
+constrains every answer:
+
+| Case | Behaviour |
+| --- | --- |
+| Nothing to solve from (no markers, or fewer than four correspondences) | Emit nothing, return an outcome. Not an exception — dropout is the steady state, not an error |
+| Solve flagged as poorly conditioned | **Emit it**, and report the flag |
+| Aim point off the panel | Clamp into `[0, 1]` at the emission boundary, and report that it was clamped |
+| Detected ID absent from the map | Ignore it, count it, solve from the rest |
+
+Emitting flagged solves is the one worth arguing about. Flagged does not
+mean wrong — the close-range fixture's one- and two-marker poses are
+flagged and still land within a few mm — and suppressing them would
+blank the cursor in exactly the close-range case the midpoint marker
+ring exists to serve. But the same flag also covers the single-marker
+extrapolation measured 2m off, which clamps to a screen corner and looks
+like a plausible cursor position. Without temporal state there is no
+principled way to tell those apart, which is the argument for the
+1-euro filter being the next thing built.
+
+So what's still absent, and deliberately: **no filtering, and no
+hold-last-good-and-decay on dropout.** An unsolvable frame simply leaves
+the cursor where it was rather than inventing a position. There is also
+no real capture source and no wiring into `server.py` — the pipeline is
+the seam those land on, not a substitute for them.
+
+Tests are in two layers. `tests/test_pipeline.py` stubs the detector to
+drive each policy branch directly; `tests/test_pipeline_e2e.py` replays
+both checked-in fixtures through the real detector into a fake backend
+and asserts the emitted track against the manifests' ground truth.
+
+One measured caveat about the full-visibility deck, recorded because it
+is the kind of thing that lets a bug ship: with all eight markers in
+frame, accuracy is nearly insensitive to how corners are paired.
+Reversing the map's corner order to counter-clockwise — reflecting every
+marker about its own diagonal — costs just 1.77mm, well inside the 4mm
+tolerance, because RANSAC averages a per-marker permutation away across
+32 correspondences. The sparse close-range assertions catch it, since
+there the permutation is the entire fit. Corner order is pinned exactly
+in a unit test; the full-visibility numbers should not be trusted for it.
+
 ## Repo layout
 
-Target layout for the full pipeline — most of this doesn't exist yet.
-Today there's `src/boresight/{server,inject,solve,detect}.py` and
-`tests/`; see "Running the server" and "Homography solving (standalone)"
-above for what's actually built.
+Target layout for the full pipeline — much of this doesn't exist yet.
+Today there's
+`src/boresight/{server,inject,solve,detect,marker_map,pipeline,markers}.py`,
+`config/markers.toml`, and `tests/`; see "Running the server",
+"Homography solving (standalone)" and "Frame to cursor" above for what's
+actually built.
 
     boresight/
       pyproject.toml
@@ -443,7 +510,10 @@ above for what's actually built.
       src/boresight/
         server.py             # WebSocket/RPC endpoint, serves web/ to the phone
         detect.py             # ArUco detection + subpixel refinement
+        marker_map.py         # markers.toml -> id to screen-plane corners
+        markers.py            # printable marker SVG, served over HTTP
         solve.py              # homography, RANSAC, aim point
+        pipeline.py           # frame -> detect -> solve -> normalize -> inject
         filter.py             # 1-euro
         inject.py             # SendInput / uinput backends
         serial_link.py        # optional ESP32 HID path (future)
@@ -452,7 +522,6 @@ above for what's actually built.
         index.html             # phone client: video capture + trigger button
         capture.js              # getUserMedia, encode, WebSocket send
       tools/
-        gen_markers.py        # SVG/PDF at physical dimensions
         calibrate.py          # chessboard intrinsics
         map_markers.py        # build markers.toml
       firmware/
@@ -468,26 +537,51 @@ above for what's actually built.
 
     [[marker]]
     id = 0
-    x = -60
-    y = -60
+    x = -120
+    y = -120
     size_mm = 80
 
     [[marker]]
-    id = 1
-    x = 610
-    y = -60
+    id = 4
+    x = 570
+    y = -120
     size_mm = 80
 
-Origin is the top-left of the active display area. Negative coordinates
-mean the tag sits on the bezel outside the panel.
+Origin is the top-left of the active display area, x rightwards and y
+downwards, in millimetres. Each marker's `x`/`y` is its own top-left
+corner. Negative coordinates — and coordinates past the screen size —
+mean the tag sits on the bezel outside the panel, which is where all
+eight of them are.
+
+`size_mm` is per marker rather than per layout, so the inner ring for
+close play can use smaller tags without a format change.
+
+`config/markers.toml` ships the **reference layout**: the one the
+checked-in Blender fixtures render and every accuracy figure below was
+measured against. It is not a layout for your TV — a real installation
+needs its own measurements, which is what the (unbuilt) marker map
+calibration tool is for. A test asserts the shipped file and the fixture
+manifests stay in agreement, so the config and the rendered scene cannot
+drift apart silently.
+
+`marker_map.py` loads and validates the file and answers the one
+question detection cannot: given a detected marker ID, where are that
+marker's four corners on the screen plane? It returns them clockwise
+from top-left, matching the order `cv2.aruco` reports detected corners
+in, so the two sequences pair positionally.
 
 ## Milestones
 
-- [ ] Generate and print markers at verified physical size
+- [ ] Generate and print markers at verified physical size — `GET
+      /markers` and `GET /markers/{id}.svg` (`markers.py`) serve
+      print-ready vector tags at exact mm dimensions from the browser;
+      verifying a physical print against a ruler is still a manual step
 - [ ] Camera intrinsic calibration (phone camera)
 - [ ] Web server: phone connects over Wi-Fi, streams video, PC decodes frames
 - [ ] Detection on a tripod against streamed frames, print raw marker IDs and corners
-- [ ] Marker map calibration tool
+- [ ] Marker map calibration tool — the file format and its loader
+      (`markers.toml`, `marker_map.py`) exist and ship a reference
+      layout; measuring a real TV into one is still manual
 - [x] Homography solve, print screen coordinates: `solve.py` implements
       `findHomography` + RANSAC + inverse-mapped aim point, tested
       against synthetic correspondences, a synthetic rendered image, and
@@ -495,6 +589,11 @@ mean the tag sits on the bezel outside the panel.
       frame-to-frame coherence (see "Homography solving (standalone)") —
       built ahead of the pipeline above, like cursor injection; not yet
       wired to a real video/detection source
+- [x] Frame-to-cursor pipeline: `pipeline.py` composes detection, the
+      marker map, the solver and cursor injection into one stateless
+      per-frame call, replayable over the checked-in fixtures with
+      `python -m boresight.pipeline` (see "Frame to cursor") — still fed
+      by recorded frames rather than a camera, and still unfiltered
 - [ ] Debug overlay with per-frame reprojection error
 - [ ] 1-euro filter tuning
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor

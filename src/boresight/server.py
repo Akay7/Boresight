@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI, Request
 from pydantic import BaseModel, Field
 
 from boresight.inject import CursorBackend, UinputCursorBackend
+from boresight.markers import router as markers_router
 
 
 class MoveRequest(BaseModel):
@@ -41,6 +42,7 @@ def create_app(
                 close()
 
     app = FastAPI(lifespan=lifespan)
+    app.include_router(markers_router)
 
     @app.post("/cursor/move", status_code=204)
     def move_cursor(

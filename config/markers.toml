@@ -1,0 +1,70 @@
+# Reference marker layout.
+#
+# This is the layout the checked-in Blender fixtures render and that
+# every accuracy figure in README's "Marker visibility and accuracy"
+# section was measured against -- not a layout for your TV. A real
+# installation needs its own measurements (the marker map calibration
+# tool is a separate milestone). A test asserts this file and the
+# fixture manifests stay in agreement, so editing it will fail the
+# suite unless the fixtures are re-rendered to match.
+#
+# Origin is the top-left corner of the active display area, x rightwards
+# and y downwards, in millimetres. Each marker's x/y is its own top-left
+# corner. All eight sit on the bezel *outside* the panel, hence the
+# negative coordinates and the coordinates past the screen size.
+
+screen_width_mm = 1220
+screen_height_mm = 686
+
+# Corners.
+
+[[marker]]
+id = 0
+x = -120
+y = -120
+size_mm = 80
+
+[[marker]]
+id = 1
+x = 1260
+y = -120
+size_mm = 80
+
+[[marker]]
+id = 2
+x = 1260
+y = 726
+size_mm = 80
+
+[[marker]]
+id = 3
+x = -120
+y = 726
+size_mm = 80
+
+# Edge midpoints. A narrow-FOV camera at close range loses the corners
+# long before it loses these, so they carry the close-range case.
+
+[[marker]]
+id = 4
+x = 570
+y = -120
+size_mm = 80
+
+[[marker]]
+id = 5
+x = 1260
+y = 303
+size_mm = 80
+
+[[marker]]
+id = 6
+x = 570
+y = 726
+size_mm = 80
+
+[[marker]]
+id = 7
+x = -120
+y = 303
+size_mm = 80
