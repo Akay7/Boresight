@@ -33,8 +33,14 @@ and full perspective correction from a single visible tag.
 7. A tap on the phone's on-screen trigger button rides the same
    connection and is emitted as a click.
 
-One marker is sufficient. Four corner points is a complete homography.
-More markers improve accuracy and provide redundancy.
+One marker is enough to *compute* a homography — four corner points is
+a complete one — but not enough to compute a useful aim point. What
+governs accuracy is whether the visible markers enclose the aim point,
+not how many of them there are. See
+[Marker visibility and accuracy](#marker-visibility-and-accuracy) for
+the measured numbers; the short version is that extrapolating from a
+single 80mm marker has been measured 2m off on a 1220mm panel, while
+any subset that surrounds the aim point stays within ~18mm.
 
 ## Hardware
 
@@ -84,6 +90,65 @@ Narrower optics buy more than higher resolution. The tradeoff is that a
 narrow FOV loses tags at close range — hence the midpoint ring.
 
 Print at 100% scale. Never "fit to page".
+
+### Marker visibility and accuracy
+
+All markers sit on the bezel, outside the active panel. That has a
+consequence worth knowing before building the mount: **there is a
+minimum working distance**, and below it the system cannot work at all.
+Rendering the reference scene (1220x686mm panel, 80mm tags, 45 deg FOV,
+1280x720) from a range of distances while aiming at screen centre:
+
+| Camera distance | Markers detected | Aim error |
+| --- | --- | --- |
+| 700 / 1000 / 1400 mm | 0 | nothing to solve from |
+| 1800 mm | 2 | 0.8 mm |
+| 2200 mm and beyond | 8 | 1.0-1.6 mm |
+
+Close in, the frustum is narrower than the panel, so every bezel marker
+falls outside it. No solver change fixes this — it is the case README's
+"second inner ring for very close play" note is for.
+
+When only *some* markers are visible, accuracy is governed by their
+geometry relative to the aim point, not by their count. Sweeping every
+marker subset across every frame of the rendered fixture (4844
+combinations):
+
+| Correspondences used | Aim error |
+| --- | --- |
+| all 7-8 markers | 1.4 mm median |
+| 4 corners (half the layout) | 1.5 mm median, 2.0 mm max |
+| 2 markers, opposite sides | 0.8 mm |
+| 2 markers, same edge | 17.6 mm median, 39.5 mm max |
+| 1 marker | 153 mm median, up to 2037 mm |
+
+Two markers on opposite sides beat two markers sharing an edge by ~20x.
+The reason is extrapolation: the homography is fitted from the marker
+corners, and pushing the image centre through it is interpolation only
+while the aim point lies inside those corners. Outside them, sub-pixel
+corner error is amplified without bound — and one 80mm marker spans
+80mm of a screen that is 1220mm across.
+
+So `solve.py` reports the conditioning of each solve: whether the aim
+point falls inside the convex hull of the correspondences, how far
+outside it is in mm, and their extent. Across all 4844 combinations,
+every solve whose aim point was *inside* the hull landed within 18.3mm,
+while flagged solves ranged up to 2037mm. Being flagged does not mean
+the answer is wrong — close-range frames with one visible marker still
+land within a few mm, because a nearer marker occupies more pixels and
+localises better — it means the answer is unguaranteed.
+
+**Do not use reprojection error as a validity check.** A single marker
+gives four points and eight degrees of freedom, so it fits *exactly*:
+reprojection error is ~0.000px precisely when the aim point is least
+trustworthy, and the all-markers solve has the highest reprojection
+error and the best accuracy. It is anti-correlated with accuracy in the
+case that matters.
+
+The real fix for sparse visibility is pose estimation from a marker of
+known physical size (`solvePnP`) rather than homography extrapolation,
+which turns four coplanar points into a metric pose. That needs camera
+intrinsics, so it is blocked on the calibration milestone.
 
 ## Pipeline
 
@@ -254,7 +319,25 @@ a detected image-plane position in px), it solves `findHomography`
 (RANSAC, all correspondences), inverts it, and maps the image centre
 through the inverse to get the screen-space aim point. It takes plain
 correspondence data — no config file or detector call of its own — so
-it composes with whatever produces those correspondences.
+it composes with whatever produces those correspondences. Alongside the
+aim point it reports the solve's conditioning (see
+[Marker visibility and accuracy](#marker-visibility-and-accuracy)); it
+never refuses on conditioning grounds, because what to do about a
+low-confidence aim point — README's hold-last-good-pose-and-decay — is
+the consumer's call.
+
+Its tests are organised as two decks, which assert different things:
+
+- **Deck A, full visibility** — the whole layout in frame
+  (`test_solve_synthetic_image.py`, `test_solve_e2e_realistic.py`,
+  `test_solve_video_e2e.py`). Tight tolerances; this is the statement
+  of best-case accuracy.
+- **Deck B, partial visibility** — only some markers in frame
+  (`test_solve_partial_markers.py`, `test_solve_close_range.py`). Where
+  the geometry supports accuracy it asserts accuracy; where it does not
+  it asserts the solve is *flagged*, since no solver can recover an
+  accurate aim point by extrapolating far outside its own
+  correspondences.
 
 There's no camera or video source yet — markers aren't even printed
 (see Milestones) — so it's tested entirely with synthetic data, in
@@ -296,9 +379,26 @@ motion — no discontinuities the input motion doesn't justify.
 The fixture is a Blender render (`tests/fixtures/synthetic_video/`): a
 lit, colourful 16:9 panel, markers printed on white cardstock stuck to
 the bezel *outside* the active area (hence their negative `markers.toml`
-coordinates), and a dim room behind — deliberately the bright-screen /
-dim-paper dynamic range case "Known failure modes" calls dominant.
-Frames are JPEG, which is what the phone will actually stream.
+coordinates), and a dim room behind. Frames are JPEG, which is what the
+phone will actually stream.
+
+The lighting is real, not painted on. The panel is the only emitter;
+the bezel, cardstock and room are Principled BSDF surfaces lit by area
+lamps, rendered in Cycles, with a roughness map separating matte
+cardstock from the semi-gloss bezel. So the bright-screen / dim-paper
+dynamic range case above is an optical consequence — real falloff
+across the marker layout, real spill from the screen onto the paper,
+real blown highlights — rather than a brightness constant per surface.
+Cycles costs ~6s a frame against Eevee's ~0.8s, and earns it twice
+over: it actually transports light, and it renders pixel-identical
+across runs where Eevee drifted by 1 LSB, which is what lets the
+checked-in fixtures regenerate reproducibly.
+
+What the scene still does **not** model, so no result here is evidence
+about it: geometric depth (the bezel is painted on a flat plane, so it
+never occludes a marker at an oblique angle), lens distortion, rolling
+shutter, and panel content detailed enough to produce false-positive
+quad candidates for the detector.
 
 Blender buys one thing a warped 2D canvas can't: each frame's
 ground-truth aim point is computed from the rendering camera's own pose
@@ -308,11 +408,18 @@ reference rather than against its own arithmetic. `scene.blend` is
 checked in alongside the frames so the scene can be opened and
 inspected rather than only re-derived from a script.
 
-Regenerating needs Blender (`blender-5.2`; override with
+A second fixture, `tests/fixtures/close_range/`, renders the same scene
+from close in, where the bezel markers fall outside the frustum. Its
+poses were chosen to yield 0, 1, 2 and 3 visible markers, so Deck B
+covers "cannot solve at all" through "solvable but extrapolating"
+through "partial but still well-conditioned".
+
+Regenerating either needs Blender (`blender-5.2`; override with
 `$BORESIGHT_BLENDER`). Running the tests does not — Blender is not a
 project dependency:
 
     uv run python -m tests.generate_synthetic_video_fixture
+    uv run python -m tests.generate_close_range_fixture
 
 `detect.py` currently wraps `cv2.aruco.ArucoDetector` only — dictionary
 match and corner extraction, no cornerSubPix refinement or

@@ -1,0 +1,126 @@
+{
+  "image_size": [
+    1280.0,
+    720.0
+  ],
+  "screen_size_mm": [
+    1220.0,
+    686.0
+  ],
+  "marker_size_mm": 80.0,
+  "marker_layout_mm": {
+    "0": [
+      -120.0,
+      -120.0
+    ],
+    "1": [
+      1260.0,
+      -120.0
+    ],
+    "2": [
+      1260.0,
+      726.0
+    ],
+    "3": [
+      -120.0,
+      726.0
+    ],
+    "4": [
+      570.0,
+      -120.0
+    ],
+    "5": [
+      1260.0,
+      303.0
+    ],
+    "6": [
+      570.0,
+      726.0
+    ],
+    "7": [
+      -120.0,
+      303.0
+    ]
+  },
+  "camera_fov_deg": 45.0,
+  "degradation": {
+    "base_seed": 0,
+    "blur_kernel": 5,
+    "blur_sigma": 1.0,
+    "noise_sigma": 4.0
+  },
+  "jpeg_quality": 88,
+  "blender": "blender-5.2",
+  "frames": [
+    {
+      "frame": 1,
+      "file": "frame_0001.jpg",
+      "label": "centre, 1200mm",
+      "expected_markers_when_generated": 0,
+      "aim_point_screen_mm": [
+        610.0,
+        343.0
+      ]
+    },
+    {
+      "frame": 2,
+      "file": "frame_0002.jpg",
+      "label": "centre, 1600mm",
+      "expected_markers_when_generated": 0,
+      "aim_point_screen_mm": [
+        610.0,
+        343.0
+      ]
+    },
+    {
+      "frame": 3,
+      "file": "frame_0003.jpg",
+      "label": "left edge, 1300mm",
+      "expected_markers_when_generated": 1,
+      "aim_point_screen_mm": [
+        80.0,
+        343.0
+      ]
+    },
+    {
+      "frame": 4,
+      "file": "frame_0004.jpg",
+      "label": "top edge, 1400mm",
+      "expected_markers_when_generated": 1,
+      "aim_point_screen_mm": [
+        610.0,
+        80.0
+      ]
+    },
+    {
+      "frame": 5,
+      "file": "frame_0005.jpg",
+      "label": "top-left, 1200mm",
+      "expected_markers_when_generated": 2,
+      "aim_point_screen_mm": [
+        150.0,
+        100.0
+      ]
+    },
+    {
+      "frame": 6,
+      "file": "frame_0006.jpg",
+      "label": "bottom-right, 1300mm",
+      "expected_markers_when_generated": 2,
+      "aim_point_screen_mm": [
+        1100.0,
+        600.0
+      ]
+    },
+    {
+      "frame": 7,
+      "file": "frame_0007.jpg",
+      "label": "top-left, 1500mm",
+      "expected_markers_when_generated": 3,
+      "aim_point_screen_mm": [
+        150.0,
+        100.0
+      ]
+    }
+  ]
+}

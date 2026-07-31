@@ -1,4 +1,11 @@
-"""End-to-end test of the full pipeline over a checked-in synthetic video.
+"""DECK A (full visibility): the pipeline over a checked-in synthetic video.
+
+Evidence for: what the system achieves with the whole marker layout in
+frame. Tolerances here are deliberately tight -- this deck is the
+statement of best-case accuracy, and must not be loosened to
+accommodate the partial-visibility deck (test_solve_partial_markers.py),
+which measures a different and much weaker regime.
+
 
 `add-homography-solver` deferred the video case explicitly: solve.py was
 only ever exercised one frame at a time, which says nothing about how
@@ -91,6 +98,7 @@ def solved_track(manifest: dict) -> dict:
 
     recovered = []
     detected_counts = []
+    inside_hull = []
     started = time.perf_counter()
     for image in frames:
         # README's pipeline starts by going to greyscale; the fixture
@@ -111,7 +119,9 @@ def solved_track(manifest: dict) -> dict:
                     (screen_point, (float(image_point[0]), float(image_point[1])))
                 )
 
-        recovered.append(solve(correspondences, image_size).aim_point_mm)
+        result = solve(correspondences, image_size)
+        recovered.append(result.aim_point_mm)
+        inside_hull.append(result.aim_point_inside_hull)
     elapsed_s = time.perf_counter() - started
 
     return {
@@ -121,9 +131,21 @@ def solved_track(manifest: dict) -> dict:
             dtype=np.float64,
         ),
         "detected_counts": detected_counts,
+        "inside_hull": inside_hull,
         "elapsed_s": elapsed_s,
         "frame_count": len(frames),
     }
+
+
+def test_every_solve_is_well_conditioned(solved_track: dict):
+    """States the good case explicitly rather than leaving it implied.
+
+    With the layout surrounding the panel, the aim point is enclosed by
+    the marker corners on every frame, so it is interpolated. That is
+    *why* this deck's tolerances can be tight, and it is the property
+    the partial-visibility deck shows the system losing.
+    """
+    assert all(solved_track["inside_hull"])
 
 
 def test_every_frame_is_solvable(solved_track: dict):

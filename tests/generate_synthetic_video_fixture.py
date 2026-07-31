@@ -28,9 +28,23 @@ solve.py uses to reconstruct it.
 The scene follows README's markers.toml convention: a 16:9 panel with
 screen-mm origin at the top-left of the ACTIVE display area, and the
 markers printed on white cardstock stuck to the bezel outside it, hence
-their negative coordinates. The panel is lit and colourful and the room
-behind it is dim, which is README's "Known failure modes" dynamic-range
-case -- bright screen next to dim paper -- rather than a clean render.
+their negative coordinates.
+
+Lighting is real: the panel is the only emitter, and the bezel,
+cardstock and room wall are Principled BSDF surfaces lit by area lamps,
+rendered in Cycles. So README's dominant failure mode -- a bright screen
+beside dim paper in a dim room -- arrives as an optical consequence,
+with real falloff across the layout, real spill from the screen onto the
+cardstock, and real blown highlights, instead of brightness constants
+and a gradient painted on in 2D afterwards. A roughness map separates
+matte cardstock from the semi-gloss bezel, which is what README's
+"Matte substrate only. Never glossy" warning is about.
+
+What the scene still does NOT model, so nothing here should be read as
+evidence about it: geometric depth (the bezel is painted on a flat
+plane, so it never occludes a marker at an oblique angle), lens
+distortion, rolling shutter, and panel content detailed enough to
+generate false-positive quad candidates.
 """
 
 from __future__ import annotations
@@ -100,22 +114,55 @@ MARKER_LAYOUT_MM = {
     7: (_MARKER_LEFT, _MID_Y),
 }
 
-# Bright panel, dim paper, dimmer room: README calls this dynamic range
-# case the dominant real-world problem, so the fixture states it as an
-# explicit ratio rather than leaving it to a lighting accident.
-EMISSION_STRENGTH = {"screen": 1.6, "bezel": 0.42, "room": 0.3}
+# The panel is the only emitter; everything else is a lit surface. This
+# is README's dominant failure mode -- a bright screen beside dim paper
+# in a dim room -- produced optically, so the blown highlights, the
+# falloff across the bezel and the screen's spill onto the cardstock all
+# follow from the scene instead of being painted on afterwards.
+SCREEN_EMISSION_STRENGTH = 5.0
 
-# Same failure modes as the photo fixture (README's "Known failure
-# modes"): uneven exposure, blur, sensor noise. Noise is seeded per
-# frame so successive frames differ the way a real sensor's would,
-# while the sequence as a whole stays reproducible.
+# Matte cardstock against a semi-gloss bezel: README's "Matte substrate
+# only. Never glossy" distinction, as an actual surface property.
+ROUGHNESS = {"bezel": 0.35, "cardstock": 0.88}
+
+# Dim, warm room lighting from one side plus a cooler fill, so
+# illumination across the marker layout is genuinely uneven.
+# Energies are ~1e7 because 1 unit == 1mm while Cycles reads distance as
+# metres for falloff; see build_lights() in blender_video_scene.py.
+LIGHTS = [
+    {
+        "name": "RoomLamp",
+        "size": [1200.0, 800.0],
+        "energy": 6.0e7,
+        "color": [1.0, 0.92, 0.82],
+        "location": [-2200.0, -2000.0, 1400.0],
+        "rotation_deg": [62.0, 0.0, -38.0],
+    },
+    {
+        "name": "Fill",
+        "size": [900.0, 900.0],
+        "energy": 1.2e7,
+        "color": [0.82, 0.88, 1.0],
+        "location": [2400.0, -1800.0, -600.0],
+        "rotation_deg": [100.0, 0.0, 52.0],
+    },
+]
+
+CYCLES_SAMPLES = 96
+CYCLES_SEED = 0
+
+# Sensor-side effects only. The exposure gradient that used to live here
+# is gone: uneven illumination is now a property of the lighting rig, so
+# painting a second one on in 2D would double-count it. Blur and noise
+# stay, because those happen in the lens and sensor, after the light has
+# already left the scene. Noise is seeded per frame so successive frames
+# differ the way a real sensor's would, while the sequence as a whole
+# stays reproducible.
 DEGRADATION = {
     "base_seed": 0,
     "blur_kernel": 5,
     "blur_sigma": 1.0,
     "noise_sigma": 4.0,
-    "gradient_lo": 0.82,
-    "gradient_hi": 1.05,
 }
 
 # Frames are stored as JPEG, not PNG: it is what the phone client will
@@ -181,6 +228,27 @@ def _render_tv_face() -> np.ndarray:
         ]
 
     return face
+
+
+def _render_tv_face_roughness() -> np.ndarray:
+    """Per-pixel roughness for the TV face, aligned with its base colour.
+
+    Matte cardstock patches on a semi-gloss bezel -- the distinction
+    README's "Matte substrate only. Never glossy" warning turns on, as a
+    surface property the renderer acts on rather than a note.
+    """
+    width = int(round(TV_SIZE_MM[0]))
+    height = int(round(TV_SIZE_MM[1]))
+    roughness = np.full((height, width), round(ROUGHNESS["bezel"] * 255), np.uint8)
+
+    card = int(round(CARDSTOCK_MM))
+    inset = int(round((CARDSTOCK_MM - MARKER_SIZE_MM) / 2.0))
+    for x_mm, y_mm in MARKER_LAYOUT_MM.values():
+        card_x, card_y = _screen_to_canvas(x_mm - inset, y_mm - inset)
+        roughness[card_y : card_y + card, card_x : card_x + card] = round(
+            ROUGHNESS["cardstock"] * 255
+        )
+    return roughness
 
 
 def _render_screen_content() -> np.ndarray:
@@ -249,12 +317,6 @@ def _render_room() -> np.ndarray:
 
 def _degrade(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     working = image.astype(np.float64)
-    width = working.shape[1]
-
-    gradient = np.linspace(
-        DEGRADATION["gradient_hi"], DEGRADATION["gradient_lo"], width
-    )
-    working *= gradient[np.newaxis, :, np.newaxis]
 
     kernel = DEGRADATION["blur_kernel"]
     working = cv2.GaussianBlur(
@@ -266,11 +328,24 @@ def _degrade(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     return np.clip(working, 0, 255).astype(np.uint8)
 
 
-def _run_blender(work_dir: Path) -> tuple[Path, list[dict]]:
+def render_sequence(
+    work_dir: Path,
+    keyframes: list[dict],
+    frame_count: int,
+    blend_path: Path,
+) -> tuple[Path, list[dict]]:
+    """Render the TV scene along a camera path; returns (raw dir, ground truth).
+
+    Shared with the close-range fixture generator, which needs the same
+    scene and the same ground-truth derivation and differs only in where
+    the camera goes.
+    """
     tv_face_texture = work_dir / "tv_face.png"
+    tv_face_roughness = work_dir / "tv_face_roughness.png"
     screen_texture = work_dir / "screen.png"
     room_texture = work_dir / "room.png"
     cv2.imwrite(str(tv_face_texture), _render_tv_face())
+    cv2.imwrite(str(tv_face_roughness), _render_tv_face_roughness())
     cv2.imwrite(str(screen_texture), _render_screen_content())
     cv2.imwrite(str(room_texture), _render_room())
 
@@ -281,20 +356,24 @@ def _run_blender(work_dir: Path) -> tuple[Path, list[dict]]:
         json.dumps(
             {
                 "tv_face_texture": str(tv_face_texture),
+                "tv_face_roughness_texture": str(tv_face_roughness),
                 "screen_texture": str(screen_texture),
                 "room_texture": str(room_texture),
                 "raw_dir": str(raw_dir),
                 "ground_truth_path": str(ground_truth_path),
-                "blend_path": str(BLEND_PATH),
+                "blend_path": str(blend_path),
                 "screen_size_mm": list(SCREEN_SIZE_MM),
                 "tv_size_mm": list(TV_SIZE_MM),
                 "room_size_mm": list(ROOM_SIZE_MM),
                 "room_distance_mm": ROOM_DISTANCE_MM,
-                "emission_strength": EMISSION_STRENGTH,
+                "screen_emission_strength": SCREEN_EMISSION_STRENGTH,
+                "lights": LIGHTS,
+                "cycles_samples": CYCLES_SAMPLES,
+                "cycles_seed": CYCLES_SEED,
                 "resolution": list(RESOLUTION),
                 "camera_fov_deg": CAMERA_FOV_DEG,
-                "frame_count": FRAME_COUNT,
-                "keyframes": KEYFRAMES,
+                "frame_count": frame_count,
+                "keyframes": keyframes,
             },
             indent=2,
         )
@@ -332,7 +411,9 @@ def main() -> None:
         # Raw renders live in a temp dir and are discarded: only the
         # degraded frames are the fixture, and keeping both would double
         # the checked-in bytes for no added coverage.
-        raw_dir, ground_truth = _run_blender(Path(tmp))
+        raw_dir, ground_truth = render_sequence(
+            Path(tmp), KEYFRAMES, FRAME_COUNT, BLEND_PATH
+        )
 
         frames = []
         for entry in ground_truth:
@@ -368,7 +449,10 @@ def main() -> None:
         "bezel_mm": BEZEL_MM,
         "tv_size_mm": list(TV_SIZE_MM),
         "camera_fov_deg": CAMERA_FOV_DEG,
-        "emission_strength": EMISSION_STRENGTH,
+        "screen_emission_strength": SCREEN_EMISSION_STRENGTH,
+        "roughness": ROUGHNESS,
+        "lights": LIGHTS,
+        "cycles_samples": CYCLES_SAMPLES,
         "keyframes": KEYFRAMES,
         "degradation": DEGRADATION,
         "jpeg_quality": JPEG_QUALITY,

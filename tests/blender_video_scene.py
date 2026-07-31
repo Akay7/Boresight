@@ -18,10 +18,20 @@ markers, and a room wall behind it.
     markers.toml, so bezel markers have negative coordinates. The panel
     is centred on the TV face, which makes the mapping depend only on
     the panel size: world = (x_mm - w/2, 0, h/2 - y_mm).
-  * Surfaces are emissive at differing strengths rather than lit by a
-    lamp rig: that is what reproduces README's dominant failure mode --
-    a bright screen beside dim paper in a dim room -- as an explicit,
-    tunable number instead of an accident of lighting.
+  * The bezel, the printed cardstock and the room wall are real
+    Principled BSDF surfaces lit by area lamps; only the panel is
+    emissive, because a screen genuinely emits. That is what makes
+    README's dominant failure mode -- a bright screen beside dim paper
+    in a dim room -- an actual optical consequence with real falloff,
+    highlights and blown highlights, rather than three brightness
+    constants. A roughness map distinguishes matte cardstock from the
+    semi-gloss bezel, the distinction README's "matte substrate only"
+    warning turns on.
+  * Rendered with Cycles on CPU at a fixed seed. Cycles is slower than
+    Eevee (~6s vs ~0.8s a frame) but was verified pixel-identical
+    across independent runs, where Eevee differed by 1 LSB -- and the
+    fixtures are checked in on the promise that they regenerate
+    reproducibly.
   * Ground truth per frame is the intersection of the camera's optical
     axis with the panel plane, computed from the evaluated camera
     transform -- never from cv2/findHomography, so it stays an
@@ -47,8 +57,8 @@ def world_to_screen_mm(world_x: float, world_z: float, screen_size_mm):
     return (world_x + width / 2.0, height / 2.0 - world_z)
 
 
-def _emissive_image_plane(name, image_path, width, height, location, strength):
-    """A flat, axis-aligned quad in world XZ textured with an image.
+def _add_plane(name, width, height, location):
+    """A flat, axis-aligned quad in world XZ.
 
     size=1.0 spans -0.5..+0.5, so scaling by (width, height) yields
     exactly width x height. Scaling a size=1 plane by N gives N, not 2N
@@ -61,22 +71,62 @@ def _emissive_image_plane(name, image_path, width, height, location, strength):
     plane.name = name
     plane.scale = (width, height, 1.0)
     plane.rotation_euler = (math.radians(90), 0, 0)
+    return plane
 
+
+def _load_texture(tree, image_path, non_color=False):
     image = bpy.data.images.load(image_path)
-    material = bpy.data.materials.new(f"{name}Material")
-    material.use_nodes = True
-    tree = material.node_tree
-    tree.nodes.clear()
-    output = tree.nodes.new("ShaderNodeOutputMaterial")
-    emission = tree.nodes.new("ShaderNodeEmission")
-    emission.inputs["Strength"].default_value = strength
-    texture = tree.nodes.new("ShaderNodeTexImage")
-    texture.image = image
+    if non_color:
+        # Roughness is data, not colour; letting the colour transform
+        # touch it would skew the matte/gloss split.
+        image.colorspace_settings.name = "Non-Color"
+    node = tree.nodes.new("ShaderNodeTexImage")
+    node.image = image
     # Linear, not Closest: these textures are minified (a 1540px canvas
     # across ~700px of frame) and nearest-neighbour sampling aliases the
     # ArUco bit cells badly enough to stop most markers decoding.
-    texture.interpolation = "Linear"
-    tree.links.new(texture.outputs["Color"], emission.inputs["Color"])
+    node.interpolation = "Linear"
+    return node
+
+
+def _new_material(name):
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    tree = material.node_tree
+    tree.nodes.clear()
+    return material, tree, tree.nodes.new("ShaderNodeOutputMaterial")
+
+
+def _surface_plane(name, image_path, width, height, location, roughness_path=None):
+    """A real (non-emissive) surface, lit by the scene's lamps."""
+    plane = _add_plane(name, width, height, location)
+    material, tree, output = _new_material(f"{name}Material")
+
+    bsdf = tree.nodes.new("ShaderNodeBsdfPrincipled")
+    base = _load_texture(tree, image_path)
+    tree.links.new(base.outputs["Color"], bsdf.inputs["Base Color"])
+    if roughness_path is None:
+        bsdf.inputs["Roughness"].default_value = 0.9
+    else:
+        # Per-pixel roughness: matte cardstock against a semi-gloss
+        # bezel, so the two catch light differently the way real paper
+        # and real plastic do.
+        rough = _load_texture(tree, roughness_path, non_color=True)
+        tree.links.new(rough.outputs["Color"], bsdf.inputs["Roughness"])
+    tree.links.new(bsdf.outputs["BSDF"], output.inputs["Surface"])
+    plane.data.materials.append(material)
+    return plane
+
+
+def _emissive_plane(name, image_path, width, height, location, strength):
+    """The panel. A screen emits; everything else in the scene is lit."""
+    plane = _add_plane(name, width, height, location)
+    material, tree, output = _new_material(f"{name}Material")
+
+    emission = tree.nodes.new("ShaderNodeEmission")
+    emission.inputs["Strength"].default_value = strength
+    colour = _load_texture(tree, image_path)
+    tree.links.new(colour.outputs["Color"], emission.inputs["Color"])
     tree.links.new(emission.outputs["Emission"], output.inputs["Surface"])
     plane.data.materials.append(material)
     return plane
@@ -86,35 +136,58 @@ def build_scene_geometry(config):
     screen_size_mm = config["screen_size_mm"]
     tv_size_mm = config["tv_size_mm"]
     room_size_mm = config["room_size_mm"]
-    strengths = config["emission_strength"]
 
     # Bezel + printed markers. Behind the panel, which covers its middle.
-    _emissive_image_plane(
+    _surface_plane(
         "TVFace",
         config["tv_face_texture"],
         tv_size_mm[0],
         tv_size_mm[1],
         (0.0, 0.0, 0.0),
-        strengths["bezel"],
+        roughness_path=config["tv_face_roughness_texture"],
     )
     # The lit panel, 1mm proud of the bezel so it wins the depth test.
-    _emissive_image_plane(
+    # In Cycles this also spills real light onto the surrounding bezel
+    # and cardstock, which is the actual "bright screen next to paper"
+    # mechanism rather than a stand-in for it.
+    _emissive_plane(
         "Panel",
         config["screen_texture"],
         screen_size_mm[0],
         screen_size_mm[1],
         (0.0, -1.0, 0.0),
-        strengths["screen"],
+        config["screen_emission_strength"],
     )
     # Room wall well behind the TV, so it parallaxes as the camera moves.
-    _emissive_image_plane(
+    _surface_plane(
         "RoomWall",
         config["room_texture"],
         room_size_mm[0],
         room_size_mm[1],
         (0.0, config["room_distance_mm"], 0.0),
-        strengths["room"],
     )
+
+
+def build_lights(config):
+    """Area lamps standing in for room lighting.
+
+    Energies are large because 1 Blender unit == 1mm here while Cycles
+    reads distance as metres for inverse-square falloff, so a lamp
+    2.5m away is treated as 2.5km away. Scaling energy by ~distance^2
+    compensates; the numbers look absurd and are not.
+    """
+    for spec in config["lights"]:
+        light_data = bpy.data.lights.new(spec["name"], type="AREA")
+        light_data.shape = "RECTANGLE"
+        light_data.size = spec["size"][0]
+        light_data.size_y = spec["size"][1]
+        light_data.energy = spec["energy"]
+        light_data.color = tuple(spec["color"])
+
+        light = bpy.data.objects.new(spec["name"], light_data)
+        bpy.context.scene.collection.objects.link(light)
+        light.location = tuple(spec["location"])
+        light.rotation_euler = tuple(math.radians(a) for a in spec["rotation_deg"])
 
 
 def _set_linear_interpolation(animated_object):
@@ -219,20 +292,21 @@ def main() -> None:
     scene.frame_end = config["frame_count"]
     # Standard, not the default filmic/AgX view transform: those tone-map
     # and desaturate, which would silently rewrite the screen-vs-paper
-    # brightness ratio the emission strengths are chosen to express.
+    # brightness ratio the lighting is set up to produce.
     scene.view_settings.view_transform = "Standard"
-    # Eevee over Cycles: these are unlit emissive planes, so the engines
-    # agree on the projective geometry that matters here, and Eevee
-    # renders it far faster headless.
-    engines = [
-        item.identifier
-        for item in bpy.types.RenderSettings.bl_rna.properties["engine"].enum_items
-    ]
-    scene.render.engine = (
-        "BLENDER_EEVEE_NEXT" if "BLENDER_EEVEE_NEXT" in engines else engines[0]
-    )
+    # Cycles, CPU, fixed seed. Slower than Eevee but it actually
+    # transports light -- the panel illuminating the bezel is the effect
+    # this scene exists to reproduce -- and it renders pixel-identical
+    # across runs, which Eevee did not (1 LSB drift), so the checked-in
+    # fixtures stay reproducible.
+    scene.render.engine = "CYCLES"
+    scene.cycles.device = "CPU"
+    scene.cycles.samples = config["cycles_samples"]
+    scene.cycles.seed = config["cycles_seed"]
+    scene.cycles.use_denoising = True
 
     build_scene_geometry(config)
+    build_lights(config)
     aim_target = build_aim_target(config["keyframes"], screen_size_mm)
     camera = build_camera(aim_target, config["keyframes"], config)
 

@@ -1,4 +1,10 @@
-"""End-to-end test against a checked-in, realistic synthetic photo.
+"""DECK A (full visibility): a checked-in, realistic synthetic photo.
+
+Evidence for: the pipeline surviving degraded imagery -- exposure
+gradient, blur, sensor noise -- with the whole marker layout in frame.
+Partial visibility is the separate concern of
+test_solve_partial_markers.py.
+
 
 No real camera/photo is available yet (markers aren't even printed --
 see README Milestones), so tests/fixtures/synthetic_photo.png is the

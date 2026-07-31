@@ -1,8 +1,14 @@
-"""Stage 2: solve.py exercised through real detection on a synthetic
-image. Markers are rendered into a blank canvas (1 canvas px == 1 mm on
-the screen plane) and warped by a known homography to simulate a camera
+"""DECK A (full visibility): solve.py through real detection on a
+synthetic image.
+
+Markers are rendered into a blank canvas (1 canvas px == 1 mm on the
+screen plane) and warped by a known homography to simulate a camera
 view -- no camera, no real capture, but real detect.py/cv2.aruco corner
 extraction feeds solve.py rather than hand-built points.
+
+Evidence for: detection and solving composing correctly when the whole
+marker layout is visible. Partial visibility is the separate concern of
+test_solve_partial_markers.py.
 """
 
 import cv2
