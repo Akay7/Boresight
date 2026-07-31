@@ -283,12 +283,43 @@ the layout or degradation model) with:
 
     uv run python tests/generate_synthetic_photo_fixture.py
 
+### Synthetic video (per-frame behaviour)
+
+A stateless solver can be right on every frame in isolation and still
+produce a trajectory that jitters, because each frame's homography is
+fitted independently. `tests/test_solve_video_e2e.py` covers that:
+it runs the whole `detect.py` → `solve.py` pipeline over a checked-in
+frame sequence and asserts both per-frame accuracy and that
+consecutive-frame aim points track the known consecutive-frame camera
+motion — no discontinuities the input motion doesn't justify.
+
+The fixture is a Blender render (`tests/fixtures/synthetic_video/`): a
+lit, colourful 16:9 panel, markers printed on white cardstock stuck to
+the bezel *outside* the active area (hence their negative `markers.toml`
+coordinates), and a dim room behind — deliberately the bright-screen /
+dim-paper dynamic range case "Known failure modes" calls dominant.
+Frames are JPEG, which is what the phone will actually stream.
+
+Blender buys one thing a warped 2D canvas can't: each frame's
+ground-truth aim point is computed from the rendering camera's own pose
+— where its optical axis meets the panel plane — with no homography
+involved. So the test checks `solve.py` against an independent
+reference rather than against its own arithmetic. `scene.blend` is
+checked in alongside the frames so the scene can be opened and
+inspected rather than only re-derived from a script.
+
+Regenerating needs Blender (`blender-5.2`; override with
+`$BORESIGHT_BLENDER`). Running the tests does not — Blender is not a
+project dependency:
+
+    uv run python -m tests.generate_synthetic_video_fixture
+
 `detect.py` currently wraps `cv2.aruco.ArucoDetector` only — dictionary
 match and corner extraction, no cornerSubPix refinement or
 undistortPoints yet (those are separate Pipeline steps, still future
-work). Applying `solve.py` per-frame to a real or synthetic video
-stream — performance budget, frame-to-frame stability — is intentionally
-not built yet; it's the natural next step once a video source exists.
+work). Per-frame behaviour over a synthetic frame sequence is covered
+below; what's still missing is a real video source, 1-euro filtering,
+and any wiring into `server.py`.
 
 ## Repo layout
 
@@ -352,10 +383,11 @@ mean the tag sits on the bezel outside the panel.
 - [ ] Marker map calibration tool
 - [x] Homography solve, print screen coordinates: `solve.py` implements
       `findHomography` + RANSAC + inverse-mapped aim point, tested
-      against synthetic correspondences and a synthetic rendered image
-      (see "Homography solving (standalone)") — built ahead of the
-      pipeline above, like cursor injection; not yet wired to a real
-      video/detection source or applied per-frame
+      against synthetic correspondences, a synthetic rendered image, and
+      a Blender-rendered frame sequence covering per-frame accuracy and
+      frame-to-frame coherence (see "Homography solving (standalone)") —
+      built ahead of the pipeline above, like cursor injection; not yet
+      wired to a real video/detection source
 - [ ] Debug overlay with per-frame reprojection error
 - [ ] 1-euro filter tuning
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor

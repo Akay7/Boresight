@@ -1,0 +1,291 @@
+{
+  "image_size": [
+    1280.0,
+    720.0
+  ],
+  "screen_size_mm": [
+    1220.0,
+    686.0
+  ],
+  "marker_size_mm": 80.0,
+  "cardstock_mm": 120.0,
+  "marker_layout_mm": {
+    "0": [
+      -120.0,
+      -120.0
+    ],
+    "1": [
+      1260.0,
+      -120.0
+    ],
+    "2": [
+      1260.0,
+      726.0
+    ],
+    "3": [
+      -120.0,
+      726.0
+    ],
+    "4": [
+      570.0,
+      -120.0
+    ],
+    "5": [
+      1260.0,
+      303.0
+    ],
+    "6": [
+      570.0,
+      726.0
+    ],
+    "7": [
+      -120.0,
+      303.0
+    ]
+  },
+  "bezel_mm": 160.0,
+  "tv_size_mm": [
+    1540.0,
+    1006.0
+  ],
+  "camera_fov_deg": 45.0,
+  "emission_strength": {
+    "screen": 1.6,
+    "bezel": 0.42,
+    "room": 0.3
+  },
+  "keyframes": [
+    {
+      "frame": 1,
+      "aim_screen_mm": [
+        300.0,
+        200.0
+      ],
+      "camera_position": [
+        -450.0,
+        -3000.0,
+        260.0
+      ]
+    },
+    {
+      "frame": 7,
+      "aim_screen_mm": [
+        900.0,
+        240.0
+      ],
+      "camera_position": [
+        250.0,
+        -2900.0,
+        180.0
+      ]
+    },
+    {
+      "frame": 13,
+      "aim_screen_mm": [
+        880.0,
+        500.0
+      ],
+      "camera_position": [
+        420.0,
+        -3100.0,
+        -200.0
+      ]
+    },
+    {
+      "frame": 17,
+      "aim_screen_mm": [
+        340.0,
+        470.0
+      ],
+      "camera_position": [
+        -300.0,
+        -3000.0,
+        -240.0
+      ]
+    },
+    {
+      "frame": 20,
+      "aim_screen_mm": [
+        610.0,
+        343.0
+      ],
+      "camera_position": [
+        0.0,
+        -3200.0,
+        0.0
+      ]
+    }
+  ],
+  "degradation": {
+    "base_seed": 0,
+    "blur_kernel": 5,
+    "blur_sigma": 1.0,
+    "noise_sigma": 4.0,
+    "gradient_lo": 0.82,
+    "gradient_hi": 1.05
+  },
+  "jpeg_quality": 88,
+  "blender": "blender-5.2",
+  "frames": [
+    {
+      "frame": 1,
+      "file": "frame_0001.jpg",
+      "aim_point_screen_mm": [
+        300.0,
+        200.0
+      ]
+    },
+    {
+      "frame": 2,
+      "file": "frame_0002.jpg",
+      "aim_point_screen_mm": [
+        400.0,
+        206.6666717529297
+      ]
+    },
+    {
+      "frame": 3,
+      "file": "frame_0003.jpg",
+      "aim_point_screen_mm": [
+        500.00000762939453,
+        213.3333282470703
+      ]
+    },
+    {
+      "frame": 4,
+      "file": "frame_0004.jpg",
+      "aim_point_screen_mm": [
+        600.0,
+        219.99999237060547
+      ]
+    },
+    {
+      "frame": 5,
+      "file": "frame_0005.jpg",
+      "aim_point_screen_mm": [
+        700.0,
+        226.66666412353516
+      ]
+    },
+    {
+      "frame": 6,
+      "file": "frame_0006.jpg",
+      "aim_point_screen_mm": [
+        800.0,
+        233.3333282470703
+      ]
+    },
+    {
+      "frame": 7,
+      "file": "frame_0007.jpg",
+      "aim_point_screen_mm": [
+        900.0,
+        239.99999237060547
+      ]
+    },
+    {
+      "frame": 8,
+      "file": "frame_0008.jpg",
+      "aim_point_screen_mm": [
+        896.6666564941406,
+        283.3333282470703
+      ]
+    },
+    {
+      "frame": 9,
+      "file": "frame_0009.jpg",
+      "aim_point_screen_mm": [
+        893.3333435058594,
+        326.66666412353516
+      ]
+    },
+    {
+      "frame": 10,
+      "file": "frame_0010.jpg",
+      "aim_point_screen_mm": [
+        890.0,
+        370.0
+      ]
+    },
+    {
+      "frame": 11,
+      "file": "frame_0011.jpg",
+      "aim_point_screen_mm": [
+        886.6666564941406,
+        413.3333282470703
+      ]
+    },
+    {
+      "frame": 12,
+      "file": "frame_0012.jpg",
+      "aim_point_screen_mm": [
+        883.3333435058594,
+        456.6666717529297
+      ]
+    },
+    {
+      "frame": 13,
+      "file": "frame_0013.jpg",
+      "aim_point_screen_mm": [
+        880.0,
+        500.0
+      ]
+    },
+    {
+      "frame": 14,
+      "file": "frame_0014.jpg",
+      "aim_point_screen_mm": [
+        745.0,
+        492.5
+      ]
+    },
+    {
+      "frame": 15,
+      "file": "frame_0015.jpg",
+      "aim_point_screen_mm": [
+        610.0,
+        485.0
+      ]
+    },
+    {
+      "frame": 16,
+      "file": "frame_0016.jpg",
+      "aim_point_screen_mm": [
+        475.0,
+        477.5
+      ]
+    },
+    {
+      "frame": 17,
+      "file": "frame_0017.jpg",
+      "aim_point_screen_mm": [
+        340.0,
+        470.0
+      ]
+    },
+    {
+      "frame": 18,
+      "file": "frame_0018.jpg",
+      "aim_point_screen_mm": [
+        430.0,
+        427.6666717529297
+      ]
+    },
+    {
+      "frame": 19,
+      "file": "frame_0019.jpg",
+      "aim_point_screen_mm": [
+        520.0,
+        385.33333587646484
+      ]
+    },
+    {
+      "frame": 20,
+      "file": "frame_0020.jpg",
+      "aim_point_screen_mm": [
+        610.0,
+        343.0
+      ]
+    }
+  ]
+}
