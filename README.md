@@ -72,8 +72,47 @@ Layout: 8 tags minimum — 4 corners plus 4 edge midpoints. Midpoints matter
 because a narrow-FOV camera at close range will not see the corners.
 Consider a second inner ring for very close play on large displays.
 
-Each position gets a distinct ID. This resolves orientation ambiguity and
-lets the solver identify partial views.
+Each position gets a distinct ID, which is what lets the solver identify
+a partial view: it knows *which* markers it is looking at, not merely
+how many.
+
+### Attaching them
+
+Two mistakes here are silent, so the printable sheet at `GET /markers`
+carries the answers on the page — a diagram of which ID goes where, a
+position label under every tag, and a `▲ TOP` mark above it.
+
+**IDs are positions, not decoration.** `markers.toml` maps each ID to a
+physical location. Swap two tags without changing the file and the
+solver receives a permuted but perfectly self-consistent set of
+correspondences, fits a homography to it happily, and aims somewhere
+else. Nothing reports an error.
+
+**Attach them upright.** ArUco reads a tag's rotation from its own bit
+pattern, so a tag stuck on sideways is still *recognised* — but the
+detector then reports its corners starting from a physical corner you
+did not intend, and they pair with the wrong screen coordinates. Cost
+measured by mutation: permuting every marker's corners costs 1.77mm
+with all eight in view, because RANSAC averages it away across 32
+correspondences, but approaches a full marker's width when only one or
+two are visible. **The fewer tags you rely on, the more orientation
+matters.**
+
+The default reference layout:
+
+           0 ──── 4 ──── 1
+           │              │
+           7    screen    5
+           │              │
+           3 ──── 6 ──── 2
+
+Corners 0–3 clockwise from top-left, then midpoints 4–7 clockwise from
+top. Nothing in the code requires this particular assignment — the
+config file is the source of truth, and the sheet's labels are derived
+from it, so a layout of your own relabels the printout automatically.
+
+Cut on the dashed line, not around the tag: the white margin is the
+quiet zone the detector needs to find the tag's edge at all.
 
 ### Sizing
 
