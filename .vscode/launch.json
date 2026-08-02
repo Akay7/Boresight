@@ -2,26 +2,76 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python: boresight server",
+            // The phone path, via adb rather than the LAN. Run this on
+            // the PC first (works over USB *or* an adb-over-Wi-Fi
+            // connection, and must be re-run whenever the phone
+            // reconnects):
+            //
+            //     adb reverse tcp:7331 tcp:7331
+            //
+            // Then open http://localhost:7331 on the phone. localhost is
+            // always a secure context, so the browser exposes the camera
+            // with no certificate involved -- which is the failure the
+            // config below keeps running into, since browsers disagree
+            // about whether a bypassed self-signed certificate counts as
+            // secure.
+            //
+            // Loopback, so no token is required and none is asked for.
+            // It also drops the Wi-Fi hop out of the round-trip, which
+            // is what makes this the configuration to measure with.
+            "name": "boresight server (localhost, phone via adb reverse)",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/src/boresight/server.py",
+            "args": [
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "7331"
+            ],
+            // debugpy attaches to child processes by default, which
+            // means it rewrites the command used to spawn the marker
+            // overlay -- and a rewritten `-m boresight.overlay` fails
+            // to import, which surfaces on the phone as
+            // "No module named boresight.overlay" from a server that is
+            // plainly running. The overlay is a separate program with
+            // its own event loop; there is nothing here to debug in it.
+            "subProcess": false,
             "console": "integratedTerminal",
             "justMyCode": true
         },
         {
-            "name": "Python: boresight server (uvicorn --reload)",
+            // Reachable from the LAN, over HTTPS so the browser exposes
+            // the camera, with a generated token because the server
+            // refuses to bind a routable address without one. The URL to
+            // open -- token included -- is printed on startup.
+            //
+            // The certificate is self-signed, and some browsers will not
+            // treat such an origin as a secure context even after you
+            // accept the warning, in which case the camera stays
+            // unavailable. Use the config above, or supply a locally
+            // trusted certificate with --certfile/--keyfile (see
+            // mkcert). Also needs the port open in the firewall.
+            "name": "boresight server (LAN + TLS)",
             "type": "debugpy",
             "request": "launch",
-            "module": "uvicorn",
+            "program": "${workspaceFolder}/src/boresight/server.py",
             "args": [
-                "boresight.server:app",
-                "--reload",
                 "--host",
-                "127.0.0.1",
+                "0.0.0.0",
                 "--port",
-                "8000"
+                "7331",
+                "--token-auto",
+                "--tls"
             ],
+            // debugpy attaches to child processes by default, which
+            // means it rewrites the command used to spawn the marker
+            // overlay -- and a rewritten `-m boresight.overlay` fails
+            // to import, which surfaces on the phone as
+            // "No module named boresight.overlay" from a server that is
+            // plainly running. The overlay is a separate program with
+            // its own event loop; there is nothing here to debug in it.
+            "subProcess": false,
             "console": "integratedTerminal",
             "justMyCode": true
         }

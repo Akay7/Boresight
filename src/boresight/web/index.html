@@ -77,6 +77,18 @@
       #message.error { background: #3a1f22; border-left: 3px solid var(--bad); }
       #message.warn { background: #3a3320; border-left: 3px solid var(--warn); }
       #message.info { background: #1c2b3a; border-left: 3px solid #3d7dd8; }
+      .choice { display: flex; gap: 0.35rem; }
+      button.pick {
+        width: auto;
+        margin: 0;
+        padding: 0.35rem 0.7rem;
+        font-size: 0.85rem;
+        font-weight: 500;
+        background: #2a2f37;
+        color: var(--dim);
+      }
+      button.pick[aria-pressed="true"] { background: #3d7dd8; color: #fff; }
+      button.pick[disabled] { opacity: 0.5; }
       code { background: #0e1013; padding: 0.1rem 0.3rem; border-radius: 3px; }
       .links {
         margin-top: 0.8rem;
@@ -95,6 +107,16 @@
     <button id="trigger" disabled>Trigger</button>
 
     <div id="message"></div>
+
+    <div class="panel">
+      <div class="row">
+        <span>Markers</span>
+        <span class="choice">
+          <button type="button" id="source-printed" class="pick">Printed</button>
+          <button type="button" id="source-screen" class="pick">On-screen</button>
+        </span>
+      </div>
+    </div>
 
     <div class="panel">
       <div class="row"><span>Connection</span><span id="stat-connection">idle</span></div>

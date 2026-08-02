@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import cv2
 import numpy as np
@@ -16,7 +16,17 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from boresight.inject import CursorBackend, UinputCursorBackend
+from boresight.layout_source import (
+    DEFAULT_SPEC,
+    LayoutSourceError,
+    marker_map_factory,
+)
 from boresight.marker_map import MarkerMap, load_marker_map
+from boresight.marker_source import (
+    MarkerSource,
+    MarkerSourceController,
+    MarkerSourceError,
+)
 from boresight.markers import router as markers_router
 from boresight.netaccess import (
     TOKEN_QUERY_PARAM,
@@ -50,6 +60,13 @@ class MoveRequest(BaseModel):
     y: float = Field(ge=0.0, le=1.0)
 
 
+class MarkerSourceRequest(BaseModel):
+    # Constrained to the two known values, so an unknown source is a 422
+    # rather than something that reaches the controller. Nothing from
+    # this model ever becomes part of the overlay's command line.
+    source: Literal["printed", "screen"]
+
+
 def get_cursor_backend(request: Request) -> CursorBackend:
     return request.app.state.cursor_backend
 
@@ -62,6 +79,7 @@ def create_app(
     backend_factory: Callable[[], CursorBackend] = UinputCursorBackend,
     marker_map_factory: Callable[[], MarkerMap] = _default_marker_map,
     config: ServerConfig | None = None,
+    display: int | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -78,10 +96,15 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.cursor_backend = backend_factory()
         app.state.marker_map = marker_map_factory()
-        app.state.pipeline = AimPipeline(app.state.marker_map, app.state.cursor_backend)
+        app.state.markers = MarkerSourceController(
+            app.state.cursor_backend, app.state.marker_map, display=display
+        )
         try:
             yield
         finally:
+            # Before the backend closes: an overlay outliving the server
+            # cannot be dismissed by clicking, since it takes no input.
+            app.state.markers.shutdown()
             close = getattr(app.state.cursor_backend, "close", None)
             if close is not None:
                 close()
@@ -115,6 +138,25 @@ def create_app(
     ) -> None:
         backend.move_absolute(move.x, move.y)
 
+    @app.get("/markers/source")
+    def read_marker_source(request: Request) -> dict:
+        return request.app.state.markers.state()
+
+    @app.post("/markers/source")
+    def select_marker_source(selection: MarkerSourceRequest, request: Request) -> dict:
+        controller = request.app.state.markers
+        try:
+            return controller.select(MarkerSource(selection.source))
+        except MarkerSourceError as error:
+            # 409: the request was well-formed and the server simply
+            # cannot be in that state -- an unsupported compositor, the
+            # overlay extra absent, no display. The body carries the
+            # overlay's own words, and the state still reports printed
+            # markers as active, because they are.
+            return JSONResponse(
+                {"detail": str(error), **controller.state()}, status_code=409
+            )
+
     @app.websocket(FRAME_SOCKET_PATH)
     async def stream_frames(websocket: WebSocket) -> None:
         # A browser cannot set headers on a WebSocket handshake, so the
@@ -126,7 +168,7 @@ def create_app(
             return
         await websocket.accept()
         await run_frame_session(
-            websocket, websocket.app.state.pipeline, websocket.app.state.cursor_backend
+            websocket, websocket.app.state.markers, websocket.app.state.cursor_backend
         )
 
     if WEB_DIR.is_dir():
@@ -162,9 +204,15 @@ def _decode_and_solve(
 
 
 async def run_frame_session(
-    websocket: WebSocket, pipeline: AimPipeline, backend: CursorBackend
+    websocket: WebSocket, markers: MarkerSourceController, backend: CursorBackend
 ) -> None:
     """One connection: receive frames, solve the newest, report back.
+
+    Takes the marker source controller rather than a pipeline, and asks
+    it for the current one per frame. Capturing the pipeline here would
+    mean a marker source switched mid-session never reached a phone
+    already streaming -- it would go on solving against the layout that
+    was current when it connected, with nothing to say so.
 
     Two tasks over one slot. The receiver never decodes and never waits
     on the pipeline, so a slow frame cannot apply backpressure to the
@@ -204,7 +252,7 @@ async def run_frame_session(
         while True:
             client_ms, jpeg = await slot.get()
             result, decode_ms, solve_ms = await loop.run_in_executor(
-                None, _decode_and_solve, pipeline, jpeg
+                None, _decode_and_solve, markers.pipeline, jpeg
             )
             stats.decode_ms = decode_ms
             stats.solve_ms = solve_ms
@@ -315,7 +363,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--certfile", type=Path, default=None)
     parser.add_argument("--keyfile", type=Path, default=None)
+    parser.add_argument(
+        "--markers",
+        default=DEFAULT_SPEC,
+        metavar="SOURCE",
+        help="marker layout: 'file', 'file:<path>', or "
+        "'screen:<W>x<H>' for tags drawn on the display by "
+        "`python -m boresight.overlay` (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
+
+    try:
+        layout_factory = marker_map_factory(args.markers)
+    except (LayoutSourceError, OSError, ValueError) as error:
+        parser.exit(2, f"{error}\n")
 
     config = ServerConfig(
         host=args.host,
@@ -350,7 +411,10 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     uvicorn.run(
-        create_app(config=config), host=config.host, port=config.port, **ssl_options
+        create_app(marker_map_factory=layout_factory, config=config),
+        host=config.host,
+        port=config.port,
+        **ssl_options,
     )
     return 0
 

@@ -345,7 +345,7 @@ def test_a_backlog_is_dropped_down_to_its_newest_frame(client: TestClient) -> No
     entries = _manifest(VIDEO_DIR)["frames"][:4]
     payloads = [_frame_bytes(VIDEO_DIR, entry) for entry in entries]
     held = _HeldPipeline()
-    client.app.state.pipeline = held
+    client.app.state.markers._pipeline = held
 
     with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
         socket.send_bytes(pack_frame(CLIENT_MS, payloads[0]))

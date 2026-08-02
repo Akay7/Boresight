@@ -17,6 +17,13 @@ dependencies = [
     "cryptography>=44.0",
 ]
 
+[project.optional-dependencies]
+# The on-screen marker overlay only. Kept out of the core dependencies
+# deliberately: this project uses opencv-python-headless precisely to
+# avoid a GUI stack, and most users run printed markers and never need
+# a toolkit at all. Install with `uv sync --extra overlay`.
+overlay = ["PySide6-Essentials>=6.8"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",

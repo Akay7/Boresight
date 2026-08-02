@@ -31,6 +31,7 @@ const CONFIG = {
 const els = {};
 for (const id of [
   "preview", "start", "trigger", "message", "marker-sheet",
+  "source-printed", "source-screen",
   "stat-connection", "stat-camera", "stat-exposure", "stat-rtt",
   "stat-markers", "stat-aim", "stat-frames", "stat-lost", "stat-skipped",
   "stat-timing", "stat-shots",
@@ -66,18 +67,33 @@ if (!cameraApiAvailable()) {
   // from a constant, so the adb line stays correct when the server is
   // started on a non-default --port.
   const port = location.port || (location.protocol === "https:" ? "443" : "80");
+
+  // Report what the browser actually thinks, rather than assuming.
+  // Plain HTTP and "HTTPS whose certificate this browser will not
+  // accept for a secure context" are different problems with different
+  // fixes, and they are indistinguishable without these two values.
+  const diagnosis =
+    location.protocol === "https:"
+      ? "The page is already HTTPS, so this is the certificate: some " +
+        "browsers refuse to treat a self-signed origin as secure even " +
+        "after you click through the warning. The USB route below " +
+        "avoids certificates entirely and is the reliable fix."
+      : "The page was loaded over plain HTTP, which is never a secure " +
+        "context except on localhost.";
+
   show(
     "error",
     "No camera API on this page.\n\n" +
-      `This page was loaded from ${location.origin}, which the browser ` +
-      "does not treat as a secure context, so it exposes no camera at " +
-      "all. This is not a permission you can grant.\n\n" +
-      "Two ways to fix it:\n" +
-      "  1. Serve over HTTPS — start the server with --tls and accept " +
-      "the certificate warning once.\n" +
-      `  2. Connect the phone by USB and run \`adb reverse tcp:${port} ` +
-      `tcp:${port}\`, then open http://localhost:${port} — localhost is a ` +
-      "secure context, needs no certificate, and removes the Wi-Fi hop."
+      `origin: ${location.origin}\n` +
+      `protocol: ${location.protocol}\n` +
+      `isSecureContext: ${window.isSecureContext}\n\n` +
+      diagnosis +
+      "\n\nTwo ways to fix it:\n" +
+      `  1. USB, no certificate — run \`adb reverse tcp:${port} ` +
+      `tcp:${port}\` on the PC, then open http://localhost:${port} here. ` +
+      "localhost is always a secure context.\n" +
+      "  2. HTTPS — start the server with --tls and accept the " +
+      "certificate warning once. Does not work on every browser."
   );
 }
 
@@ -106,6 +122,63 @@ function socketUrl() {
 // Carrying the token matters: without it the link 401s, and it is
 // guarded exactly when the server is reachable from this phone.
 els["marker-sheet"].href = sameOriginUrl("markers").toString();
+
+// --- Marker source ---------------------------------------------------
+
+// Printed tags, or tags drawn on the display. Selecting on-screen
+// markers starts the overlay on the PC; selecting printed stops it.
+// Available before streaming starts, since it is the sort of thing you
+// would want to set first.
+
+function showMarkerSource(state) {
+  const active = state && state.source;
+  els["source-printed"].setAttribute("aria-pressed", String(active === "printed"));
+  els["source-screen"].setAttribute("aria-pressed", String(active === "screen"));
+}
+
+async function loadMarkerSource() {
+  try {
+    const response = await fetch(sameOriginUrl("markers/source"));
+    if (response.ok) showMarkerSource(await response.json());
+  } catch {
+    // Not worth a message: the page is useful without this, and any
+    // real connection problem will surface when streaming starts.
+  }
+}
+
+async function selectMarkerSource(source) {
+  for (const id of ["source-printed", "source-screen"]) els[id].disabled = true;
+  try {
+    const response = await fetch(sameOriginUrl("markers/source"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source }),
+    });
+    const state = await response.json();
+    // The server reports what is *actually* active, which after a
+    // failure is still the old source. Render that, not what was asked
+    // for -- a control showing "on-screen" while nothing is on the
+    // display would leave the solver using a layout for tags that do
+    // not exist, and present as terrible aim with no visible cause.
+    showMarkerSource(state);
+    if (!response.ok) {
+      show("error", state.detail || "could not change the marker source");
+    } else if (source === "screen") {
+      const size = state.geometry ? state.geometry.screen_px.join("x") : "";
+      show("info", `On-screen markers active${size ? ` on ${size}` : ""}.`);
+    } else {
+      show("info", "Printed markers active.");
+    }
+  } catch (error) {
+    show("error", `Could not change the marker source: ${error.message}`);
+  } finally {
+    for (const id of ["source-printed", "source-screen"]) els[id].disabled = false;
+  }
+}
+
+els["source-printed"].addEventListener("click", () => selectMarkerSource("printed"));
+els["source-screen"].addEventListener("click", () => selectMarkerSource("screen"));
+loadMarkerSource();
 
 function connect() {
   return new Promise((resolve, reject) => {
