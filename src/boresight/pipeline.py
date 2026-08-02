@@ -100,8 +100,21 @@ def _as_grayscale(frame: np.ndarray) -> np.ndarray:
     return frame
 
 
+# Kept off the literal 0.0/1.0 edge, not just inside it. The cursor
+# device is classified as a touchscreen (inject.py) so that positioning
+# lands directly rather than through relative-motion acceleration; the
+# same classification means several desktop environments watch for a
+# pointer reaching the exact screen edge to trigger a bound gesture
+# (KDE's Electric Borders "Show Desktop", touch edge-swipe overview,
+# and similar), which reads as windows minimizing or rearranging
+# themselves for no apparent reason. A margin this small is
+# imperceptible against the accuracy numbers in README's "Marker
+# visibility and accuracy" section.
+EDGE_MARGIN = 0.01
+
+
 def _clamp_unit(value: float) -> float:
-    return min(1.0, max(0.0, value))
+    return min(1.0 - EDGE_MARGIN, max(EDGE_MARGIN, value))
 
 
 class AimPipeline:

@@ -15,7 +15,12 @@ import pytest
 from boresight.detect import DetectedMarker
 from boresight.inject import FakeCursorBackend
 from boresight.marker_map import MarkerMap, load_marker_map
-from boresight.pipeline import DEFAULT_CONFIG_PATH, AimPipeline, FrameOutcome
+from boresight.pipeline import (
+    DEFAULT_CONFIG_PATH,
+    EDGE_MARGIN,
+    AimPipeline,
+    FrameOutcome,
+)
 
 IMAGE_SIZE = (1280, 720)
 PANEL_CENTRE_MM = (610.0, 343.0)
@@ -210,9 +215,9 @@ def test_an_unmapped_marker_is_ignored_and_the_frame_still_solves(
 
 
 def test_an_off_panel_aim_point_is_clamped_and_reported(marker_map, backend) -> None:
-    """Aiming past the edge is ordinary; the cursor should sit at the
+    """Aiming past the edge is ordinary; the cursor should sit near the
     edge rather than freeze. But clamped output is otherwise
-    indistinguishable from an aim at the exact edge, so say so."""
+    indistinguishable from an aim at the near-edge margin, so say so."""
     off_panel_mm = (-250.0, 900.0)
     pipeline = _pipeline(
         marker_map, backend, _detections(marker_map, [0, 1, 2, 3], off_panel_mm)
@@ -220,10 +225,11 @@ def test_an_off_panel_aim_point_is_clamped_and_reported(marker_map, backend) -> 
 
     result = pipeline.process_frame(_frame())
 
+    expected = (EDGE_MARGIN, 1.0 - EDGE_MARGIN)
     assert result.outcome is FrameOutcome.SOLVED
     assert result.clamped
-    assert result.position == pytest.approx((0.0, 1.0), abs=1e-6)
-    assert backend.calls[0] == pytest.approx((0.0, 1.0), abs=1e-6)
+    assert result.position == pytest.approx(expected, abs=1e-6)
+    assert backend.calls[0] == pytest.approx(expected, abs=1e-6)
     # The unclamped truth survives, which is the whole point.
     assert result.aim_point_mm == pytest.approx(off_panel_mm, abs=1e-3)
 
