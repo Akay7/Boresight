@@ -330,14 +330,14 @@ then re-login) and reload udev rules
 
     uv run python -m boresight.server
 
-Binds to `127.0.0.1:8000` only — fine for now since the only client is
+Binds to `127.0.0.1:7331` only — fine for now since the only client is
 `curl` on the same machine. This will need to change once the phone is
 actually in the loop: a phone on Wi-Fi is a separate device and can't
 reach loopback at all. Serving one means binding an address the LAN can
 route to — see "The phone client" below, which is also where the token
 comes in. Move the cursor to screen center:
 
-    curl -X POST http://127.0.0.1:8000/cursor/move \
+    curl -X POST http://127.0.0.1:7331/cursor/move \
       -H 'Content-Type: application/json' \
       -d '{"x": 0.5, "y": 0.5}'
 
@@ -541,7 +541,7 @@ device is in front of a printer without hunting for the URL.
 
 ### Read this first: the camera needs a secure context
 
-**A phone loading `http://192.168.1.20:8000` will find no camera API at
+**A phone loading `http://192.168.1.20:7331` will find no camera API at
 all.** Not a denied permission — `navigator.mediaDevices` is simply
 absent. Browsers expose capture only in a secure context, and a LAN IP
 over plain HTTP is not one. `localhost` is the sole exemption.
@@ -553,10 +553,10 @@ There are two ways through:
 **1. USB, no certificate** — the better path, and the one to measure
 with. Plug the phone in and forward the port:
 
-    adb reverse tcp:8000 tcp:8000
+    adb reverse tcp:7331 tcp:7331
     uv run python -m boresight.server
 
-Then open `http://localhost:8000` on the phone. `localhost` is a secure
+Then open `http://localhost:7331` on the phone. `localhost` is a secure
 context, so there is no certificate, no interstitial, and no Wi-Fi hop
 in the latency you are trying to measure.
 
@@ -566,7 +566,7 @@ in the latency you are trying to measure.
 
 which prints the exact URL to open, token included:
 
-    Open this on the phone:  https://192.168.1.20:8000/?token=xK3f...
+    Open this on the phone:  https://192.168.1.20:7331/?token=xK3f...
 
 The certificate is self-signed, so the phone shows a warning the first
 time. It is generated once into `.boresight/` and reused, so accepting
