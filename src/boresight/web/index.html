@@ -44,6 +44,14 @@
         color: #fff;
       }
       button[disabled] { background: #3a3f47; color: var(--dim); }
+      #trigger {
+        background: #c23b3b;
+        font-size: 1.15rem;
+        padding: 1rem 1.1rem;
+        touch-action: none;
+        user-select: none;
+      }
+      #trigger[disabled] { background: #3a3f47; color: var(--dim); }
       .panel {
         background: #1c1f25;
         border-radius: 6px;
@@ -84,6 +92,7 @@
 
     <video id="preview" playsinline muted autoplay></video>
     <button id="start">Start streaming</button>
+    <button id="trigger" disabled>Trigger</button>
 
     <div id="message"></div>
 
@@ -101,6 +110,7 @@
       <div class="row"><span>Dropped / failed</span><span id="stat-lost">—</span></div>
       <div class="row"><span>Skipped (local)</span><span id="stat-skipped">—</span></div>
       <div class="row"><span>Decode / solve</span><span id="stat-timing">—</span></div>
+      <div class="row"><span>Shots</span><span id="stat-shots">—</span></div>
     </div>
 
     <div class="links">

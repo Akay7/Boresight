@@ -15,6 +15,7 @@ ABS_MAX = 32767
 
 class CursorBackend(Protocol):
     def move_absolute(self, x: float, y: float) -> None: ...
+    def click(self) -> None: ...
 
 
 class CursorBackendUnavailable(RuntimeError):
@@ -34,35 +35,44 @@ class UinputCursorBackend:
                 "evdev is not available (uinput backend requires Linux)"
             ) from exc
 
-        abs_info = AbsInfo(value=0, min=0, max=ABS_MAX, fuzz=0, flat=0, resolution=0)
+        # A stylus hovering over a display tablet: the cursor follows the
+        # pen while it is in proximity, and only a tip-down (BTN_TOUCH)
+        # is a click. That distinction is the whole reason for this
+        # device type. A touchscreen -- the obvious alternative, and
+        # what this backend used first -- has no hover state at all: it
+        # reports a position only while a touch is active, so moving the
+        # cursor meant emitting a BTN_TOUCH down/up per call, and
+        # libinput turns a touchscreen tap into a pointer button
+        # press/release. At frame rate that is ~20 clicks a second
+        # landing wherever the aim point happens to be: windows
+        # activating and minimizing, popups opening, text selecting.
+        #
+        # `resolution` is not decorative here: udev's input_id needs it
+        # to derive a physical size, without which the device is not
+        # tagged ID_INPUT_TABLET and libinput's tablet backend rejects
+        # it ("missing tablet capabilities"). ABS_PRESSURE and
+        # BTN_STYLUS are required for the same reason -- a stylus that
+        # cannot report pressure is not a stylus as far as libinput is
+        # concerned. All verified against a running X11 session.
+        axis = AbsInfo(value=0, min=0, max=ABS_MAX, fuzz=0, flat=0, resolution=100)
+        pressure = AbsInfo(value=0, min=0, max=1023, fuzz=0, flat=0, resolution=0)
         capabilities = {
             ecodes.EV_ABS: [
-                (ecodes.ABS_X, abs_info),
-                (ecodes.ABS_Y, abs_info),
+                (ecodes.ABS_X, axis),
+                (ecodes.ABS_Y, axis),
+                (ecodes.ABS_PRESSURE, pressure),
             ],
-            # A pure-EV_ABS device with no buttons is classified as a
-            # joystick by the kernel/libinput and ignored for pointer
-            # positioning (verified against a running X11 session —
-            # without any EV_KEY capability the writes are silently
-            # dropped). ABS_X/ABS_Y + BTN_TOUCH + INPUT_PROP_DIRECT is
-            # the standard single-touch-touchscreen evdev signature:
-            # udev's input_id tags it ID_INPUT_TOUCHSCREEN=1 and
-            # libinput places the (core) pointer directly at the
-            # reported coordinate. BTN_LEFT alone (no BTN_TOUCH) gets
-            # tagged ID_INPUT_MOUSE=1 and run through relative-motion
-            # acceleration instead; adding BTN_TOOL_PEN/BTN_STYLUS gets
-            # tagged ID_INPUT_TABLET=1, which libinput's tablet backend
-            # then rejects for lacking real stylus/pressure capabilities.
-            # Both were verified against a running X11 session.
-            ecodes.EV_KEY: [ecodes.BTN_TOUCH],
+            ecodes.EV_KEY: [
+                ecodes.BTN_TOOL_PEN,
+                ecodes.BTN_TOUCH,
+                ecodes.BTN_STYLUS,
+            ],
         }
         try:
-            # INPUT_PROP_DIRECT tells libinput this is an absolute
-            # pointer (like a graphics tablet), not a relative mouse.
-            # Without it libinput classifies an ABS+BTN_LEFT device as
-            # type MOUSE and runs its events through pointer
-            # acceleration/relative-delta translation instead of
-            # placing the cursor directly at the reported coordinates.
+            # INPUT_PROP_DIRECT means a *display* tablet, whose surface
+            # maps onto the screen -- so a reported coordinate is a
+            # screen coordinate. Without it the device is an opaque
+            # drawing tablet and libinput is free to map it differently.
             self._device = UInput(
                 capabilities,
                 name="boresight-cursor",
@@ -76,24 +86,70 @@ class UinputCursorBackend:
                 "udev rule)."
             ) from exc
 
+        try:
+            # click()'s own device, deliberately separate from the one
+            # above. Verified against a running X11 session: adding
+            # BTN_LEFT to the ABS_X/Y + BTN_TOUCH + INPUT_PROP_DIRECT
+            # device above changes udev's classification of it from
+            # ID_INPUT_TOUCHSCREEN to ID_INPUT_MOUSE, which would send
+            # move_absolute's positioning back through relative-motion
+            # acceleration instead of the direct placement the touch
+            # capability alone earns it. A second device carrying only
+            # BTN_LEFT -- no ABS/REL axes at all -- was confirmed
+            # (querying the X core pointer's button state via Xlib
+            # before/after a write) to deliver a real button
+            # press/release with no effect on cursor position, since
+            # the OS's pointer position and button state are properties
+            # of one shared core pointer regardless of which device
+            # reports which.
+            self._click_device = UInput(
+                {ecodes.EV_KEY: [ecodes.BTN_LEFT]},
+                name="boresight-trigger",
+            )
+        except OSError as exc:
+            self._device.close()
+            raise CursorBackendUnavailable(
+                "Could not open /dev/uinput for the trigger device."
+            ) from exc
+
         self._ecodes = ecodes
+
+        # Bring the pen into proximity once and leave it there for the
+        # life of the backend. Proximity is what makes the cursor track
+        # the reported coordinate; entering and leaving it per frame
+        # would be a stream of tool-in/tool-out transitions rather than
+        # simple movement.
+        self._device.write(ecodes.EV_KEY, ecodes.BTN_TOOL_PEN, 1)
+        self._device.write(ecodes.EV_ABS, ecodes.ABS_PRESSURE, 0)
+        self._device.syn()
 
     def move_absolute(self, x: float, y: float) -> None:
         abs_x = round(x * ABS_MAX)
         abs_y = round(y * ABS_MAX)
-        # BTN_TOUCH down -> position -> up: the touchscreen device type
-        # only updates the (visible) core pointer position while a touch
-        # is active. A press-move-release per call is the equivalent of
-        # a synthetic tap at the target position.
-        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 1)
+        # Position only. The pen is already in proximity and its tip
+        # never goes down, so this moves the cursor and nothing else --
+        # no BTN_TOUCH, and therefore no click.
         self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_X, abs_x)
         self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_Y, abs_y)
         self._device.syn()
-        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 0)
-        self._device.syn()
+
+    def click(self) -> None:
+        # BTN_LEFT press then release, on the dedicated click device, at
+        # whatever position the last move_absolute call left the
+        # cursor -- a click reports that the trigger was pulled, not a
+        # new position.
+        self._click_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 1)
+        self._click_device.syn()
+        self._click_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 0)
+        self._click_device.syn()
 
     def close(self) -> None:
+        # Leave proximity before going away, so the pen is not left
+        # hovering from the compositor's point of view.
+        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOOL_PEN, 0)
+        self._device.syn()
         self._device.close()
+        self._click_device.close()
 
 
 class FakeCursorBackend:
@@ -101,6 +157,10 @@ class FakeCursorBackend:
 
     def __init__(self) -> None:
         self.calls: list[tuple[float, float]] = []
+        self.clicks: int = 0
 
     def move_absolute(self, x: float, y: float) -> None:
         self.calls.append((x, y))
+
+    def click(self) -> None:
+        self.clicks += 1

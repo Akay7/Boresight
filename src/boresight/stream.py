@@ -110,6 +110,7 @@ class SessionStats:
     inside_hull: bool | None = None
     outcome: str | None = None
     position: tuple[float, float] | None = None
+    triggers: int = 0
 
     # Owned by the slot, which is where dropping actually happens.
     _slot: FrameSlot | None = field(default=None, repr=False)
@@ -153,4 +154,5 @@ class SessionStats:
             "markers_detected": self.markers_detected,
             "inside_hull": self.inside_hull,
             "outcome": self.outcome,
+            "triggers": self.triggers,
         }

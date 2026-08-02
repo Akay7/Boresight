@@ -30,10 +30,10 @@ const CONFIG = {
 
 const els = {};
 for (const id of [
-  "preview", "start", "message", "marker-sheet",
+  "preview", "start", "trigger", "message", "marker-sheet",
   "stat-connection", "stat-camera", "stat-exposure", "stat-rtt",
   "stat-markers", "stat-aim", "stat-frames", "stat-lost", "stat-skipped",
-  "stat-timing",
+  "stat-timing", "stat-shots",
 ]) {
   els[id] = document.getElementById(id);
 }
@@ -62,6 +62,10 @@ function cameraApiAvailable() {
 
 if (!cameraApiAvailable()) {
   els.start.disabled = true;
+  // The port comes from the URL the phone actually opened rather than
+  // from a constant, so the adb line stays correct when the server is
+  // started on a non-default --port.
+  const port = location.port || (location.protocol === "https:" ? "443" : "80");
   show(
     "error",
     "No camera API on this page.\n\n" +
@@ -71,8 +75,8 @@ if (!cameraApiAvailable()) {
       "Two ways to fix it:\n" +
       "  1. Serve over HTTPS — start the server with --tls and accept " +
       "the certificate warning once.\n" +
-      "  2. Connect the phone by USB and run `adb reverse tcp:8000 " +
-      "tcp:8000`, then open http://localhost:8000 — localhost is a " +
+      `  2. Connect the phone by USB and run \`adb reverse tcp:${port} ` +
+      `tcp:${port}\`, then open http://localhost:${port} — localhost is a ` +
       "secure context, needs no certificate, and removes the Wi-Fi hop."
   );
 }
@@ -153,6 +157,7 @@ function onTelemetry(data) {
   set("stat-frames", `${stats.received} / ${stats.processed}`);
   set("stat-lost", `${stats.dropped} / ${stats.failed}`);
   set("stat-timing", `${stats.decode_ms} / ${stats.solve_ms} ms`);
+  set("stat-shots", String(stats.triggers));
 }
 
 function send(payload) {
@@ -266,6 +271,7 @@ function stop() {
   state.socket = null;
   els.start.disabled = false;
   els.start.textContent = "Start streaming";
+  els.trigger.disabled = true;
 }
 
 els.start.addEventListener("click", async () => {
@@ -279,9 +285,20 @@ els.start.addEventListener("click", async () => {
     state.socket = await connect();
     state.timer = setInterval(captureAndSend, 1000 / CONFIG.targetFps);
     els.start.textContent = "Streaming";
+    els.trigger.disabled = false;
     show("info", "Streaming. Aim at the display; the cursor follows the frame centre.");
   } catch (error) {
     stop();
     show("error", `${error.name || "Error"}: ${error.message}`);
   }
+});
+
+// pointerdown rather than click: click waits for pointerup and, on
+// touch, the browser's tap-recognition delay -- a trigger should fire
+// the instant it's pressed. preventDefault plus touch-action: none (in
+// CSS) stops the browser from treating the press as the start of a
+// scroll/zoom gesture instead of a tap on the button.
+els.trigger.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  send(JSON.stringify({ type: "trigger" }));
 });

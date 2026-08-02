@@ -125,7 +125,9 @@ def create_app(
             await websocket.close(code=WS_POLICY_VIOLATION)
             return
         await websocket.accept()
-        await run_frame_session(websocket, websocket.app.state.pipeline)
+        await run_frame_session(
+            websocket, websocket.app.state.pipeline, websocket.app.state.cursor_backend
+        )
 
     if WEB_DIR.is_dir():
         # Mounted last: "/" matches everything, so it must not shadow
@@ -159,7 +161,9 @@ def _decode_and_solve(
     )
 
 
-async def run_frame_session(websocket: WebSocket, pipeline: AimPipeline) -> None:
+async def run_frame_session(
+    websocket: WebSocket, pipeline: AimPipeline, backend: CursorBackend
+) -> None:
     """One connection: receive frames, solve the newest, report back.
 
     Two tasks over one slot. The receiver never decodes and never waits
@@ -184,9 +188,8 @@ async def run_frame_session(websocket: WebSocket, pipeline: AimPipeline) -> None
                 return
             payload = message.get("bytes")
             if payload is None:
-                # Text: control and telemetry. The trigger event will
-                # land here without disturbing frame handling.
-                _handle_control(stats, message.get("text"))
+                # Text: control and telemetry, including the trigger.
+                _handle_control(stats, backend, message.get("text"))
                 continue
             stats.received += 1
             try:
@@ -232,13 +235,19 @@ async def run_frame_session(websocket: WebSocket, pipeline: AimPipeline) -> None
         await asyncio.gather(processor, return_exceptions=True)
 
 
-def _handle_control(stats: SessionStats, text: str | None) -> None:
-    """Client-side telemetry arriving the other way.
+def _handle_control(
+    stats: SessionStats, backend: CursorBackend, text: str | None
+) -> None:
+    """Client-side telemetry and control arriving the other way.
 
     Round-trip time is measured on the phone, because only the phone's
     clock can meaningfully be compared against itself. The server echoes
     each frame's timestamp; the phone subtracts and reports back what it
     measured, so the server's telemetry carries the number too.
+
+    The trigger carries no position of its own -- it fires wherever the
+    last processed frame left the cursor -- so there is nothing to
+    validate beyond the message's type.
     """
     if not text:
         return
@@ -246,11 +255,16 @@ def _handle_control(stats: SessionStats, text: str | None) -> None:
         message = json.loads(text)
     except ValueError:
         return
-    if isinstance(message, dict) and message.get("type") == "rtt":
+    if not isinstance(message, dict):
+        return
+    if message.get("type") == "rtt":
         try:
             stats.round_trip_ms = float(message["ms"])
         except KeyError, TypeError, ValueError:
             return
+    elif message.get("type") == "trigger":
+        backend.click()
+        stats.triggers += 1
 
 
 async def _report(
@@ -331,7 +345,7 @@ def main(argv: list[str] | None = None) -> int:
             "  Warning: serving plain HTTP. The camera will not be available\n"
             "  on the phone -- browsers expose it only in a secure context.\n"
             "  Use --tls, or reach the server as localhost via\n"
-            "  `adb reverse tcp:8000 tcp:8000` over USB.\n",
+            f"  `adb reverse tcp:{config.port} tcp:{config.port}` over USB.\n",
             flush=True,
         )
 

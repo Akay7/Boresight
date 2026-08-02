@@ -246,6 +246,74 @@ def test_malformed_control_text_is_ignored(client: TestClient) -> None:
     assert report["received"] == 1  # text never counts as a frame
 
 
+# --- Trigger ------------------------------------------------------------
+
+
+def test_trigger_message_invokes_click_once(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        socket.receive_json()
+
+    assert backend.clicks == 1
+
+
+def test_repeated_trigger_messages_invoke_click_repeatedly(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        for _ in range(3):
+            socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        socket.receive_json()
+
+    assert backend.clicks == 3
+
+
+def test_trigger_interleaved_with_frames_does_not_disturb_frame_handling(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entries = _manifest(VIDEO_DIR)["frames"][:3]
+    marker_map = load_marker_map(DEFAULT_CONFIG_PATH)
+    expected = replay(VIDEO_DIR, AimPipeline(marker_map, backend))[:3]
+    backend.calls.clear()
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        reports = []
+        for entry in entries:
+            socket.send_text(json.dumps({"type": "trigger"}))
+            socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+            reports.append(socket.receive_json())
+
+    assert [report["outcome"] for report in reports] == [
+        result.outcome.value for result in expected
+    ]
+    assert backend.calls == [result.position for result in expected if result.emitted]
+
+
+def test_stats_report_trigger_count(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        first = socket.receive_json()
+        socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        second = socket.receive_json()
+
+    assert first["triggers"] == 1
+    assert second["triggers"] == 2
+
+
 class _HeldPipeline:
     """Stands in for the real pipeline and blocks inside `process_frame`.
 
