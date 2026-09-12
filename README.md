@@ -72,8 +72,47 @@ Layout: 8 tags minimum — 4 corners plus 4 edge midpoints. Midpoints matter
 because a narrow-FOV camera at close range will not see the corners.
 Consider a second inner ring for very close play on large displays.
 
-Each position gets a distinct ID. This resolves orientation ambiguity and
-lets the solver identify partial views.
+Each position gets a distinct ID, which is what lets the solver identify
+a partial view: it knows *which* markers it is looking at, not merely
+how many.
+
+### Attaching them
+
+Two mistakes here are silent, so the printable sheet at `GET /markers`
+carries the answers on the page — a diagram of which ID goes where, a
+position label under every tag, and a `▲ TOP` mark above it.
+
+**IDs are positions, not decoration.** `markers.toml` maps each ID to a
+physical location. Swap two tags without changing the file and the
+solver receives a permuted but perfectly self-consistent set of
+correspondences, fits a homography to it happily, and aims somewhere
+else. Nothing reports an error.
+
+**Attach them upright.** ArUco reads a tag's rotation from its own bit
+pattern, so a tag stuck on sideways is still *recognised* — but the
+detector then reports its corners starting from a physical corner you
+did not intend, and they pair with the wrong screen coordinates. Cost
+measured by mutation: permuting every marker's corners costs 1.77mm
+with all eight in view, because RANSAC averages it away across 32
+correspondences, but approaches a full marker's width when only one or
+two are visible. **The fewer tags you rely on, the more orientation
+matters.**
+
+The default reference layout:
+
+           0 ──── 4 ──── 1
+           │              │
+           7    screen    5
+           │              │
+           3 ──── 6 ──── 2
+
+Corners 0–3 clockwise from top-left, then midpoints 4–7 clockwise from
+top. Nothing in the code requires this particular assignment — the
+config file is the source of truth, and the sheet's labels are derived
+from it, so a layout of your own relabels the printout automatically.
+
+Cut on the dashed line, not around the tag: the white margin is the
+quiet zone the detector needs to find the tag's edge at all.
 
 ### Sizing
 
@@ -291,14 +330,14 @@ then re-login) and reload udev rules
 
     uv run python -m boresight.server
 
-Binds to `127.0.0.1:8000` only — fine for now since the only client is
+Binds to `127.0.0.1:7331` only — fine for now since the only client is
 `curl` on the same machine. This will need to change once the phone is
 actually in the loop: a phone on Wi-Fi is a separate device and can't
 reach loopback at all. Serving one means binding an address the LAN can
 route to — see "The phone client" below, which is also where the token
 comes in. Move the cursor to screen center:
 
-    curl -X POST http://127.0.0.1:8000/cursor/move \
+    curl -X POST http://127.0.0.1:7331/cursor/move \
       -H 'Content-Type: application/json' \
       -d '{"x": 0.5, "y": 0.5}'
 
@@ -502,7 +541,7 @@ device is in front of a printer without hunting for the URL.
 
 ### Read this first: the camera needs a secure context
 
-**A phone loading `http://192.168.1.20:8000` will find no camera API at
+**A phone loading `http://192.168.1.20:7331` will find no camera API at
 all.** Not a denied permission — `navigator.mediaDevices` is simply
 absent. Browsers expose capture only in a secure context, and a LAN IP
 over plain HTTP is not one. `localhost` is the sole exemption.
@@ -514,10 +553,10 @@ There are two ways through:
 **1. USB, no certificate** — the better path, and the one to measure
 with. Plug the phone in and forward the port:
 
-    adb reverse tcp:8000 tcp:8000
+    adb reverse tcp:7331 tcp:7331
     uv run python -m boresight.server
 
-Then open `http://localhost:8000` on the phone. `localhost` is a secure
+Then open `http://localhost:7331` on the phone. `localhost` is a secure
 context, so there is no certificate, no interstitial, and no Wi-Fi hop
 in the latency you are trying to measure.
 
@@ -527,11 +566,76 @@ in the latency you are trying to measure.
 
 which prints the exact URL to open, token included:
 
-    Open this on the phone:  https://192.168.1.20:8000/?token=xK3f...
+    Open this on the phone:  https://192.168.1.20:7331/?token=xK3f...
 
 The certificate is self-signed, so the phone shows a warning the first
 time. It is generated once into `.boresight/` and reused, so accepting
 it is a one-time cost rather than a per-restart one.
+
+### Opening the port in the firewall
+
+Only for the Wi-Fi path. The USB path above needs no firewall change at
+all — `adb reverse` carries the connection over the USB cable and the
+server never leaves loopback, which is one more reason to start there.
+
+Most desktop Linux ships with a firewall that drops inbound connections
+by default, so the server binds `0.0.0.0` successfully, prints its URL,
+and the phone still cannot reach it. The symptom is unhelpful: the
+phone's browser just spins and times out, and the server logs nothing,
+because the packets never arrive.
+
+Diagnose it before changing anything. On the PC:
+
+    ss -ltnp | grep 7331
+
+If that shows the server listening but the phone times out anyway, it is
+the firewall (or the two devices are on different networks — guest Wi-Fi
+and AP isolation both do this, and no firewall rule will fix that).
+
+**firewalld** (openSUSE, Fedora, RHEL). The examples below use the
+`home` zone, which is the right place for a rule like this: a trusted
+home network, not whatever the machine might join later. Confirm your
+Wi-Fi interface is in it before adding anything — a rule added to a zone
+the interface is not in succeeds, reports success, and changes nothing:
+
+    firewall-cmd --get-active-zones
+
+Try it without persisting first, so a reload or reboot undoes it:
+
+    sudo firewall-cmd --zone=home --add-port=7331/tcp
+
+Once the phone connects, keep it:
+
+    sudo firewall-cmd --zone=home --add-port=7331/tcp --permanent
+    sudo firewall-cmd --reload
+
+**ufw** (Ubuntu, Debian). Scope it to your subnet rather than opening the
+port to everything:
+
+    sudo ufw allow from 192.168.1.0/24 to any port 7331 proto tcp
+
+**Windows** (the future `SendInput` path), in an elevated PowerShell:
+
+    New-NetFirewallRule -DisplayName "Boresight" -Direction Inbound `
+      -LocalPort 7331 -Protocol TCP -Action Allow -Profile Private
+
+Use whatever port you passed to `--port`; 7331 is only the default.
+
+**Scope the rule to your LAN.** What you are exposing is an endpoint
+that moves your mouse and clicks it. The token is what stands in front
+of it, and a firewall rule limited to the local subnet is the second
+layer — worth having, because the token also travels in a URL and ends
+up in browser history. firewalld can be told the same thing precisely:
+
+    sudo firewall-cmd --permanent --zone=home --add-rich-rule='rule family=ipv4 source address=192.168.1.0/24 port port=7331 protocol=tcp accept'
+
+(One line — the rule is a single argument, and a backslash inside the
+quotes would land in the rule text rather than continuing the command.)
+
+To close it again afterwards:
+
+    sudo firewall-cmd --zone=home --remove-port=7331/tcp --permanent
+    sudo firewall-cmd --reload
 
 ### The server will not open itself up without a token
 
@@ -610,6 +714,112 @@ unsolvable frame leaves the cursor where it was rather than inventing a
 position; holding the last good pose and decaying it needs state the
 per-frame path does not have, and is the next thing to build.
 
+## On-screen markers
+
+Instead of printing the tags and sticking them to the bezel, draw them
+on the display. This is the Sinden approach with ArUco instead of a
+white frame, and it removes three costs at once:
+
+- **Nothing to print** at a verified physical size, and nothing to cut
+  or tape to a television.
+- **Nothing to measure.** The positions are known exactly in pixels, so
+  the marker-map calibration milestone does not apply.
+- **No exposure problem.** The tags are emissive, so the dominant
+  failure mode in "Known failure modes" — paper beside a bright panel,
+  auto-exposure chasing the screen, tags underexposing to mud — is not a
+  failure mode they have.
+
+It also relieves the minimum working distance. Printed tags sit
+*outside* the panel, so a close camera loses all of them: measured at
+zero detected markers below 1400mm. On-screen tags sit inside the
+panel, so a close camera keeps seeing them.
+
+    uv sync --extra overlay
+    uv run python -m boresight.server
+
+Then tap **On-screen** in the Markers row on the phone. The server
+starts the overlay, learns the display size from it, and switches the
+solver to match — no second terminal, no restart, and no resolution to
+get right by hand. Tap **Printed** to stop it.
+
+The switch reaches a phone that is already streaming, on the next
+frame, so you can flip between the two while aiming and watch the
+difference.
+
+Starting the overlay this way needs the server running **inside the
+desktop session**, not headless — it has to reach a display. A server
+that cannot will say so on the phone rather than failing quietly.
+
+You can also run the overlay yourself and select the layout at startup,
+which is what a scripted or headless deployment wants:
+
+    uv run python -m boresight.overlay          # one terminal
+    uv run python -m boresight.server --markers screen:1920x1080
+
+`--markers` takes `file` (the shipped printed layout, the default),
+`file:<path>` for one of your own, or `screen:<W>x<H>`. Printed and
+on-screen markers are alternatives, not a migration — nothing about the
+printed path changed.
+
+### What it costs
+
+About **6.5% of the picture**, near-constant across resolutions,
+occluded by eight tags and their quiet-zone patches. Only those patches
+are painted; the rest of the display shows through untouched.
+
+The tag size is derived from README's own sizing table rather than
+picked — roughly 3px per bit cell over a 6x6 grid, allowing for the
+display filling part of the camera frame — and works out at 4.5% of
+screen width. Override with `--tag-px` if your playing distance is
+unusual.
+
+| Display | Tag | Inset | Occludes |
+| --- | --- | --- | --- |
+| 1280x720 | 58 px | 14 px | 6.4% |
+| 1920x1080 | 86 px | 22 px | 6.5% |
+| 2560x1440 | 115 px | 29 px | 6.5% |
+| 3840x2160 | 173 px | 43 px | 6.5% |
+
+### The overlay is transparent to input
+
+Every mouse and keyboard event passes straight through to whatever is
+underneath. That is not a convenience feature — it is the only reason
+this can work at all. Boresight injects its clicks *at the aim point*,
+which is on the display the overlay covers, so an overlay that accepted
+input would swallow every shot the gun fired. It would be shooting its
+own overlay.
+
+### Platform support, and where it stops
+
+| Platform | Status |
+| --- | --- |
+| X11 | Supported |
+| Windows | Supported in code, **never yet run by anyone** |
+| Wayland — KDE, sway, Hyprland | Supported (layer-shell) |
+| Wayland — GNOME | **Not possible.** Mutter does not implement `wlr-layer-shell`, so no client can place a surface above other windows |
+| macOS | No backend |
+
+Where it cannot work the overlay refuses to start and says why, rather
+than showing a window that renders but sits in the normal stacking
+order and eats input. That failure would look like a Boresight bug
+instead of a compositor limitation.
+
+**No overlay can draw above a fullscreen-*exclusive* application**, on
+any platform. Run emulators borderless-windowed. This is the same
+constraint noted in "Cursor injection" for synthetic events reaching
+fullscreen-exclusive titles.
+
+The obvious objection is that FPS counters manage it — RTSS, the Steam
+and Discord overlays, MangoHud. They do, by not being overlays: they run
+*inside* the game process and hook the presentation call
+(`IDXGISwapChain::Present`, `vkQueuePresentKHR`), drawing into the back
+buffer before it reaches the display. That approach would also sidestep
+the Wayland limitation above. It is not built here because a
+software-rendered emulator presents no swapchain to hook, it requires
+launching the game *through* the layer, and on Windows it means DLL
+injection. Worth revisiting if borderless-windowed turns out not to be
+enough.
+
 ## Repo layout
 
 Target layout for the full pipeline — some of this doesn't exist yet.
@@ -639,6 +849,12 @@ a defect invisible to a test suite that always runs from a checkout.
         markers.py            # printable marker SVG, served over HTTP
         solve.py              # homography, RANSAC, aim point
         pipeline.py           # frame -> detect -> solve -> normalize -> inject
+        layout_source.py      # printed layout or on-screen, by config
+        overlay/
+          layout.py           # where on-screen tags go (shared by both sides)
+          render.py           # painting them
+          backend.py          # can this platform host an overlay?
+          qt_backend.py       # the always-on-top, input-transparent window
         inject.py             # uinput backend (+ future SendInput)
         filter.py             # future: 1-euro
         serial_link.py        # future: optional ESP32 HID path
@@ -711,7 +927,9 @@ in, so the two sequences pair positionally.
 - [ ] Detection on a tripod against streamed frames, print raw marker IDs and corners
 - [ ] Marker map calibration tool — the file format and its loader
       (`markers.toml`, `marker_map.py`) exist and ship a reference
-      layout; measuring a real TV into one is still manual
+      layout; measuring a real TV into one is still manual. Only needed
+      for printed markers: on-screen markers know their own positions
+      exactly (see "On-screen markers")
 - [x] Homography solve, print screen coordinates: `solve.py` implements
       `findHomography` + RANSAC + inverse-mapped aim point, tested
       against synthetic correspondences, a synthetic rendered image, and
@@ -724,6 +942,11 @@ in, so the two sequences pair positionally.
       per-frame call, replayable over the checked-in fixtures with
       `python -m boresight.pipeline` (see "Frame to cursor"), and now
       also fed live by the phone over a WebSocket — still unfiltered
+- [x] On-screen markers: `python -m boresight.overlay` draws the tags
+      over the live display, always on top and transparent to mouse and
+      keyboard, with the solver and the renderer sharing one layout
+      function so they cannot disagree (see "On-screen markers") — X11
+      verified offscreen, never yet run against a camera or on Windows
 - [ ] Debug overlay with per-frame reprojection error
 - [ ] 1-euro filter tuning
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
@@ -773,13 +996,6 @@ camera-equipped ESP32-S3 board (e.g. XIAO ESP32S3 Sense) does both on
 one chip, if you want both upgrades at once. Sits behind the same
 `inject.py` / `serial_link.py` interface, selectable by config flag
 alongside the phone path.
-
-**On-screen markers.** Render the tags as a thin border overlay instead of
-printing them. They become emissive, so the exposure problem disappears,
-and their positions are known exactly in screen pixels, so calibration
-disappears too. Costs a few percent of screen area and requires a
-compositing layer. This is the Sinden approach with ArUco instead of a
-white frame.
 
 **Multi-gun.** Marker detection is per-camera and stateless, so two guns
 need no coordination beyond distinct WebSocket connections and device IDs.

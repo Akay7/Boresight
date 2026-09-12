@@ -113,6 +113,20 @@ def test_the_client_page_links_to_the_marker_sheet(
         assert client.get(f"/markers?token={TOKEN}").status_code == 200
 
 
+def test_the_client_page_loads_its_own_script_through_the_guard(
+    backend: FakeCursorBackend,
+) -> None:
+    """The page can't rely on sameOriginUrl() to fetch capture.js -- it
+    hasn't loaded yet. A static <script src="capture.js"> would 401
+    exactly when the server is guarded, which is always, over Wi-Fi --
+    so the page must carry the token into that request itself."""
+    with _client(backend, TOKEN) as client:
+        page = client.get(f"/?token={TOKEN}").text
+
+        assert '<script src="capture.js">' not in page
+        assert "capture.js?token=" in page
+
+
 def test_a_bearer_header_is_accepted_for_http(backend: FakeCursorBackend) -> None:
     """A browser cannot set headers on a WebSocket handshake, which is
     why the query parameter exists at all -- but everything else may use

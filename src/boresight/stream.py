@@ -110,6 +110,13 @@ class SessionStats:
     inside_hull: bool | None = None
     outcome: str | None = None
     position: tuple[float, float] | None = None
+    triggers: int = 0
+
+    # Per connection, never per app or per pipeline: one phone turning
+    # the debug view on must not change what another phone receives, and
+    # the pipeline behind them is shared.
+    debug_enabled: bool = False
+    debug: dict | None = None
 
     # Owned by the slot, which is where dropping actually happens.
     _slot: FrameSlot | None = field(default=None, repr=False)
@@ -137,8 +144,16 @@ class SessionStats:
         echo from its own clock, which is monotonic and only ever
         compared against itself, and reports the result back so the
         server's telemetry carries it too.
+
+        The debug geometry is keyed in only while this session has asked
+        for it. A session that never asked gets a payload with no
+        `debug` key at all rather than a null one, so a client written
+        against the payload as it stands cannot begin half-rendering an
+        overlay it never requested. Present-but-null says something
+        different -- "you asked, and this frame has nothing to show" --
+        and a client clears its overlay on it.
         """
-        return {
+        message = {
             "type": "stats",
             "client_ms": client_ms,
             "x": None if self.position is None else round(self.position[0], 5),
@@ -153,4 +168,8 @@ class SessionStats:
             "markers_detected": self.markers_detected,
             "inside_hull": self.inside_hull,
             "outcome": self.outcome,
+            "triggers": self.triggers,
         }
+        if self.debug_enabled:
+            message["debug"] = self.debug
+        return message

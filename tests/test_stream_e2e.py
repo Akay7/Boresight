@@ -246,6 +246,74 @@ def test_malformed_control_text_is_ignored(client: TestClient) -> None:
     assert report["received"] == 1  # text never counts as a frame
 
 
+# --- Trigger ------------------------------------------------------------
+
+
+def test_trigger_message_invokes_click_once(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        socket.receive_json()
+
+    assert backend.clicks == 1
+
+
+def test_repeated_trigger_messages_invoke_click_repeatedly(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        for _ in range(3):
+            socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        socket.receive_json()
+
+    assert backend.clicks == 3
+
+
+def test_trigger_interleaved_with_frames_does_not_disturb_frame_handling(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entries = _manifest(VIDEO_DIR)["frames"][:3]
+    marker_map = load_marker_map(DEFAULT_CONFIG_PATH)
+    expected = replay(VIDEO_DIR, AimPipeline(marker_map, backend))[:3]
+    backend.calls.clear()
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        reports = []
+        for entry in entries:
+            socket.send_text(json.dumps({"type": "trigger"}))
+            socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+            reports.append(socket.receive_json())
+
+    assert [report["outcome"] for report in reports] == [
+        result.outcome.value for result in expected
+    ]
+    assert backend.calls == [result.position for result in expected if result.emitted]
+
+
+def test_stats_report_trigger_count(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        first = socket.receive_json()
+        socket.send_text(json.dumps({"type": "trigger"}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        second = socket.receive_json()
+
+    assert first["triggers"] == 1
+    assert second["triggers"] == 2
+
+
 class _HeldPipeline:
     """Stands in for the real pipeline and blocks inside `process_frame`.
 
@@ -259,7 +327,7 @@ class _HeldPipeline:
         self.release = threading.Event()
         self.seen: list[int] = []
 
-    def process_frame(self, frame) -> FrameResult:
+    def process_frame(self, frame, *, debug: bool = False) -> FrameResult:
         # A cheap fingerprint that differs per fixture frame, so the
         # test can assert *which* frames survived, not merely how many.
         self.seen.append(int(frame.sum()))
@@ -277,7 +345,7 @@ def test_a_backlog_is_dropped_down_to_its_newest_frame(client: TestClient) -> No
     entries = _manifest(VIDEO_DIR)["frames"][:4]
     payloads = [_frame_bytes(VIDEO_DIR, entry) for entry in entries]
     held = _HeldPipeline()
-    client.app.state.pipeline = held
+    client.app.state.markers._pipeline = held
 
     with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
         socket.send_bytes(pack_frame(CLIENT_MS, payloads[0]))
@@ -324,3 +392,148 @@ def test_a_second_connection_starts_from_zero(
 
     # The cursor kept moving across both sessions; only the counts reset.
     assert len(backend.calls) == 2 * len(entries)
+
+
+# --- Debug geometry -----------------------------------------------------
+
+
+def _send_frame(socket, entry: dict) -> dict:
+    socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+    return socket.receive_json()
+
+
+def test_a_session_that_never_asks_sees_no_debug_key(client: TestClient) -> None:
+    """Absent, not null. A client written against the payload as it
+    stands must not find a key it never asked for and start
+    half-rendering an overlay from it."""
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        report = _send_frame(socket, entry)
+
+    assert "debug" not in report
+    assert report["outcome"] == "solved"
+
+
+def test_debug_geometry_is_delivered_once_asked_for(client: TestClient) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "debug", "enabled": True}))
+        report = _send_frame(socket, entry)
+
+    geometry = report["debug"]
+    assert geometry["image_px"] == [1280, 720]
+    assert geometry["markers"], "a solved frame saw markers"
+    assert all(marker["mapped"] for marker in geometry["markers"])
+    assert len(geometry["screen_quad_px"]) == 4
+    assert len(geometry["cursor_px"]) == 2
+    assert geometry["reprojection_max_px"] is not None
+
+
+def test_the_drawn_cursor_agrees_with_the_reported_position(
+    client: TestClient,
+) -> None:
+    """The end-to-end form of the check the overlay exists for: the
+    emitted position, carried back into the image, must land on the
+    frame centre the aim point was taken from."""
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "debug", "enabled": True}))
+        report = _send_frame(socket, entry)
+
+    assert report["outcome"] == "solved"
+    cursor_x, cursor_y = report["debug"]["cursor_px"]
+    assert (cursor_x, cursor_y) == pytest.approx((1280 / 2, 720 / 2), abs=1.0)
+
+
+def test_debug_geometry_stops_when_turned_off(client: TestClient) -> None:
+    entries = _manifest(VIDEO_DIR)["frames"][:2]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "debug", "enabled": True}))
+        assert "debug" in _send_frame(socket, entries[0])
+
+        socket.send_text(json.dumps({"type": "debug", "enabled": False}))
+        assert "debug" not in _send_frame(socket, entries[1])
+
+
+def test_an_unsolved_frame_carries_nothing_over(client: TestClient) -> None:
+    """The overlay draws onto a live image. A frame that cannot solve
+    must clear the projection rather than leave the last good one in
+    place, or the drawing becomes confidently wrong."""
+    blank = next(
+        entry
+        for entry in _manifest(CLOSE_RANGE_DIR)["frames"]
+        if entry["expected_markers_when_generated"] == 0
+    )
+    solvable = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "debug", "enabled": True}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, solvable)))
+        assert socket.receive_json()["debug"]["screen_quad_px"] is not None
+
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(CLOSE_RANGE_DIR, blank)))
+        report = socket.receive_json()
+
+    assert report["outcome"] != "solved"
+    assert report["debug"]["screen_quad_px"] is None
+    assert report["debug"]["cursor_px"] is None
+    assert report["debug"]["reprojection_max_px"] is None
+
+
+def test_a_corrupt_frame_reports_no_geometry(client: TestClient) -> None:
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "debug", "enabled": True}))
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        assert socket.receive_json()["debug"] is not None
+
+        socket.send_bytes(pack_frame(CLIENT_MS, b"not a jpeg"))
+        report = socket.receive_json()
+
+    assert report["outcome"] == "decode_failed"
+    assert report["debug"] is None
+
+
+def test_enabling_debug_on_one_session_does_not_affect_another(
+    client: TestClient,
+) -> None:
+    """One `AimPipeline` serves every connection. If the debug flag were
+    anywhere but on the session, one phone's overlay would change what
+    another phone's frames compute."""
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as watcher:
+        with client.websocket_connect(FRAME_SOCKET_PATH) as debugger:
+            debugger.send_text(json.dumps({"type": "debug", "enabled": True}))
+            assert "debug" in _send_frame(debugger, entry)
+
+            plain = _send_frame(watcher, entry)
+
+    assert "debug" not in plain
+    assert plain["outcome"] == "solved"
+
+
+def test_a_malformed_debug_message_leaves_the_setting_alone(
+    client: TestClient,
+) -> None:
+    """Same posture as `rtt`: ignore what cannot be read. Guessing would
+    start or stop a debug session nobody asked for."""
+    entries = _manifest(VIDEO_DIR)["frames"][:2]
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({"type": "debug"}))  # no `enabled`
+        socket.send_text(json.dumps({"type": "debug", "enabled": "yes"}))
+        assert "debug" not in _send_frame(socket, entries[0])
+
+        # Still switchable afterwards: the malformed messages changed
+        # nothing rather than wedging the session.
+        socket.send_text(json.dumps({"type": "debug", "enabled": True}))
+        assert "debug" in _send_frame(socket, entries[1])
+
+        socket.send_text(json.dumps({"type": "debug", "enabled": None}))
+        assert "debug" in _send_frame(socket, entries[0])

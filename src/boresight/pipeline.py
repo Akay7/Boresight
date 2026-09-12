@@ -15,6 +15,12 @@ it rests on" and "when there is nothing to solve, emit nothing".
 Holding the last good pose and decaying it -- README's actual answer to
 dropout -- needs state, and belongs to the filtering stage that lands
 on this seam next.
+
+`process_frame` can also be asked for the geometry behind its answer,
+as a `FrameDebug`. That is opt-in per call rather than a property of
+the pipeline, because one `AimPipeline` is shared by every streaming
+session: a flag on the instance would let one client's debug view
+change what another client's frames compute.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ from boresight.marker_map import MarkerMap
 from boresight.solve import (
     Correspondence,
     InsufficientCorrespondencesError,
+    SolveResult,
     solve,
 )
 
@@ -63,6 +70,79 @@ class FrameOutcome(Enum):
     SOLVE_FAILED = "solve_failed"
 
 
+def _round_point(point: Point) -> list[float]:
+    return [round(point[0], 1), round(point[1], 1)]
+
+
+def _round_or_none(value: float | None) -> float | None:
+    return None if value is None else round(value, 2)
+
+
+@dataclass(frozen=True)
+class MarkerDebug:
+    """One detection, as it sat in the image the detector was given."""
+
+    marker_id: int
+    corners_px: tuple[Point, ...]
+
+    # Whether the layout declares this ID. A tag being seen and skipped
+    # and a tag not being seen at all produce the same aim point and
+    # look identical from outside; this is the difference.
+    mapped: bool
+
+
+@dataclass(frozen=True)
+class FrameDebug:
+    """Where the frame's answer came from, in the frame's own pixels.
+
+    Everything here is derived from values the solve already produced,
+    inside the same call and after emission. Nothing is recomputed, so
+    the geometry cannot describe a different solve than the one that
+    moved the cursor.
+    """
+
+    image_size_px: tuple[int, int]
+    markers: tuple[MarkerDebug, ...]
+
+    # Present only when the frame solved. Absent rather than stale: the
+    # consumer draws this over a live image, and last frame's quad over
+    # this frame's picture is a confident lie.
+    screen_quad_px: tuple[Point, ...] | None = None
+    cursor_px: Point | None = None
+    reprojection_error_max_px: float | None = None
+    reprojection_error_mean_px: float | None = None
+
+    def as_message(self) -> dict:
+        """The geometry as it travels to a client that asked for it.
+
+        Coordinates go out at one decimal place. These are drawn onto a
+        preview a few hundred pixels wide, so anything finer is invisible
+        by construction, and this rides the same per-frame telemetry
+        message at the capture frame rate.
+        """
+        return {
+            "image_px": list(self.image_size_px),
+            "markers": [
+                {
+                    "id": marker.marker_id,
+                    "corners_px": [_round_point(c) for c in marker.corners_px],
+                    "mapped": marker.mapped,
+                }
+                for marker in self.markers
+            ],
+            "screen_quad_px": (
+                None
+                if self.screen_quad_px is None
+                else [_round_point(c) for c in self.screen_quad_px]
+            ),
+            "cursor_px": (
+                None if self.cursor_px is None else _round_point(self.cursor_px)
+            ),
+            "reprojection_max_px": _round_or_none(self.reprojection_error_max_px),
+            "reprojection_mean_px": _round_or_none(self.reprojection_error_mean_px),
+        }
+
+
 @dataclass(frozen=True)
 class FrameResult:
     outcome: FrameOutcome
@@ -88,6 +168,11 @@ class FrameResult:
     aim_point_inside_hull: bool | None = None
     aim_point_hull_distance_mm: float | None = None
 
+    # Only when the caller asked for it. None means "not requested",
+    # never "nothing to say" -- a frame that detected nothing still
+    # produces a FrameDebug, with an empty marker list.
+    debug: FrameDebug | None = None
+
     @property
     def emitted(self) -> bool:
         return self.outcome is FrameOutcome.SOLVED
@@ -100,8 +185,33 @@ def _as_grayscale(frame: np.ndarray) -> np.ndarray:
     return frame
 
 
+# Kept off the literal 0.0/1.0 edge, not just inside it. The cursor
+# device is classified as a touchscreen (inject.py) so that positioning
+# lands directly rather than through relative-motion acceleration; the
+# same classification means several desktop environments watch for a
+# pointer reaching the exact screen edge to trigger a bound gesture
+# (KDE's Electric Borders "Show Desktop", touch edge-swipe overview,
+# and similar), which reads as windows minimizing or rearranging
+# themselves for no apparent reason. A margin this small is
+# imperceptible against the accuracy numbers in README's "Marker
+# visibility and accuracy" section.
+EDGE_MARGIN = 0.01
+
+
 def _clamp_unit(value: float) -> float:
-    return min(1.0, max(0.0, value))
+    return min(1.0 - EDGE_MARGIN, max(EDGE_MARGIN, value))
+
+
+def _to_image_px(homography: np.ndarray, points_mm: Sequence[Point]) -> list[Point]:
+    """Screen millimetres -> image pixels.
+
+    `solve.py` fits the homography screen-to-image, so this is its
+    forward direction and needs no inversion -- it is the same matrix
+    that produced the aim point, run the other way.
+    """
+    array = np.array(points_mm, dtype=np.float64).reshape(-1, 1, 2)
+    projected = cv2.perspectiveTransform(array, homography)
+    return [(float(x), float(y)) for x, y in projected[:, 0, :]]
 
 
 class AimPipeline:
@@ -123,18 +233,34 @@ class AimPipeline:
         self._backend = backend
         self._detect = detector
 
-    def process_frame(self, frame: np.ndarray) -> FrameResult:
+    def process_frame(self, frame: np.ndarray, *, debug: bool = False) -> FrameResult:
+        height, width = frame.shape[:2]
+        image_size_px = (int(width), int(height))
+
         detected = self._detect(_as_grayscale(frame))
         if not detected:
             return FrameResult(
                 outcome=FrameOutcome.NO_MARKERS,
                 markers_detected=0,
+                debug=FrameDebug(image_size_px, ()) if debug else None,
             )
 
         correspondences: list[Correspondence] = []
+        detections: list[MarkerDebug] = []
         mapped = 0
         for marker in detected:
             corners_mm = self._map.corners_mm(marker.marker_id)
+            if debug:
+                detections.append(
+                    MarkerDebug(
+                        marker_id=marker.marker_id,
+                        corners_px=tuple(
+                            (float(corner[0]), float(corner[1]))
+                            for corner in marker.corners
+                        ),
+                        mapped=corners_mm is not None,
+                    )
+                )
             if corners_mm is None:
                 # A stray ArUco code in the room is an ordinary thing
                 # to see. Skip it; do not fail the frame over it.
@@ -152,17 +278,19 @@ class AimPipeline:
             "markers_mapped": mapped,
             "markers_ignored": len(detected) - mapped,
         }
+        seen = FrameDebug(image_size_px, tuple(detections)) if debug else None
 
-        height, width = frame.shape[:2]
         try:
             result = solve(correspondences, (float(width), float(height)))
         except InsufficientCorrespondencesError:
             return FrameResult(
-                outcome=FrameOutcome.INSUFFICIENT_CORRESPONDENCES, **counts
+                outcome=FrameOutcome.INSUFFICIENT_CORRESPONDENCES,
+                debug=seen,
+                **counts,
             )
         except ValueError:
             # findHomography declined -- degenerate correspondences.
-            return FrameResult(outcome=FrameOutcome.SOLVE_FAILED, **counts)
+            return FrameResult(outcome=FrameOutcome.SOLVE_FAILED, debug=seen, **counts)
 
         aim_x_mm, aim_y_mm = result.aim_point_mm
         screen_width_mm, screen_height_mm = self._map.screen_size_mm
@@ -178,7 +306,47 @@ class AimPipeline:
             clamped=position != raw,
             aim_point_inside_hull=result.aim_point_inside_hull,
             aim_point_hull_distance_mm=result.aim_point_hull_distance_mm,
+            debug=None if seen is None else self._solved_debug(seen, result, position),
             **counts,
+        )
+
+    def _solved_debug(
+        self, seen: FrameDebug, result: SolveResult, position: Point
+    ) -> FrameDebug:
+        """The solve, placed back in the image it came from.
+
+        `position` is deliberately the *emitted* one -- normalized
+        against the configured screen size and clamped by
+        `_clamp_unit` -- rather than `result.aim_point_mm`. Pushing the
+        aim point back through the homography it was derived from is an
+        identity: it returns the image centre, which is where the
+        consumer's reticle already is, so it could never disagree and
+        would test nothing. Carrying the emitted number back the long
+        way exercises the whole output path, and any gap between it and
+        the image centre is a real disagreement between what was solved
+        and what was sent.
+        """
+        screen_width_mm, screen_height_mm = self._map.screen_size_mm
+        # Clockwise from top-left, matching `Marker.corners_mm`'s order
+        # so both quads are read the same way round.
+        screen_corners_mm = [
+            (0.0, 0.0),
+            (screen_width_mm, 0.0),
+            (screen_width_mm, screen_height_mm),
+            (0.0, screen_height_mm),
+        ]
+        cursor_mm = (position[0] * screen_width_mm, position[1] * screen_height_mm)
+
+        projected = _to_image_px(result.homography, [*screen_corners_mm, cursor_mm])
+        errors = result.reprojection_errors_px
+
+        return FrameDebug(
+            image_size_px=seen.image_size_px,
+            markers=seen.markers,
+            screen_quad_px=tuple(projected[:4]),
+            cursor_px=projected[4],
+            reprojection_error_max_px=max(errors),
+            reprojection_error_mean_px=sum(errors) / len(errors),
         )
 
 

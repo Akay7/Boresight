@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8000
+DEFAULT_PORT = 7331
 DEFAULT_CERT_DIR = Path(".boresight")
 CERT_NAME = "server.crt"
 KEY_NAME = "server.key"
