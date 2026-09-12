@@ -888,12 +888,53 @@ The obvious objection is that FPS counters manage it — RTSS, the Steam
 and Discord overlays, MangoHud. They do, by not being overlays: they run
 *inside* the game process and hook the presentation call
 (`IDXGISwapChain::Present`, `vkQueuePresentKHR`), drawing into the back
-buffer before it reaches the display. That approach would also sidestep
-the Wayland limitation above. It is not built here because a
-software-rendered emulator presents no swapchain to hook, it requires
-launching the game *through* the layer, and on Windows it means DLL
-injection. Worth revisiting if borderless-windowed turns out not to be
-enough.
+buffer before it reaches the display. That approach also sidesteps the
+Wayland limitation above, and is exactly what "Vulkan present overlay"
+below does for titles that present through Vulkan (natively, or via
+DXVK/VKD3D-Proton). It does not help a software-rendered emulator,
+which presents no swapchain to hook, or anything presenting outside
+Vulkan (wined3d's OpenGL path); the window overlay and printed markers
+remain the answer there.
+
+## Vulkan present overlay
+
+A second on-screen-markers backend, for exactly the case above the
+window-based overlay cannot reach: a title running **exclusive
+fullscreen**, where the compositor is bypassed entirely and there is no
+window stack for an overlay window to sit above — hit in practice on
+Blue Estate (Unreal Engine 3 over Proton/DXVK, `Fullscreen=True`), whose
+window carried every correct "stay on top" property and still never
+appeared on screen. This backend draws the same marker patches
+`render_overlay` computes, but from *inside* the game's own process, by
+hooking `vkQueuePresentKHR` through a Vulkan explicit layer — the same
+mechanism MangoHud, RenderDoc and the Steam overlay use. It covers any
+title that presents through real Vulkan calls, which includes
+DXVK/VKD3D-Proton-translated D3D9/11/12 titles as well as native Vulkan
+ones.
+
+It is a separate, optional native component, not part of the default
+install — building it needs a C compiler and CMake, not just `uv sync`:
+
+    cmake -S native/vulkan_overlay -B native/vulkan_overlay/build
+    cmake --build native/vulkan_overlay/build
+
+Then, per game, in Steam's launch options (or any shell launching the
+game directly):
+
+    uv run python -m boresight.overlay.vulkan_backend --screen 1920x1080 -- %command%
+
+This is always **per-launch, explicit activation** — an explicit Vulkan
+layer, named in `VK_INSTANCE_LAYERS` for one process, never installed
+system-wide as an implicit layer that would run for every Vulkan
+application on the machine. A title that does not present via Vulkan,
+or a system with no compatible Vulkan loader, gets the same actionable
+message pattern as the window overlay's own refusals, naming this
+backend's alternatives — the window overlay or printed markers — rather
+than silently drawing nothing.
+
+Full detail — the build, the manifest, manual verification against
+`vkcube`, and the present-hook's design — lives in
+`native/vulkan_overlay/README.md`.
 
 ## Repo layout
 

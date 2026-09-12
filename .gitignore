@@ -2,6 +2,10 @@
 __pycache__/
 dist/
 
+# CMake build output for the optional native components -- never
+# committed, rebuilt on demand (see native/vulkan_overlay/README.md).
+native/*/build/
+
 # Generated TLS certificate and key for the phone path. Machine-local,
 # regenerated on demand, and the key must never be committed.
 .boresight/

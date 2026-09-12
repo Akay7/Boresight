@@ -154,3 +154,89 @@ detail for tasks.md to settle, not a spec-level concern.
   (`native/vulkan_overlay/` + CMake vs. meson, or elsewhere) — narrow
   enough to settle in tasks.md without touching the spec or this
   design's decisions.
+
+## Amendments (from implementation)
+
+**"Tracks the current swapchain" is implemented as safety, not live
+re-layout.** The canvas is generated once, for one resolution, ahead of
+launch (`vulkan_backend.write_canvas`). At `vkCreateSwapchainKHR`, the
+layer compares the new swapchain's extent against the canvas's baked
+width/height: equal, it draws (covering the common case of a swapchain
+recreated at the same size — present-mode changes, minimize/restore,
+HDR metadata updates); different, it logs once and skips drawing for
+that swapchain, exactly like any other "cannot draw here" case, rather
+than positioning a layout computed for the wrong size. This satisfies
+the requirement's safety half in full — a resolution change can never
+produce a mispositioned or stale-looking overlay, only no overlay — but
+not literal live re-layout: an actual resolution change requires
+relaunching so a fresh canvas is written. Re-deriving geometry inside
+the C layer itself was rejected (it would duplicate `render_overlay`'s
+layout math in C, reopening exactly the two-implementations-can-disagree
+problem `marker-overlay` exists to prevent); invoking Python at runtime
+from inside the layer to regenerate the canvas on the fly was considered
+and set aside as disproportionate to a case (an operator changing
+resolution mid-session on a title they are actively using this backend
+for) that relaunching already handles.
+
+**Canvas upload also covers packed 10-bit swapchain formats.**
+Verified against a real desktop session, not just DXVK's usual 8-bit
+UNORM/SRGB families: this project's own development machine (KDE
+Plasma on Wayland, RADV) negotiates `VK_FORMAT_A2R10G10B10_UNORM_PACK32`
+for a plain `vkcube` window. Both that format and its `A2B10G10R10`
+counterpart are still 4 bytes/texel, so `vkCmdCopyImage` between
+same-format images stays legal; the canvas upload path packs each
+grayscale sample into the 10-10-10-2 layout instead of replicating it
+across four 8-bit channels. A swapchain in some other, unrecognized
+format still degrades the same way as any other unsupported case: log
+once, skip drawing, never guess.
+
+**Two real bugs `VK_LAYER_KHRONOS_validation` caught, once it was
+actually available to stack underneath.** Both were invisible running
+against the driver alone — recorded here because they are exactly the
+class of mistake stacking validation exists to catch, and because a
+future change to `overlay_layer.c` reintroducing either would be just
+as invisible without it:
+
+- **Command buffers this layer allocates for itself need their loader
+  dispatch pointer stamped manually.** The loader only does this
+  automatically for objects an application creates through the
+  top-level trampoline; a layer allocating dispatchable objects through
+  its own captured "next" function pointers must stamp them itself,
+  via the `pfnSetDeviceLoaderData` callback the loader passes through
+  `vkCreateDevice`'s pNext chain (`VK_LOADER_DATA_CALLBACK`) — the same
+  mechanism, and the same chain-walking pattern, already used for
+  `VK_LAYER_LINK_INFO`. Without it, the very first `vkBeginCommandBuffer`
+  on a self-allocated command buffer crashed any layer stacked below
+  this one (reproduced with `VK_LAYER_KHRONOS_validation`; invisible
+  with only this layer and the driver, since RADV never itself
+  dereferences that pointer).
+- **Copying into a swapchain image needs `VK_IMAGE_USAGE_TRANSFER_DST_BIT`
+  on that image, which is the application's own choice at
+  `vkCreateSwapchainKHR`, not this layer's.** `vkcube` requests only
+  `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT`, which is a completely
+  reasonable, common choice for an application that never intended
+  anyone to `vkCmdCopyImage` into its swapchain — and made the copy
+  hook's `vkCmdCopyImage`/layout-transition calls invalid regardless of
+  how correctly everything else was implemented. Fixed the same way
+  MangoHud and similar present-hooking layers do: query the surface's
+  `supportedUsageFlags` and, when `TRANSFER_DST` is among them, add it
+  to `imageUsage` before calling through to the real
+  `vkCreateSwapchainKHR` — purely additive, since it only makes a new
+  operation *legal* on the image without changing anything about how
+  the application itself is allowed to use it. A surface that does not
+  support `TRANSFER_DST` (not observed on real WSI implementations, but
+  handled rather than assumed away) degrades the same way as every
+  other "cannot draw here" case: skip, log once, real present
+  unaffected.
+- Also fixed alongside these (found by inspection while everything else
+  was already under scrutiny, not by a specific validation message): a
+  binary semaphore reused across every frame of a swapchain rather than
+  one per swapchain image, which validation flagged separately
+  (`VUID-vkQueueSubmit-pSignalSemaphores-00067`) once the two bugs above
+  no longer prevented reaching that code path at all.
+
+With both fixed, a full `vkcube` run — instance/device/swapchain
+creation, repeated presents, the no-canvas and extent-mismatch degrade
+paths, and the startup-timeout diagnostic — is clean under
+`VK_LAYER_KHRONOS_validation` stacked directly underneath this layer,
+with no messages of any severity.
