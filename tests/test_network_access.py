@@ -127,6 +127,22 @@ def test_the_client_page_loads_its_own_script_through_the_guard(
         assert "capture.js?token=" in page
 
 
+def test_the_client_page_has_an_overlay_margin_control(
+    backend: FakeCursorBackend,
+) -> None:
+    """The stepper exists, and the script wires it to the same route the
+    server exposes for it, the same way marker-source selection is
+    checked above."""
+    with _client(backend, TOKEN) as client:
+        page = client.get(f"/?token={TOKEN}").text
+        script = client.get(f"/capture.js?token={TOKEN}").text
+
+        assert 'id="overlay-margin-down"' in page
+        assert 'id="overlay-margin-up"' in page
+        assert 'id="overlay-margin-value"' in page
+        assert "markers/overlay-margin" in script
+
+
 def test_a_bearer_header_is_accepted_for_http(backend: FakeCursorBackend) -> None:
     """A browser cannot set headers on a WebSocket handshake, which is
     why the query parameter exists at all -- but everything else may use
@@ -198,6 +214,38 @@ def test_the_command_line_exits_rather_than_serving(monkeypatch) -> None:
         server.main(["--host", "0.0.0.0"])
 
     assert caught.value.code == 2
+
+
+def test_the_overlay_margin_flag_reaches_create_app(monkeypatch) -> None:
+    from boresight import server
+
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "create_app",
+        lambda **kwargs: calls.append(kwargs) or object(),
+    )
+
+    server.main(["--overlay-extra-margin-px", "40"])
+
+    assert calls[0]["overlay_extra_margin_px"] == 40
+
+
+def test_the_overlay_margin_flag_defaults_to_zero(monkeypatch) -> None:
+    from boresight import server
+
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
+    calls = []
+    monkeypatch.setattr(
+        server,
+        "create_app",
+        lambda **kwargs: calls.append(kwargs) or object(),
+    )
+
+    server.main([])
+
+    assert calls[0]["overlay_extra_margin_px"] == 0
 
 
 # --- Token comparison -------------------------------------------------

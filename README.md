@@ -507,14 +507,14 @@ blank the cursor in exactly the close-range case the midpoint marker
 ring exists to serve. But the same flag also covers the single-marker
 extrapolation measured 2m off, which clamps to a screen corner and looks
 like a plausible cursor position. Without temporal state there is no
-principled way to tell those apart, which is the argument for the
-1-euro filter being the next thing built.
+principled way to tell those apart — which was the argument for a
+1-euro filter, now added a layer below this one (see "Aim smoothing").
 
-So what's still absent, and deliberately: **no filtering, and no
-hold-last-good-and-decay on dropout.** An unsolvable frame simply leaves
-the cursor where it was rather than inventing a position. There is also
-no real capture source and no wiring into `server.py` — the pipeline is
-the seam those land on, not a substitute for them.
+So what's still absent from `pipeline.py` itself, and deliberately: **no
+filtering, and no hold-last-good-and-decay on dropout.** An unsolvable
+frame simply leaves the cursor where it was rather than inventing a
+position. Smoothing lives outside this module on purpose, so it stays
+true; see "Aim smoothing" for where it actually lives.
 
 Tests are in two layers. `tests/test_pipeline.py` stubs the detector to
 drive each policy branch directly; `tests/test_pipeline_e2e.py` replays
@@ -530,6 +530,49 @@ tolerance, because RANSAC averages a per-marker permutation away across
 32 correspondences. The sparse close-range assertions catch it, since
 there the permutation is the entire fit. Corner order is pinned exactly
 in a unit test; the full-visibility numbers should not be trusted for it.
+
+## Aim smoothing
+
+`one_euro.py` implements a one-euro filter (Casiez et al.) over the
+normalized 2D aim position, and `inject.py`'s `SmoothingCursorBackend`
+wraps it around a `CursorBackend`: `move_absolute` runs its input
+through the filter before forwarding it, `click` passes straight
+through. It lives at that seam rather than inside `pipeline.py` on
+purpose — `AimPipeline` stays exactly as stateless as the section above
+describes, and one `SmoothingCursorBackend`, built once by
+`MarkerSourceController`, keeps the same filter state across a
+marker-source switch instead of resetting it every time the pipeline is
+rebuilt.
+
+The tradeoff is the point: a steady aim is smoothed heavily (frame-to-
+frame detection noise stops reading as visible dribble), while a fast,
+sustained swing to a new target is smoothed much less, so it does not
+feel laggy. Both follow from the same speed-adaptive cutoff — see the
+module docstring for the formula.
+
+`POST /cursor/move` is unaffected: the route keeps the raw, unwrapped
+backend from `app.state.cursor_backend`, so an explicit requested
+coordinate always lands exactly, never smoothed toward wherever
+aim-derived movement last left the filter.
+
+### Holding through a brief dropout
+
+`aim_hold.py`'s `HoldingPipeline` wraps an `AimPipeline`: on a frame
+that does not solve, if a solved frame landed within the last 0.75s, it
+re-sends that same position to the (smoothing-wrapped) cursor backend.
+This exists because of a real platform behaviour, not a solving
+concern — a Wayland compositor hides a pointer that produces no events
+for a while, and an ordinary short dropout (a marker briefly occluded,
+motion blur) would otherwise read as the OS cursor blinking out and
+back. Re-sending an unchanged position through the one-euro filter
+converges to that same position regardless of elapsed time, so holding
+cannot itself introduce a jump — only fresh device traffic. Once the
+window lapses with no new solve, holding stops and the cursor is
+allowed to go idle. `MarkerSourceController` builds a fresh
+`HoldingPipeline` per marker source, so a switch does not carry a held
+position from the old source into the new one. The wire report and
+debug overlay are unaffected either way — a held frame is still
+reported exactly as the unsolved frame it is.
 
 ## The phone client
 
@@ -780,6 +823,38 @@ unusual.
 | 2560x1440 | 115 px | 29 px | 6.5% |
 | 3840x2160 | 173 px | 43 px | 6.5% |
 
+### A monitor whose panel isn't detected
+
+The overlay avoids desktop panels and docks automatically, by asking
+the windowing toolkit for the display's available area. On a
+multi-monitor Linux/X11 or XWayland setup this can under-report: the
+`_NET_WORKAREA` property it reads is one rectangle for the whole
+virtual desktop rather than one per monitor, so a monitor whose panel
+happens to fall outside that single rectangle's reserved band is
+reported as having no reservation at all — confirmed on a real
+multi-monitor machine, where a taskbar visibly covered a tag near a
+monitor's edge despite the overlay's own log reporting nothing
+reserved there.
+
+`--extra-margin-px` shrinks the auto-detected area by that amount on
+every side, on top of whatever was already found — zero by default, no
+effect unless set:
+
+    uv run python -m boresight.overlay --extra-margin-px 50
+
+Threaded through the server too, for the normal (phone-driven) way of
+starting on-screen markers:
+
+    uv run python -m boresight.server --overlay-extra-margin-px 50
+
+The CLI flag only sets a starting value, though — judging whether a tag
+now clears a taskbar means looking at the display, which is where the
+phone is, not the machine running the server. The phone client's
+Markers row has a `−`/`+` stepper for it next to the source buttons:
+adjusting it takes effect immediately, restarting the overlay with the
+new margin if on-screen markers are currently active (`POST
+/markers/overlay-margin`), with no need to touch the server directly.
+
 ### The overlay is transparent to input
 
 Every mouse and keyboard event passes straight through to whatever is
@@ -855,8 +930,8 @@ a defect invisible to a test suite that always runs from a checkout.
           render.py           # painting them
           backend.py          # can this platform host an overlay?
           qt_backend.py       # the always-on-top, input-transparent window
-        inject.py             # uinput backend (+ future SendInput)
-        filter.py             # future: 1-euro
+        inject.py             # uinput backend (+ future SendInput); SmoothingCursorBackend
+        one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
@@ -941,14 +1016,19 @@ in, so the two sequences pair positionally.
       marker map, the solver and cursor injection into one stateless
       per-frame call, replayable over the checked-in fixtures with
       `python -m boresight.pipeline` (see "Frame to cursor"), and now
-      also fed live by the phone over a WebSocket — still unfiltered
+      also fed live by the phone over a WebSocket — smoothed by a layer
+      below it, not by the pipeline itself (see "Aim smoothing")
 - [x] On-screen markers: `python -m boresight.overlay` draws the tags
       over the live display, always on top and transparent to mouse and
       keyboard, with the solver and the renderer sharing one layout
       function so they cannot disagree (see "On-screen markers") — X11
       verified offscreen, never yet run against a camera or on Windows
 - [ ] Debug overlay with per-frame reprojection error
-- [ ] 1-euro filter tuning
+- [x] 1-euro filter tuning: a `CursorBackend` decorator (`inject.py`'s
+      `SmoothingCursorBackend`, over `one_euro.py`) smooths aim-derived
+      cursor movement before it reaches the OS, with defaults tuned by
+      feel rather than measurement; does not affect `POST /cursor/move`
+      (see "Aim smoothing")
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
       directly (uinput, Linux) — built ahead of the pipeline above as a
       standalone proof; not yet wired to real aim data or Mesen

@@ -32,6 +32,7 @@ const els = {};
 for (const id of [
   "preview", "overlay", "start", "trigger", "message", "marker-sheet",
   "source-printed", "source-screen", "debug-on", "debug-off",
+  "overlay-margin-down", "overlay-margin-up", "overlay-margin-value",
   "row-decoded", "row-reprojection", "row-lag",
   "stat-connection", "stat-camera", "stat-exposure", "stat-rtt",
   "stat-markers", "stat-aim", "stat-frames", "stat-lost", "stat-skipped",
@@ -155,7 +156,11 @@ function showMarkerSource(state) {
 async function loadMarkerSource() {
   try {
     const response = await fetch(sameOriginUrl("markers/source"));
-    if (response.ok) showMarkerSource(await response.json());
+    if (response.ok) {
+      const state = await response.json();
+      showMarkerSource(state);
+      showOverlayMargin(state);
+    }
   } catch {
     // Not worth a message: the page is useful without this, and any
     // real connection problem will surface when streaming starts.
@@ -185,6 +190,7 @@ async function selectMarkerSource(source) {
     // display would leave the solver using a layout for tags that do
     // not exist, and present as terrible aim with no visible cause.
     showMarkerSource(state);
+    showOverlayMargin(state);
     if (!response.ok) {
       show("error", state.detail || "could not change the marker source");
     } else if (source === "screen") {
@@ -204,6 +210,55 @@ async function selectMarkerSource(source) {
 els["source-printed"].addEventListener("click", () => selectMarkerSource("printed"));
 els["source-screen"].addEventListener("click", () => selectMarkerSource("screen"));
 loadMarkerSource();
+
+// --- Overlay margin ----------------------------------------------------
+
+// The on-screen overlay's panel-avoidance can under-detect a taskbar on
+// some multi-monitor setups (see README, "A monitor whose panel isn't
+// detected"); this is the manual correction for it. A stepper rather
+// than a text field, like the buttons above -- the value is chosen by
+// looking at the display, not typed from something already known.
+
+const MARGIN_STEP_PX = 10;
+
+function showOverlayMargin(state) {
+  const marginPx = (state && state.overlay_extra_margin_px) || 0;
+  set("overlay-margin-value", `${marginPx}px`);
+}
+
+async function adjustOverlayMargin(deltaPx) {
+  const current = parseInt(els["overlay-margin-value"].textContent, 10) || 0;
+  const next = Math.max(0, current + deltaPx);
+  els["overlay-margin-down"].disabled = true;
+  els["overlay-margin-up"].disabled = true;
+  try {
+    const response = await fetch(sameOriginUrl("markers/overlay-margin"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ extra_margin_px: next }),
+    });
+    const state = await response.json();
+    // Same reasoning as selectMarkerSource: render what the server
+    // reports is actually in effect, not what was asked for.
+    showOverlayMargin(state);
+    showMarkerSource(state);
+    if (!response.ok) {
+      show("error", state.detail || "could not change the overlay margin");
+    }
+  } catch (error) {
+    show("error", `Could not change the overlay margin: ${error.message}`);
+  } finally {
+    els["overlay-margin-down"].disabled = false;
+    els["overlay-margin-up"].disabled = false;
+  }
+}
+
+els["overlay-margin-down"].addEventListener("click", () =>
+  adjustOverlayMargin(-MARGIN_STEP_PX)
+);
+els["overlay-margin-up"].addEventListener("click", () =>
+  adjustOverlayMargin(MARGIN_STEP_PX)
+);
 
 // --- Viewfinder ------------------------------------------------------
 

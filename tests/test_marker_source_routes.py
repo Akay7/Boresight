@@ -320,3 +320,63 @@ def test_a_non_boolean_setting_is_rejected(backend) -> None:
     with _client(backend) as client:
         assert client.post("/debug", json={"enabled": "yes please"}).status_code == 422
         assert client.get("/debug").json() == {"enabled": False}
+
+
+# --- Overlay margin -----------------------------------------------------
+
+
+def test_the_margin_defaults_to_zero_and_can_be_read_via_the_source_state(
+    backend,
+) -> None:
+    with _client(backend) as client:
+        assert client.get("/markers/source").json()["overlay_extra_margin_px"] == 0
+
+
+def test_setting_the_margin_while_printed_updates_the_stored_value(backend) -> None:
+    with _client(backend) as client:
+        response = client.post("/markers/overlay-margin", json={"extra_margin_px": 40})
+
+        assert response.status_code == 200
+        assert response.json()["overlay_extra_margin_px"] == 40
+        assert client.get("/markers/source").json()["overlay_extra_margin_px"] == 40
+
+
+def test_setting_the_margin_while_on_screen_restarts_the_overlay(backend) -> None:
+    with _client(backend) as client:
+        client._patch_launcher()
+        client.post("/markers/source", json={"source": "screen"})
+        assert len(client._launch.started) == 1
+
+        response = client.post("/markers/overlay-margin", json={"extra_margin_px": 40})
+
+        assert response.status_code == 200
+        assert len(client._launch.started) == 2
+        assert client._launch.started[-1][-2:] == ["--extra-margin-px", "40"]
+
+
+def test_a_negative_margin_is_rejected(backend) -> None:
+    with _client(backend) as client:
+        response = client.post("/markers/overlay-margin", json={"extra_margin_px": -1})
+
+        assert response.status_code == 422
+
+
+def test_a_failed_restart_after_a_margin_change_is_reported_as_409(backend) -> None:
+    with _client(backend) as client:
+        client._patch_launcher()
+        client.post("/markers/source", json={"source": "screen"})
+
+        # Swap in a launcher that refuses, matching how a source switch
+        # already reports an overlay that stops working.
+        client.app.state.markers._launcher = _launcher(REFUSES)  # noqa: SLF001
+        response = client.post("/markers/overlay-margin", json={"extra_margin_px": 40})
+
+        assert response.status_code == 409
+        assert response.json()["source"] == "printed"
+
+
+def test_setting_the_margin_requires_the_token(backend) -> None:
+    with _client(backend, token=TOKEN) as client:
+        response = client.post("/markers/overlay-margin", json={"extra_margin_px": 40})
+
+        assert response.status_code == 401

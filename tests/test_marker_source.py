@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from boresight.inject import FakeCursorBackend
+from boresight.inject import FakeCursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
 from boresight.marker_source import (
     MarkerSource,
@@ -95,7 +95,7 @@ def test_the_solved_layout_comes_from_what_the_overlay_reported() -> None:
     controller = _controller(REPORTS_1920)
     try:
         controller.select(MarkerSource.SCREEN)
-        layout = controller.pipeline._map  # noqa: SLF001 - asserting on internals
+        layout = controller.pipeline._pipeline._map  # noqa: SLF001 - internals
 
         assert layout.screen_size_mm == (1920.0, 1080.0)
         assert layout.markers[0].size_mm == 86.0
@@ -112,7 +112,7 @@ def test_switching_back_restores_the_printed_layout() -> None:
 
         assert state["source"] == "printed"
         assert state["overlay_running"] is False
-        assert controller.pipeline._map == PRINTED  # noqa: SLF001
+        assert controller.pipeline._pipeline._map == PRINTED  # noqa: SLF001
     finally:
         controller.shutdown()
 
@@ -252,6 +252,30 @@ def test_a_display_index_is_forced_through_int() -> None:
         _overlay_command("1; rm -rf /")
 
 
+def test_the_controllers_extra_margin_reaches_the_spawned_overlay() -> None:
+    launcher = _stub(REPORTS_1920)
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=launcher, overlay_extra_margin_px=40
+    )
+    try:
+        controller.select(MarkerSource.SCREEN)
+
+        assert launcher.commands[0][-2:] == ["--extra-margin-px", "40"]
+    finally:
+        controller.shutdown()
+
+
+def test_a_zero_extra_margin_omits_the_flag_entirely() -> None:
+    assert _overlay_command(None, 0) == [sys.executable, "-m", "boresight.overlay"]
+
+
+def test_a_nonzero_extra_margin_is_forced_through_int() -> None:
+    assert _overlay_command(None, 40)[-2:] == ["--extra-margin-px", "40"]
+
+    with pytest.raises((ValueError, TypeError)):
+        _overlay_command(None, "1; rm -rf /")
+
+
 def test_a_launcher_failure_is_reported_not_raised_raw() -> None:
     def refuse(*_args, **_kwargs):
         raise OSError("no such executable")
@@ -287,3 +311,94 @@ def test_an_existing_pythonpath_is_kept(monkeypatch) -> None:
 
     assert entries[-1] == "/somewhere/else"
     assert len(entries) == 2
+
+
+# --- Aim smoothing wiring -----------------------------------------------
+
+
+def test_the_backend_is_wrapped_in_a_smoothing_backend() -> None:
+    raw = FakeCursorBackend()
+    controller = MarkerSourceController(raw, PRINTED, launcher=_stub(REPORTS_1920))
+
+    assert isinstance(controller.pipeline._backend, SmoothingCursorBackend)  # noqa: SLF001
+    assert controller.pipeline._backend._backend is raw  # noqa: SLF001
+
+
+def test_a_marker_source_switch_shares_the_same_filter_state() -> None:
+    """The pipeline is rebuilt on every switch; the filter inside its
+    wrapped backend must not be, or a switch would silently reset
+    smoothing."""
+    raw = FakeCursorBackend()
+    controller = MarkerSourceController(raw, PRINTED, launcher=_stub(REPORTS_1920))
+    try:
+        before = controller.pipeline._backend  # noqa: SLF001
+
+        controller.select(MarkerSource.SCREEN)
+        after_switch = controller.pipeline._backend  # noqa: SLF001
+
+        controller.select(MarkerSource.PRINTED)
+        after_switch_back = controller.pipeline._backend  # noqa: SLF001
+
+        assert before is after_switch
+        assert before is after_switch_back
+    finally:
+        controller.shutdown()
+
+
+# --- Overlay margin, set at runtime --------------------------------------
+
+
+def test_setting_the_margin_while_printed_only_updates_the_stored_value() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+
+    state = controller.set_overlay_extra_margin_px(40)
+
+    assert state["source"] == "printed"
+    assert state["overlay_extra_margin_px"] == 40
+    assert controller.state()["overlay_extra_margin_px"] == 40
+
+
+def test_setting_the_margin_while_on_screen_restarts_the_overlay() -> None:
+    launcher = _stub(REPORTS_1920)
+    controller = MarkerSourceController(FakeCursorBackend(), PRINTED, launcher=launcher)
+    try:
+        controller.select(MarkerSource.SCREEN)
+        assert len(launcher.commands) == 1
+
+        state = controller.set_overlay_extra_margin_px(40)
+
+        assert state["source"] == "screen"
+        assert state["overlay_extra_margin_px"] == 40
+        assert len(launcher.commands) == 2  # restarted
+        assert launcher.commands[-1][-2:] == ["--extra-margin-px", "40"]
+    finally:
+        controller.shutdown()
+
+
+def test_a_failed_restart_after_a_margin_change_leaves_printed_active() -> None:
+    """Mirrors `select()`'s own failure handling: a restart the new
+    margin triggers can fail exactly like any other overlay start."""
+
+    def flaky_launcher(body_by_call):
+        calls = iter(body_by_call)
+
+        def launch(command, **kwargs):
+            return _stub(next(calls))(command, **kwargs)
+
+        return launch
+
+    launcher = flaky_launcher([REPORTS_1920, REFUSES])
+    controller = MarkerSourceController(FakeCursorBackend(), PRINTED, launcher=launcher)
+    try:
+        controller.select(MarkerSource.SCREEN)
+
+        with pytest.raises(MarkerSourceError):
+            controller.set_overlay_extra_margin_px(999)
+
+        state = controller.state()
+        assert state["source"] == "printed"
+        assert state["overlay_extra_margin_px"] == 999
+    finally:
+        controller.shutdown()

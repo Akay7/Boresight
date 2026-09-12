@@ -202,6 +202,40 @@ def test_the_entry_point_reports_rather_than_traces(monkeypatch, capsys) -> None
     assert "--extra overlay" in capsys.readouterr().err
 
 
+def test_the_extra_margin_flag_reaches_qt_backend_run(monkeypatch) -> None:
+    from boresight.overlay import qt_backend
+
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 0
+
+    monkeypatch.setattr(qt_backend, "run", fake_run)
+
+    from boresight.overlay.__main__ import main
+
+    assert main(["--extra-margin-px", "40"]) == 0
+    assert calls[0][1]["extra_margin_px"] == 40
+
+
+def test_the_extra_margin_flag_defaults_to_zero(monkeypatch) -> None:
+    from boresight.overlay import qt_backend
+
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 0
+
+    monkeypatch.setattr(qt_backend, "run", fake_run)
+
+    from boresight.overlay.__main__ import main
+
+    assert main([]) == 0
+    assert calls[0][1]["extra_margin_px"] == 0
+
+
 def test_the_entry_point_reports_an_unsupported_environment(
     monkeypatch, capsys
 ) -> None:

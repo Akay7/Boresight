@@ -10,7 +10,18 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from boresight.one_euro import OneEuroFilter
+
 ABS_MAX = 32767
+
+# python-evdev's `UInput` defaults every device to vendor/product/version
+# 1/1/1 (USB) unless told otherwise. Two Boresight devices left at that
+# default present identical hardware identity to the OS -- distinct
+# arbitrary product IDs are all that is needed to tell them apart; see
+# the comment where each is constructed for why that turned out to
+# matter here.
+BORESIGHT_CURSOR_PRODUCT_ID = 0xB051
+BORESIGHT_TRIGGER_PRODUCT_ID = 0xB052
 
 
 class CursorBackend(Protocol):
@@ -77,6 +88,7 @@ class UinputCursorBackend:
                 capabilities,
                 name="boresight-cursor",
                 input_props=[ecodes.INPUT_PROP_DIRECT],
+                product=BORESIGHT_CURSOR_PRODUCT_ID,
             )
         except OSError as exc:
             raise CursorBackendUnavailable(
@@ -88,23 +100,48 @@ class UinputCursorBackend:
 
         try:
             # click()'s own device, deliberately separate from the one
-            # above. Verified against a running X11 session: adding
-            # BTN_LEFT to the ABS_X/Y + BTN_TOUCH + INPUT_PROP_DIRECT
-            # device above changes udev's classification of it from
-            # ID_INPUT_TOUCHSCREEN to ID_INPUT_MOUSE, which would send
-            # move_absolute's positioning back through relative-motion
-            # acceleration instead of the direct placement the touch
-            # capability alone earns it. A second device carrying only
-            # BTN_LEFT -- no ABS/REL axes at all -- was confirmed
-            # (querying the X core pointer's button state via Xlib
-            # before/after a write) to deliver a real button
-            # press/release with no effect on cursor position, since
-            # the OS's pointer position and button state are properties
-            # of one shared core pointer regardless of which device
-            # reports which.
+            # above. Adding BTN_LEFT to the ABS_X/Y + BTN_TOUCH +
+            # INPUT_PROP_DIRECT device above changes udev's
+            # classification of it from ID_INPUT_TOUCHSCREEN to
+            # ID_INPUT_MOUSE, which would send move_absolute's
+            # positioning back through relative-motion acceleration
+            # instead of the direct placement the touch capability
+            # alone earns it.
+            #
+            # REL_X/REL_Y are declared here but never written to. A
+            # button with no motion axis at all was confirmed against a
+            # plain Xorg session (querying the X core pointer's button
+            # state via Xlib before/after a write) to still land on the
+            # shared core pointer -- X11 merges every pointer-capable
+            # device into one core pointer regardless of which one
+            # reports what. Under a Wayland compositor, though, libinput
+            # itself decides per device whether BTN_LEFT means anything:
+            # without a motion capability it classifies the device as a
+            # bare keyboard, and the button event never reaches an
+            # application as a click. REL_X/REL_Y earn it
+            # LIBINPUT_DEVICE_CAP_POINTER -- the same classification a
+            # real relative mouse gets, at the cost of it also having a
+            # (silent, unused) capability for exactly the motion this
+            # device is not meant to move the cursor with.
+            #
+            # `product=` also matters here, separately from the name:
+            # python-evdev's `UInput` defaults every device to the same
+            # vendor/product/version/bustype (1/1/1/USB) unless told
+            # otherwise, so this device and the one above were
+            # presenting *identical* hardware identity in
+            # /proc/bus/input/devices -- confirmed to coincide with
+            # KWin's XWayland logging "[dix] couldn't enable device"
+            # for new input devices on every server start (`journalctl
+            # --user`), a known category of X input bug when device
+            # identity collides. Giving each device its own product ID
+            # is a one-line difference with no other effect.
             self._click_device = UInput(
-                {ecodes.EV_KEY: [ecodes.BTN_LEFT]},
+                {
+                    ecodes.EV_KEY: [ecodes.BTN_LEFT],
+                    ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y],
+                },
                 name="boresight-trigger",
+                product=BORESIGHT_TRIGGER_PRODUCT_ID,
             )
         except OSError as exc:
             self._device.close()
@@ -150,6 +187,33 @@ class UinputCursorBackend:
         self._device.syn()
         self._device.close()
         self._click_device.close()
+
+
+class SmoothingCursorBackend:
+    """Wraps another `CursorBackend`, smoothing `move_absolute` positions.
+
+    `click()` passes straight through: it neither reads the filter's
+    state nor feeds it, so a click always fires at wherever the wrapped
+    backend's cursor already is -- unaffected by this class -- rather
+    than at some position of its own.
+
+    Composes at the `CursorBackend` seam rather than living inside
+    `AimPipeline`, so the pipeline stays exactly as stateless as its own
+    spec requires; see `add-aim-smoothing`'s design for why.
+    """
+
+    def __init__(
+        self, backend: CursorBackend, filter: OneEuroFilter | None = None
+    ) -> None:
+        self._backend = backend
+        self._filter = filter if filter is not None else OneEuroFilter()
+
+    def move_absolute(self, x: float, y: float) -> None:
+        smoothed_x, smoothed_y = self._filter.apply((x, y))
+        self._backend.move_absolute(smoothed_x, smoothed_y)
+
+    def click(self) -> None:
+        self._backend.click()
 
 
 class FakeCursorBackend:
