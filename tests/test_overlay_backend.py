@@ -27,10 +27,22 @@ from boresight.overlay.backend import (
     supports_layer_shell,
 )
 
-X11 = Environment(platform="linux", session_type="x11", desktop="kde")
-WAYLAND_KDE = Environment(platform="linux", session_type="wayland", desktop="kde")
-WAYLAND_SWAY = Environment(platform="linux", session_type="wayland", desktop="sway")
-WAYLAND_GNOME = Environment(platform="linux", session_type="wayland", desktop="gnome")
+X11 = Environment(platform="linux", session_type="x11", desktop="kde", display=":0")
+# A Wayland session with XWayland running -- the overlay reaches X11
+# semantics through it, whatever the compositor is.
+WAYLAND_KDE = Environment(
+    platform="linux", session_type="wayland", desktop="kde", display=":0"
+)
+WAYLAND_SWAY = Environment(
+    platform="linux", session_type="wayland", desktop="sway", display=":0"
+)
+WAYLAND_GNOME = Environment(
+    platform="linux", session_type="wayland", desktop="gnome", display=":0"
+)
+# No X display: nothing to fall back to.
+WAYLAND_PURE = Environment(
+    platform="linux", session_type="wayland", desktop="kde", display=None
+)
 WINDOWS = Environment(platform="win32")
 MACOS = Environment(platform="darwin")
 
@@ -39,10 +51,19 @@ MACOS = Environment(platform="darwin")
 
 
 @pytest.mark.parametrize(
-    "environment", [X11, WAYLAND_KDE, WAYLAND_SWAY, WINDOWS], ids=lambda e: str(e)
+    "environment",
+    [X11, WAYLAND_KDE, WAYLAND_SWAY, WAYLAND_GNOME, WINDOWS],
+    ids=lambda e: str(e),
 )
 def test_supported_environments_pass_the_check(environment: Environment) -> None:
     check_supported(environment)  # must not raise
+
+
+def test_wayland_is_supported_through_xwayland_whatever_the_compositor() -> None:
+    """Including GNOME. The overlay does not use wlr-layer-shell -- it
+    uses XWayland, which Mutter manages like any other X11 client, so
+    the compositor's layer-shell support is beside the point."""
+    check_supported(WAYLAND_GNOME)  # must not raise
 
 
 def test_x11_is_supported_regardless_of_desktop() -> None:
@@ -54,22 +75,23 @@ def test_x11_is_supported_regardless_of_desktop() -> None:
 # --- Environments that do not ----------------------------------------
 
 
-def test_wayland_without_layer_shell_is_refused() -> None:
-    """GNOME's Mutter declines to implement wlr-layer-shell. That is an
-    upstream design position, not a gap that will close, so the honest
-    move is to refuse rather than degrade."""
+def test_wayland_without_an_x_display_is_refused() -> None:
+    """Wayland denies an ordinary client both stacking and placement, so
+    without XWayland the overlay would render centred on screen and
+    behind whatever is clicked -- observed on KDE Plasma before this
+    check asked the right question."""
     with pytest.raises(OverlayUnavailableError) as caught:
-        check_supported(WAYLAND_GNOME)
+        check_supported(WAYLAND_PURE)
 
-    message = str(caught.value)
-    assert "layer-shell" in message
-    assert "gnome" in message.lower()
+    message = str(caught.value).lower()
+    assert "wayland" in message
+    assert "xwayland" in message
 
 
 def test_the_refusal_names_printed_markers_as_the_alternative() -> None:
     """A refusal that leaves someone stuck is only half a message."""
     with pytest.raises(OverlayUnavailableError) as caught:
-        check_supported(WAYLAND_GNOME)
+        check_supported(WAYLAND_PURE)
 
     assert "printed markers" in str(caught.value).lower()
 
@@ -79,7 +101,7 @@ def test_the_refusal_explains_what_would_go_wrong() -> None:
     the part that makes the refusal obviously right rather than
     obstructive."""
     with pytest.raises(OverlayUnavailableError) as caught:
-        check_supported(WAYLAND_GNOME)
+        check_supported(WAYLAND_PURE)
 
     assert "click" in str(caught.value).lower()
 

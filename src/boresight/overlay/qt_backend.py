@@ -24,7 +24,11 @@ import sys
 
 import numpy as np
 
-from boresight.overlay.backend import check_supported, require_toolkit
+from boresight.overlay.backend import (
+    check_supported,
+    detect_environment,
+    require_toolkit,
+)
 from boresight.overlay.layout import default_inset_px, default_tag_px
 from boresight.overlay.render import render_overlay
 
@@ -38,12 +42,18 @@ from boresight.overlay.render import render_overlay
 GEOMETRY_EVENT = "overlay-ready"
 
 
-def emit_geometry(screen_px: tuple[int, int], tag_px: int, inset_px: int) -> None:
+def emit_geometry(
+    screen_px: tuple[int, int],
+    tag_px: int,
+    inset_px: int,
+    area_px: tuple[int, int, int, int],
+) -> None:
     print(
         json.dumps(
             {
                 "event": GEOMETRY_EVENT,
                 "screen_px": [screen_px[0], screen_px[1]],
+                "area_px": list(area_px),
                 "tag_px": tag_px,
                 "inset_px": inset_px,
             }
@@ -123,6 +133,7 @@ def run(
     on someone's screen.
     """
     check_supported()
+    _force_xwayland_on_wayland()
     QtCore, QtGui, QtWidgets = require_toolkit()
 
     app = QtWidgets.QApplication([])
@@ -138,37 +149,79 @@ def run(
     geometry = screen.geometry()
     screen_px = (geometry.width(), geometry.height())
 
+    # The available area excludes whatever the desktop reserves for
+    # panels and docks. A KDE panel takes 46px off the bottom, and a tag
+    # drawn under it is invisible to the camera -- the panel is painted
+    # above even an always-on-top window, and fighting it would break
+    # the panel rather than fix the tag.
+    available = screen.availableGeometry()
+    area_px = (
+        available.x() - geometry.x(),
+        available.y() - geometry.y(),
+        available.width(),
+        available.height(),
+    )
+    area_size = (area_px[2], area_px[3])
+
     # Resolved here rather than left to the renderer, because the
     # numbers have to be reported before anything is drawn.
-    tag_px = default_tag_px(screen_px) if tag_px is None else tag_px
+    tag_px = default_tag_px(area_size) if tag_px is None else tag_px
     inset_px = default_inset_px(tag_px) if inset_px is None else inset_px
 
     if report_only:
-        emit_geometry(screen_px, tag_px, inset_px)
+        emit_geometry(screen_px, tag_px, inset_px, area_px)
         return 0
 
     widget = build_overlay_widget(
-        screen_px,
+        area_size,
         tag_px,
         inset_px,
         QtCore=QtCore,
         QtGui=QtGui,
         QtWidgets=QtWidgets,
     )
-    widget.setGeometry(geometry)
+    widget.setGeometry(available)
     widget.show()
-    _install_interrupt_handler(app, QtCore)
+    _install_interrupt_handler(app, widget, QtCore)
 
-    emit_geometry(screen_px, tag_px, inset_px)
+    emit_geometry(screen_px, tag_px, inset_px, area_px)
+    reserved = (screen_px[1] - area_px[3]) + (screen_px[0] - area_px[2])
     print(
-        f"Overlay running on {screen_px[0]}x{screen_px[1]}. Press Ctrl-C here to stop.",
+        f"Overlay running on {screen_px[0]}x{screen_px[1]}"
+        + (f" ({reserved}px reserved by desktop panels)" if reserved else "")
+        + ". Press Ctrl-C here to stop.",
         file=sys.stderr,
         flush=True,
     )
     return app.exec()
 
 
-def _install_interrupt_handler(app, QtCore) -> None:
+def _force_xwayland_on_wayland() -> None:
+    """Make Qt speak X11 even on a Wayland desktop.
+
+    Wayland denies an ordinary client the two things this overlay is:
+    a window that stays above the others, and one that puts itself
+    where it is told. As a native Wayland client the overlay comes out
+    centred on the screen and drops behind whatever is clicked --
+    observed on KDE Plasma, and mistakable for a Boresight bug.
+
+    Through XWayland the same window is managed by KWin as an X11
+    client, which does honour `_NET_WM_STATE_ABOVE` and absolute
+    geometry. Verified: the resulting window carries
+    `_NET_WM_STATE_ABOVE, _NET_WM_STATE_STAYS_ON_TOP`.
+
+    `setdefault`, so an explicit QT_QPA_PLATFORM still wins -- the test
+    suite sets `offscreen`, and anyone with a reason to choose is not
+    overruled. This has to run before QApplication is constructed,
+    which is when the platform plugin is loaded.
+    """
+    import os
+
+    if detect_environment().is_wayland:
+        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+
+
+def _install_interrupt_handler(app, widget, QtCore) -> None:
     """Make Ctrl-C work.
 
     Two problems, both of which would otherwise leave an overlay nobody
@@ -182,10 +235,21 @@ def _install_interrupt_handler(app, QtCore) -> None:
     So: a handler that asks Qt to quit, plus an idle timer whose only
     job is to hand control back to Python often enough for that handler
     to be delivered.
+
+    The handler hides the widget and pumps events before quitting rather
+    than leaving that to process teardown. Observed on KWin/XWayland: an
+    always-on-top, input-transparent window that vanishes because the
+    process died, instead of being unmapped while still live, can leave
+    the compositor's input routing for whatever was underneath confused
+    -- other windows stay unresponsive to clicks until something forces
+    a restacking (e.g. hiding and reshowing one). An explicit hide gives
+    the compositor a normal UnmapNotify to react to first.
     """
     import signal
 
     def stop(_signum, _frame) -> None:
+        widget.hide()
+        app.processEvents()
         app.quit()
 
     signal.signal(signal.SIGINT, stop)

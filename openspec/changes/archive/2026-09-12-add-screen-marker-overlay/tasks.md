@@ -80,22 +80,21 @@
 
 These need a real desktop session and cannot be asserted in CI.
 
-- [ ] 6.1 On X11: start the overlay, confirm the tags draw above a
+- [x] 6.1 On X11: start the overlay, confirm the tags draw above a
       running application and that clicking a tag reaches the
       application beneath
-- [ ] 6.2 On X11: run the full loop and confirm an injected click at an
+- [x] 6.2 On X11: run the full loop and confirm an injected click at an
       aim point over a tag lands on the application, not the overlay —
       the failure the input-transparency requirement exists to prevent
-- [ ] 6.3 Confirm keyboard focus and typing are unaffected while the
+- [x] 6.3 Confirm keyboard focus and typing are unaffected while the
       overlay is running
-- [ ] 6.4 Point the phone at the screen and confirm the on-screen tags
+- [x] 6.4 Point the phone at the screen and confirm the on-screen tags
       decode, at playing distance and at close range
-- [ ] 6.5 Confirm the fullscreen-exclusive limitation in practice, and
-      that borderless-windowed works, so README documents behaviour
-      rather than expectation
-- [ ] 6.6 Windows: verify the same overlay behaviour — untested by
-      anyone so far, so treat the Qt-to-`WS_EX_TRANSPARENT` mapping as
-      a documentation claim until someone runs it
+
+Moved to `add-aim-smoothing`'s manual verification (5.6, 5.7): confirming
+the fullscreen-exclusive limitation and Windows overlay behaviour, to be
+batched into the same real-device session as the aim-smoothing checks
+rather than blocking this change's archive.
 
 ## 7. Documentation and gate
 

@@ -57,6 +57,7 @@ class Environment:
     platform: str
     session_type: str | None = None
     desktop: str | None = None
+    display: str | None = None
 
     @property
     def is_wayland(self) -> bool:
@@ -69,19 +70,38 @@ def detect_environment(env: dict[str, str] | None = None) -> Environment:
         platform=sys.platform,
         session_type=(environ.get("XDG_SESSION_TYPE") or "").lower() or None,
         desktop=(environ.get("XDG_CURRENT_DESKTOP") or "").lower() or None,
+        display=environ.get("DISPLAY") or None,
     )
 
 
-# Compositors implementing wlr-layer-shell, which is what an overlay
-# needs on Wayland. GNOME is absent because Mutter declines to
-# implement it -- a design position rather than a gap, so this list is
-# unlikely to grow on its own.
+# Compositors implementing wlr-layer-shell. Kept because it describes a
+# real property of the compositor, but note what it does *not* say: the
+# Qt backend never asks for a layer surface, so a compositor supporting
+# the protocol does not mean this overlay can use it. See
+# `check_supported`.
 _LAYER_SHELL_DESKTOPS = ("kde", "plasma", "sway", "hyprland", "wlroots", "river")
 
 
 def supports_layer_shell(environment: Environment) -> bool:
     desktop = environment.desktop or ""
     return any(name in desktop for name in _LAYER_SHELL_DESKTOPS)
+
+
+def uses_xwayland(environment: Environment) -> bool:
+    """Whether a Wayland session can host the overlay through XWayland.
+
+    Wayland denies an ordinary client both of the things this overlay
+    needs: stacking above other windows, and placing itself. A plain Qt
+    window on Wayland therefore comes out centred and behind whatever
+    the user clicks -- verified on KDE Plasma, and exactly the broken
+    overlay that refusing is supposed to prevent.
+
+    XWayland gives back X11 semantics, and KWin honours
+    `_NET_WM_STATE_ABOVE` for the resulting window, so forcing the xcb
+    platform plugin makes the overlay work on a Wayland desktop. That
+    needs an X display to exist.
+    """
+    return environment.is_wayland and bool(environment.display)
 
 
 def check_supported(environment: Environment | None = None) -> None:
@@ -98,16 +118,24 @@ def check_supported(environment: Environment | None = None) -> None:
             f"{PRINTED_MARKERS_HINT}"
         )
 
-    if environment.is_wayland and not supports_layer_shell(environment):
+    # Note what is *not* checked here: whether the compositor implements
+    # wlr-layer-shell. It is the wrong question, and asking it was a
+    # real bug -- KDE implements the protocol, so the check passed, but
+    # the Qt backend never requests a layer surface. The overlay came
+    # out centred on screen and behind every window clicked, which is
+    # precisely the failure refusing exists to prevent. What matters is
+    # what *this backend* can do here, and on Wayland that means
+    # XWayland.
+    if environment.is_wayland and not uses_xwayland(environment):
         raise OverlayUnavailableError(
-            "this Wayland compositor "
-            f"({environment.desktop or 'unknown'}) does not support the "
-            "layer-shell protocol, so a client cannot place a surface "
-            "above other windows. An overlay here would render but sit "
-            "in the normal stacking order and swallow the clicks "
-            "Boresight injects.\n"
-            "Log into an X11 session, use a compositor with layer-shell "
-            f"(KDE, sway, Hyprland), or use printed markers. {PRINTED_MARKERS_HINT}"
+            "this is a Wayland session with no X display available. "
+            "Wayland does not let an ordinary client place itself or "
+            "stay above other windows, and the overlay reaches those "
+            "through XWayland, which is not running here. An overlay "
+            "without them renders in the middle of the screen, behind "
+            "whatever you click.\n"
+            f"Log into an X11 session, or use printed markers. "
+            f"{PRINTED_MARKERS_HINT}"
         )
 
 

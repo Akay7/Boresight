@@ -108,8 +108,23 @@ def overlay_layout(
     tag_px: int | None = None,
     inset_px: int | None = None,
     scale: float = 1.0,
+    area_px: tuple[int, int, int, int] | None = None,
 ) -> MarkerMap:
     """The layout for tags drawn on a display of `screen_px`.
+
+    `area_px` is `(x, y, width, height)`: the region of the display the
+    tags may occupy, defaulting to all of it. It exists because desktop
+    panels reserve screen edges -- a KDE panel takes 46px off the bottom
+    -- and tags drawn under one are invisible to the camera. The overlay
+    passes the compositor's reported available area.
+
+    Marker positions are returned in **full-screen** coordinates
+    regardless of the area, and `screen_size` is always the full
+    display. That is not cosmetic: the pipeline emits
+    `aim_mm / screen_mm` and the cursor backend maps that onto the whole
+    display, so normalizing against anything smaller would put the
+    cursor at the wrong place by exactly the panel's share of the
+    screen.
 
     `scale` converts pixels to the layout's nominal millimetres. It does
     not have to be correct, and deliberately defaults to 1.0. The
@@ -122,19 +137,38 @@ def overlay_layout(
     """
     if scale <= 0:
         raise OverlayGeometryError(f"scale must be positive, got {scale}")
+    if screen_px[0] <= 0 or screen_px[1] <= 0:
+        # Checked before the area is derived, so a nonsense screen is
+        # reported as such rather than as a nonsense area derived from it.
+        raise OverlayGeometryError(f"screen size must be positive, got {screen_px}")
 
-    tag_px = default_tag_px(screen_px) if tag_px is None else tag_px
+    area_x, area_y, area_w, area_h = (0, 0, *screen_px) if area_px is None else area_px
+    if area_w <= 0 or area_h <= 0:
+        raise OverlayGeometryError(f"area must be positive, got {area_px}")
+    if (
+        area_x < 0
+        or area_y < 0
+        or area_x + area_w > screen_px[0]
+        or (area_y + area_h > screen_px[1])
+    ):
+        raise OverlayGeometryError(
+            f"area {area_px} does not fit a {screen_px[0]}x{screen_px[1]} screen"
+        )
+
+    area_size = (area_w, area_h)
+    tag_px = default_tag_px(area_size) if tag_px is None else tag_px
     inset_px = default_inset_px(tag_px) if inset_px is None else inset_px
-    _validate(screen_px, tag_px, inset_px)
+    _validate(area_size, tag_px, inset_px)
 
     markers = {
         marker_id: Marker(
             marker_id=marker_id,
-            x_mm=x * scale,
-            y_mm=y * scale,
+            # Placed within the area, expressed against the whole screen.
+            x_mm=(area_x + x) * scale,
+            y_mm=(area_y + y) * scale,
             size_mm=tag_px * scale,
         )
-        for marker_id, (x, y) in tag_positions_px(screen_px, tag_px, inset_px).items()
+        for marker_id, (x, y) in tag_positions_px(area_size, tag_px, inset_px).items()
     }
     return MarkerMap(
         screen_size_mm=(screen_px[0] * scale, screen_px[1] * scale),

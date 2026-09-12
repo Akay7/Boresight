@@ -249,3 +249,74 @@ def test_the_default_launcher_is_the_real_one() -> None:
 
     assert controller.source is MarkerSource.PRINTED
     assert controller._launcher is subprocess.Popen  # noqa: SLF001
+
+
+# --- The viewfinder overlay setting -----------------------------------
+
+
+def test_the_overlay_setting_is_remembered_by_the_server(backend) -> None:
+    """So the phone renders the right button on load, and a reload does
+    not silently drop a setting the operator chose."""
+    with _client(backend) as client:
+        assert client.get("/debug").json() == {"enabled": False}
+
+        assert client.post("/debug", json={"enabled": True}).json() == {"enabled": True}
+        assert client.get("/debug").json() == {"enabled": True}
+
+
+def test_a_new_session_inherits_the_remembered_setting(backend) -> None:
+    manifest = json.loads((VIDEO_DIR / "manifest.json").read_text())
+    frame = (VIDEO_DIR / manifest["frames"][0]["file"]).read_bytes()
+
+    with _client(backend) as client:
+        client.post("/debug", json={"enabled": True})
+
+        with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+            socket.send_bytes(pack_frame(0.0, frame))
+            report = socket.receive_json()
+
+    # No control message was sent on this socket at all.
+    assert "debug" in report
+
+
+def test_a_session_started_before_the_change_keeps_its_own_flag(backend) -> None:
+    """The isolation the debug feature was built with: one AimPipeline
+    serves every connection, so a live session's flag has to be its own
+    or one phone's overlay would change another phone's frames."""
+    manifest = json.loads((VIDEO_DIR / "manifest.json").read_text())
+    frame = (VIDEO_DIR / manifest["frames"][0]["file"]).read_bytes()
+
+    with _client(backend) as client:
+        with client.websocket_connect(FRAME_SOCKET_PATH) as already_open:
+            client.post("/debug", json={"enabled": True})
+
+            already_open.send_bytes(pack_frame(0.0, frame))
+            report = already_open.receive_json()
+
+    assert "debug" not in report
+
+
+def test_toggling_over_the_socket_is_remembered_too(backend) -> None:
+    """However the operator flipped it, the button comes back that way."""
+    manifest = json.loads((VIDEO_DIR / "manifest.json").read_text())
+    frame = (VIDEO_DIR / manifest["frames"][0]["file"]).read_bytes()
+
+    with _client(backend) as client:
+        with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+            socket.send_text(json.dumps({"type": "debug", "enabled": True}))
+            socket.send_bytes(pack_frame(0.0, frame))
+            socket.receive_json()
+
+        assert client.get("/debug").json() == {"enabled": True}
+
+
+def test_the_overlay_setting_requires_the_token(backend) -> None:
+    with _client(backend, token=TOKEN) as client:
+        assert client.get("/debug").status_code == 401
+        assert client.post("/debug", json={"enabled": True}).status_code == 401
+
+
+def test_a_non_boolean_setting_is_rejected(backend) -> None:
+    with _client(backend) as client:
+        assert client.post("/debug", json={"enabled": "yes please"}).status_code == 422
+        assert client.get("/debug").json() == {"enabled": False}

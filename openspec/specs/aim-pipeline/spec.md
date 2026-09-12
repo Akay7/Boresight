@@ -40,19 +40,34 @@ cursor backend.
 - **THEN** the emitted normalized coordinates are `(0.5, 0.5)`
 
 ### Requirement: Aim points beyond the panel edge are clamped before emission
-The pipeline SHALL clamp normalized coordinates into `[0.0, 1.0]` before
-emitting them, because the aim point is a physical position that may
-legitimately fall outside the active panel while the cursor backend
-accepts only that range. It SHALL report both the
-unclamped millimetre aim point and the fact that clamping occurred, so an
-off-panel aim is observable rather than silently indistinguishable from
-an aim at the very edge.
+The pipeline SHALL clamp normalized coordinates into `[margin, 1.0 -
+margin]` before emitting them, for a small fixed margin, rather than
+into the full `[0.0, 1.0]` range — both when the aim point is a
+physical position that legitimately falls outside the active panel
+(the cursor backend accepts only the clamped range) and when a
+genuine, on-panel solve lands at or very near the panel's physical
+edge. The cursor device the pipeline emits to is classified as a
+touchscreen so it positions directly rather than through relative-
+motion acceleration; several desktop environments bind an action (e.g.
+show-desktop, edge-swipe overview) to a pointer reaching the literal
+screen edge, which a value of exactly `0.0` or `1.0` would trigger
+indistinguishably from a real touch. The pipeline SHALL report both
+the unclamped millimetre aim point and whether clamping occurred, so
+an off-panel aim is observable rather than silently indistinguishable
+from an aim at the margin.
 
 #### Scenario: An off-panel aim point is clamped, not rejected
 - **WHEN** the solver returns an aim point beyond the panel edge
-- **THEN** the emitted normalized coordinates lie within `[0.0, 1.0]`
+- **THEN** the emitted normalized coordinates lie within `[margin, 1.0
+  - margin]`, not at the literal `0.0`/`1.0` edge
 - **AND** the result reports the unclamped millimetre aim point and
   indicates that the emitted position was clamped
+
+#### Scenario: A near-edge on-panel aim point never reaches the literal edge
+- **WHEN** the solver returns an aim point on the panel but within the
+  margin of its physical edge
+- **THEN** the emitted normalized coordinates are still bounded away
+  from the literal `0.0`/`1.0` edge by the margin
 
 ### Requirement: Frames that cannot be solved emit nothing
 The pipeline SHALL NOT emit a cursor move for a frame it cannot solve —
@@ -129,3 +144,75 @@ network.
   display for any marker to be in view
 - **THEN** the replay completes, emitting moves only for the solvable
   frames and reporting the unsolved ones
+
+### Requirement: The per-frame operation can report its geometry on request
+The per-frame operation SHALL accept a request for debug output and,
+when asked, SHALL return alongside its normal result the geometry that
+produced it, expressed in the coordinates of the frame it was given:
+the size of that frame in pixels, and every detected marker with its
+ID, its four corners in image pixels, and whether the layout maps it.
+Debug output SHALL be off by default, SHALL be requested per call
+rather than held on the pipeline, and SHALL NOT change the outcome,
+the emitted position, or anything else the operation returns. The
+pipeline instance is shared between concurrent sessions, so a request
+from one caller must not alter what another caller's frames compute.
+
+#### Scenario: Debug output is absent unless requested
+- **WHEN** a frame is processed without requesting debug output
+- **THEN** the result carries no debug geometry, and its outcome,
+  counts and emitted position are identical to what the same frame
+  produces when debug output is requested
+
+#### Scenario: Detections are reported with their image coordinates
+- **WHEN** a frame containing detectable markers is processed with
+  debug output requested
+- **THEN** the result carries the frame's pixel size and one entry per
+  detected marker, each giving that marker's ID, its four corners in
+  image pixels, and whether the marker map declares it
+
+#### Scenario: Markers the layout ignores are reported as ignored, not omitted
+- **WHEN** a frame containing a detected marker absent from the layout
+  is processed with debug output requested
+- **THEN** that marker appears in the debug geometry marked as not
+  mapped, so a tag that is being seen and skipped is distinguishable
+  from one that is not being seen at all
+
+### Requirement: Debug geometry places the solve back in image space
+When a frame solves and debug output is requested, the operation SHALL
+additionally report, in image pixels: the four corners of the
+configured screen rectangle projected through the solved homography,
+and the position actually emitted to the cursor backend carried back
+through that same homography. The emitted position SHALL be the one
+that is reported — normalized against the screen size and clamped as
+emitted — rather than the unclamped solved aim point, because pushing
+the solved aim point back through its own homography returns the image
+centre by construction and can never disagree with it. The operation
+SHALL also report the reprojection error of the fit.
+
+#### Scenario: The screen rectangle is projected into the image
+- **WHEN** a frame solves with debug output requested
+- **THEN** the debug geometry carries four image-pixel points
+  corresponding to the corners of the configured screen size in
+  millimetres, transformed by the homography that produced the aim
+  point
+
+#### Scenario: The emitted position is carried back into the image
+- **WHEN** a frame solves with debug output requested and the emitted
+  position was clamped to the edge margin
+- **THEN** the reported image-pixel position of the cursor corresponds
+  to the clamped, emitted position rather than to the unclamped aim
+  point, and therefore does not coincide with the image centre
+
+#### Scenario: An unsolved frame reports detections without a projection
+- **WHEN** a frame is processed with debug output requested and does
+  not solve
+- **THEN** the debug geometry still carries the image size and any
+  detections, and carries no screen rectangle, no cursor position and
+  no reprojection error, rather than carrying values from an earlier
+  frame
+
+#### Scenario: A frame with no detections is distinguishable from debug being off
+- **WHEN** a frame containing no detectable markers is processed with
+  debug output requested
+- **THEN** the result carries debug geometry with an empty list of
+  markers, rather than carrying no debug geometry at all

@@ -11,6 +11,14 @@
         --warn: #e0b34a;
         --bad: #e06a6a;
         --dim: #8a8f98;
+        /* Overlay-only colours. Kept here with the rest so the canvas
+           and the numbers beside it are coloured from one place.
+           --aim is deliberately unlike anything else on the page: it
+           marks the emitted cursor, and confusing it with a marker or
+           the screen outline would defeat the comparison it exists
+           for. */
+        --quad: #7fb0f0;
+        --aim: #ff5cf0;
       }
       * { box-sizing: border-box; }
       body {
@@ -31,6 +39,17 @@
         border-radius: 6px;
         display: block;
         object-fit: contain;
+      }
+      /* The canvas sits exactly on the video's box, so a point drawn at
+         the box's centre is the centre of the captured image -- which
+         is the aim point, by construction. */
+      .viewfinder { position: relative; }
+      #overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
       }
       button {
         font: inherit;
@@ -97,12 +116,17 @@
       }
       .links a { color: #7fb0f0; }
       .links p { color: var(--dim); margin: 0.25rem 0 0; }
+      .row.debug-only { display: none; }
+      .row.debug-only.show { display: flex; }
     </style>
   </head>
   <body>
     <h1>Boresight camera</h1>
 
-    <video id="preview" playsinline muted autoplay></video>
+    <div class="viewfinder">
+      <video id="preview" playsinline muted autoplay></video>
+      <canvas id="overlay"></canvas>
+    </div>
     <button id="start">Start streaming</button>
     <button id="trigger" disabled>Trigger</button>
 
@@ -114,6 +138,13 @@
         <span class="choice">
           <button type="button" id="source-printed" class="pick">Printed</button>
           <button type="button" id="source-screen" class="pick">On-screen</button>
+        </span>
+      </div>
+      <div class="row">
+        <span>Overlay</span>
+        <span class="choice">
+          <button type="button" id="debug-off" class="pick" aria-pressed="true">Off</button>
+          <button type="button" id="debug-on" class="pick" aria-pressed="false">On</button>
         </span>
       </div>
     </div>
@@ -133,6 +164,17 @@
       <div class="row"><span>Skipped (local)</span><span id="stat-skipped">—</span></div>
       <div class="row"><span>Decode / solve</span><span id="stat-timing">—</span></div>
       <div class="row"><span>Shots</span><span id="stat-shots">—</span></div>
+      <!-- Only while the overlay is on: these describe the drawing, and
+           the reprojection error is meaningless without it. -->
+      <div class="row debug-only" id="row-decoded">
+        <span>Decoded frame</span><span id="stat-decoded">—</span>
+      </div>
+      <div class="row debug-only" id="row-reprojection">
+        <span>Reprojection</span><span id="stat-reprojection">—</span>
+      </div>
+      <div class="row debug-only" id="row-lag">
+        <span>Overlay lag</span><span id="stat-lag">—</span>
+      </div>
     </div>
 
     <div class="links">
@@ -143,6 +185,18 @@
       <p>Print at 100% scale — never "fit to page".</p>
     </div>
 
-    <script src="capture.js"></script>
+    <script>
+      // capture.js is itself token-guarded, like every other request --
+      // so a plain static src would 401 exactly when the server is
+      // guarded, which is whenever this phone can reach it at all. It
+      // can't fix its own request the way sameOriginUrl() fixes later
+      // ones (it hasn't loaded yet), so this does the same thing inline.
+      (function () {
+        var token = new URLSearchParams(location.search).get("token");
+        var script = document.createElement("script");
+        script.src = token ? "capture.js?token=" + encodeURIComponent(token) : "capture.js";
+        document.body.appendChild(script);
+      })();
+    </script>
   </body>
 </html>

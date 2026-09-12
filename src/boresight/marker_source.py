@@ -21,6 +21,7 @@ cleans up.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -44,6 +45,8 @@ GEOMETRY_TIMEOUT_S = 20.0
 # How long a stopped overlay gets to exit before it is killed.
 STOP_TIMEOUT_S = 5.0
 
+logger = logging.getLogger("boresight")
+
 
 class MarkerSource(Enum):
     PRINTED = "printed"
@@ -64,10 +67,15 @@ class OverlayGeometry:
     screen_px: tuple[int, int]
     tag_px: int
     inset_px: int
+    # Where on the display the tags were allowed to go, after the
+    # desktop's panels took their share. Positions are still expressed
+    # against the full screen; this only says where they were placed.
+    area_px: tuple[int, int, int, int]
 
     def as_dict(self) -> dict:
         return {
             "screen_px": list(self.screen_px),
+            "area_px": list(self.area_px),
             "tag_px": self.tag_px,
             "inset_px": self.inset_px,
         }
@@ -184,6 +192,8 @@ class MarkerSourceController:
             return self.state()
 
         if source is MarkerSource.PRINTED:
+            if self._process is not None:
+                logger.info("printed markers: stopping the overlay")
             self.stop_overlay()
             self._use(self._printed_layout, MarkerSource.PRINTED)
             self._last_error = None
@@ -200,15 +210,32 @@ class MarkerSourceController:
             # source as active while nothing is on screen would leave
             # the solver using a layout for tags that do not exist,
             # which presents as terrible aim with no visible cause.
+            logger.warning("on-screen markers unavailable: %s", error)
             self._last_error = str(error)
             self.stop_overlay()
             raise
 
         # Built from exactly the numbers the overlay reported, so the
         # drawn and solved layouts are the same layout.
+        reserved = (geometry.screen_px[1] - geometry.area_px[3]) + (
+            geometry.screen_px[0] - geometry.area_px[2]
+        )
+        logger.info(
+            "on-screen markers: overlay running on %dx%d, tags %dpx inset %dpx%s",
+            geometry.screen_px[0],
+            geometry.screen_px[1],
+            geometry.tag_px,
+            geometry.inset_px,
+            f", {reserved}px reserved by desktop panels" if reserved else "",
+        )
         self._geometry = geometry
         self._use(
-            overlay_layout(geometry.screen_px, geometry.tag_px, geometry.inset_px),
+            overlay_layout(
+                geometry.screen_px,
+                geometry.tag_px,
+                geometry.inset_px,
+                area_px=geometry.area_px,
+            ),
             MarkerSource.SCREEN,
         )
         self._last_error = None
@@ -264,10 +291,13 @@ class MarkerSourceController:
             raise MarkerSourceError(f"unexpected message from the overlay: {message!r}")
 
         screen = message["screen_px"]
+        screen_px = (int(screen[0]), int(screen[1]))
+        area = message.get("area_px") or [0, 0, *screen_px]
         return OverlayGeometry(
-            screen_px=(int(screen[0]), int(screen[1])),
+            screen_px=screen_px,
             tag_px=int(message["tag_px"]),
             inset_px=int(message["inset_px"]),
+            area_px=tuple(int(value) for value in area),
         )
 
     def _overlay_alive(self) -> bool:

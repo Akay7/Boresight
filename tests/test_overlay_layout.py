@@ -259,3 +259,67 @@ def test_even_the_extreme_corner_is_barely_outside_the_hull() -> None:
 
     assert not corner.aim_point_inside_hull
     assert corner.aim_point_hull_distance_mm > -tag
+
+
+# --- Desktop panels reserve screen edges ------------------------------
+
+KDE_PANEL_PX = 46
+AVAILABLE = (0, 0, SCREEN[0], SCREEN[1] - KDE_PANEL_PX)
+
+
+def test_tags_stay_clear_of_a_reserved_edge() -> None:
+    """A KDE panel takes 46px off the bottom and is painted above even an
+    always-on-top window, so a tag drawn under it is invisible to the
+    camera. Observed on a real 1920x1200 desktop."""
+    layout = overlay_layout(SCREEN, area_px=AVAILABLE)
+    patch_margin = round(default_tag_px((AVAILABLE[2], AVAILABLE[3])) * 0.25)
+    panel_top = SCREEN[1] - KDE_PANEL_PX
+
+    for marker in layout.markers.values():
+        assert marker.y_mm + marker.size_mm + patch_margin <= panel_top
+
+
+def test_the_screen_size_is_the_whole_display_not_the_area() -> None:
+    """The load-bearing one. The pipeline emits `aim_mm / screen_mm` and
+    the cursor backend maps that onto the *whole* display, so
+    normalizing against the available area would shift every emitted
+    position by the panel's share of the screen."""
+    layout = overlay_layout(SCREEN, area_px=AVAILABLE)
+
+    assert layout.screen_size_mm == (float(SCREEN[0]), float(SCREEN[1]))
+
+
+def test_positions_are_expressed_against_the_full_screen() -> None:
+    """An area with an origin offset must shift the tags, not merely
+    shrink the region they are computed in."""
+    offset = (0, 40, SCREEN[0], SCREEN[1] - 40)
+
+    at_origin = overlay_layout(SCREEN, area_px=(0, 0, SCREEN[0], SCREEN[1] - 40))
+    offset_down = overlay_layout(SCREEN, area_px=offset)
+
+    assert offset_down.markers[0].y_mm == at_origin.markers[0].y_mm + 40
+    assert offset_down.markers[0].x_mm == at_origin.markers[0].x_mm
+
+
+def test_an_area_still_normalizes_to_the_right_aim_point() -> None:
+    """The whole point of keeping the full screen as the denominator:
+    aiming at the middle of the display still reads as 0.5, 0.5 even
+    though no tag is anywhere near the bottom 46px."""
+    layout = overlay_layout(SCREEN, area_px=AVAILABLE)
+
+    result = _aim_at(layout, (0.5, 0.5))
+
+    assert result.position == pytest.approx((0.5, 0.5), abs=1e-6)
+
+
+def test_no_area_means_the_whole_screen() -> None:
+    assert overlay_layout(SCREEN) == overlay_layout(SCREEN, area_px=(0, 0, *SCREEN))
+
+
+@pytest.mark.parametrize(
+    "area",
+    [(0, 0, 0, 100), (0, 0, 100, 0), (-1, 0, 100, 100), (0, 0, 4000, 100)],
+)
+def test_an_impossible_area_is_rejected(area: tuple) -> None:
+    with pytest.raises(OverlayGeometryError):
+        overlay_layout(SCREEN, area_px=area)

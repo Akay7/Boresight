@@ -80,13 +80,13 @@
 
 ## 6. Manual verification
 
-- [ ] 6.1 From the phone, switch to on-screen markers and confirm tags
+- [x] 6.1 From the phone, switch to on-screen markers and confirm tags
       appear on the display; switch back and confirm they vanish
-- [ ] 6.2 Switch while streaming and confirm the aim point stays correct
+- [x] 6.2 Switch while streaming and confirm the aim point stays correct
       across the change, with no reconnect
-- [ ] 6.3 Kill the overlay from a terminal and confirm the phone stops
+- [x] 6.3 Kill the overlay from a terminal and confirm the phone stops
       showing on-screen markers as active
-- [ ] 6.4 Stop the server while the overlay is running and confirm no
+- [x] 6.4 Stop the server while the overlay is running and confirm no
       overlay is left on screen — the failure this is most meant to
       prevent
 

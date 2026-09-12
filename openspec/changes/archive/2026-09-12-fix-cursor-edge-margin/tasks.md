@@ -14,7 +14,7 @@
 
 ## 3. Manual verification
 
-- [ ] 3.1 On a machine where the edge-gesture interference was
+- [x] 3.1 On a machine where the edge-gesture interference was
       observed, run the aim pipeline with an aim point held near a
       screen edge/corner for several seconds and confirm no
       window-manager gesture (minimize, overview, show-desktop) fires
