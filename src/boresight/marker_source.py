@@ -9,6 +9,19 @@ the reference; the old instance is discarded. The swap is a single
 assignment, so a frame gets either the old pipeline or the new one and
 never a half-changed one.
 
+The cursor backend passed in at construction is wrapped, once, in a
+`SmoothingCursorBackend` -- and that one wrapped instance, not the raw
+backend, is what every built `AimPipeline` gets. Its filter state
+therefore lives as long as this controller does, not as long as
+whichever pipeline happens to be active, so a marker-source switch
+(which discards the old pipeline) does not discontinue smoothing.
+
+Each `AimPipeline` is itself wrapped again, in a `HoldingPipeline`
+(`aim_hold.py`), rebuilt fresh on every switch: it keeps re-sending the
+last solved position to the (smoothing-wrapped) backend through a brief
+run of unsolved frames, so an ordinary short dropout does not read as
+the OS cursor going idle.
+
 The overlay is a child process for a reason beyond convenience. Its
 window is input-transparent, takes no keyboard focus and has no title
 bar -- so nothing a user can click will remove it, and its own Ctrl-C
@@ -29,9 +42,11 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
-from boresight.inject import CursorBackend
+from boresight.aim_hold import HoldingPipeline
+from boresight.inject import CursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
 from boresight.marker_map import MarkerMap
+from boresight.one_euro import OneEuroFilter
 from boresight.overlay.layout import overlay_layout
 from boresight.overlay.qt_backend import GEOMETRY_EVENT
 from boresight.pipeline import AimPipeline
@@ -46,6 +61,33 @@ GEOMETRY_TIMEOUT_S = 20.0
 STOP_TIMEOUT_S = 5.0
 
 logger = logging.getLogger("boresight")
+
+
+def _aim_filter() -> OneEuroFilter:
+    """`OneEuroFilter`'s defaults, overridable without a code change.
+
+    Both knobs are tuned by feel, not measurement (see one_euro.py's
+    module docstring), and "by feel" differs by camera, lighting and
+    what the aim is actually driving -- a phone's camera noise floor,
+    or a specific game's own sensitivity, are not something Boresight
+    can calibrate for ahead of time. Raise BORESIGHT_AIM_MIN_CUTOFF if
+    a held aim feels laggy (less smoothing of a slow-moving signal);
+    raise BORESIGHT_AIM_BETA if a fast swing still feels smoothed.
+    """
+    min_cutoff = os.environ.get("BORESIGHT_AIM_MIN_CUTOFF")
+    beta = os.environ.get("BORESIGHT_AIM_BETA")
+    kwargs = {}
+    if min_cutoff:
+        try:
+            kwargs["min_cutoff"] = float(min_cutoff)
+        except ValueError:
+            pass
+    if beta:
+        try:
+            kwargs["beta"] = float(beta)
+        except ValueError:
+            pass
+    return OneEuroFilter(**kwargs)
 
 
 class MarkerSource(Enum):
@@ -81,16 +123,19 @@ class OverlayGeometry:
         }
 
 
-def _overlay_command(display: int | None) -> list[str]:
+def _overlay_command(display: int | None, extra_margin_px: int = 0) -> list[str]:
     """The command used to start the overlay.
 
-    Fixed. Nothing from a request reaches this list -- `display` is an
-    int or None, and is rendered by `str()` on an already-parsed
-    integer, so there is no path from request content to an argument.
+    Fixed. Nothing from a request reaches this list -- both `display`
+    and `extra_margin_px` are set at server startup, not per request,
+    and each is rendered by `str()` on an already-parsed number, so
+    there is no path from request content to an argument.
     """
     command = [sys.executable, "-m", "boresight.overlay"]
     if display is not None:
         command += ["--display", str(int(display))]
+    if extra_margin_px:
+        command += ["--extra-margin-px", str(int(extra_margin_px))]
     return command
 
 
@@ -130,15 +175,26 @@ class MarkerSourceController:
         printed_layout: MarkerMap,
         display: int | None = None,
         launcher=subprocess.Popen,
+        overlay_extra_margin_px: int = 0,
     ) -> None:
-        self._backend = backend
+        # Wrapped once, here, rather than per pipeline build: the filter
+        # inside must survive a marker-source switch, which rebuilds the
+        # pipeline but should not discontinue smoothing. `backend`
+        # itself (e.g. `app.state.cursor_backend`) stays unwrapped for
+        # whoever else holds a reference to it -- the manual
+        # `/cursor/move` route in particular, which an explicit request
+        # should reach exactly, not through this filter.
+        self._backend = SmoothingCursorBackend(backend, filter=_aim_filter())
         self._printed_layout = printed_layout
         self._display = display
         self._launcher = launcher
+        self._overlay_extra_margin_px = overlay_extra_margin_px
 
         self._source = MarkerSource.PRINTED
         self._layout = printed_layout
-        self._pipeline = AimPipeline(printed_layout, backend)
+        self._pipeline = HoldingPipeline(
+            AimPipeline(printed_layout, self._backend), self._backend
+        )
         self._process: subprocess.Popen | None = None
         self._geometry: OverlayGeometry | None = None
         self._last_error: str | None = None
@@ -146,11 +202,16 @@ class MarkerSourceController:
     # --- What the serving path reads ---------------------------------
 
     @property
-    def pipeline(self) -> AimPipeline:
+    def pipeline(self) -> HoldingPipeline:
         """The pipeline to solve the next frame with.
 
         Read per frame rather than captured when a session opens, so a
-        switch reaches a phone that is already streaming.
+        switch reaches a phone that is already streaming. Wrapped in a
+        `HoldingPipeline` so a brief run of unsolved frames keeps the
+        cursor backend alive instead of going silent; see `aim_hold.py`.
+        A switch discarding the old wrapper is correct, not incidental
+        -- the previous source's held position has no bearing on the
+        new one.
         """
         return self._pipeline
 
@@ -176,9 +237,26 @@ class MarkerSourceController:
             "geometry": self._geometry.as_dict() if self._geometry else None,
             "screen_size": list(self._layout.screen_size_mm),
             "error": self._last_error,
+            "overlay_extra_margin_px": self._overlay_extra_margin_px,
         }
 
     # --- Selecting ----------------------------------------------------
+
+    def set_overlay_extra_margin_px(self, value: int) -> dict:
+        """Set the overlay's manual panel-avoidance margin.
+
+        If on-screen markers are active, the overlay is restarted with
+        the new value immediately -- through `_start_screen_markers()`,
+        the same path `select()` uses, so a failure to restart (an
+        overlay that no longer starts, say) is reported the same way:
+        raised as `MarkerSourceError`, printed markers left active. If
+        printed markers are active, only the stored value changes; it
+        takes effect the next time on-screen markers are selected.
+        """
+        self._overlay_extra_margin_px = value
+        if self._source is MarkerSource.SCREEN:
+            return self._start_screen_markers()
+        return self.state()
 
     def select(self, source: MarkerSource) -> dict:
         """Switch to `source`, starting or stopping the overlay.
@@ -243,9 +321,14 @@ class MarkerSourceController:
 
     def _use(self, layout: MarkerMap, source: MarkerSource) -> None:
         # A new pipeline, not a mutated one: AimPipeline promises it
-        # holds no mutable state and this keeps that true.
+        # holds no mutable state and this keeps that true. The
+        # HoldingPipeline wrapping it is new too, deliberately: its
+        # held position belongs to the source being left, not the one
+        # about to be used.
         self._layout = layout
-        self._pipeline = AimPipeline(layout, self._backend)
+        self._pipeline = HoldingPipeline(
+            AimPipeline(layout, self._backend), self._backend
+        )
         self._source = source
 
     # --- The child process --------------------------------------------
@@ -253,7 +336,7 @@ class MarkerSourceController:
     def _launch_and_read_geometry(self) -> OverlayGeometry:
         try:
             process = self._launcher(
-                _overlay_command(self._display),
+                _overlay_command(self._display, self._overlay_extra_margin_px),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

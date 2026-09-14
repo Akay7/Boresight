@@ -46,13 +46,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="report the geometry that would be used, then exit without "
         "drawing anything",
     )
+    parser.add_argument(
+        "--extra-margin-px",
+        type=int,
+        default=0,
+        help="shrink the auto-detected available area by this much on "
+        "every side, on top of whatever the desktop's own panels "
+        "already reserve. For a display whose panel reservation isn't "
+        "detected automatically (default: 0, no change)",
+    )
     args = parser.parse_args(argv)
 
     from boresight.overlay import qt_backend
 
     try:
         return qt_backend.run(
-            args.display, args.tag_px, args.inset_px, report_only=args.report_only
+            args.display,
+            args.tag_px,
+            args.inset_px,
+            report_only=args.report_only,
+            extra_margin_px=args.extra_margin_px,
         )
     except OverlayUnavailableError as error:
         # Includes the missing-dependency case, which subclasses this.

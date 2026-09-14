@@ -7,10 +7,12 @@ down the socket unmodified, with only the 8-byte timestamp prefixed.
 What is under test here is the transport, not the solver or the
 pipeline; both already have their own decks. So the sharpest available
 assertion is that the transport changes nothing at all: streaming a
-sequence must produce exactly the cursor track that replaying the same
-files from disk produces. A transport that quietly re-encoded, resized
-or reordered would pass a tolerance-based check against the manifest
-and fail this one.
+sequence must report exactly the raw solved-position track that
+replaying the same files from disk produces (see `_rounded_position`
+for why "raw" -- aim smoothing sits below this, at the cursor backend,
+and is timing-sensitive by design). A transport that quietly
+re-encoded, resized or reordered would pass a tolerance-based check
+against the manifest and fail this one.
 
 Frames are sent synchronously -- send one, wait for its acknowledgement,
 send the next. The drop policy makes a saturated stream
@@ -81,22 +83,41 @@ def _stream(client: TestClient, fixture_dir: Path, limit: int | None = None) -> 
     return reports
 
 
+def _rounded_position(result: FrameResult) -> tuple[float, float] | None:
+    """A `FrameResult`'s position, rounded the way the wire report is.
+
+    The raw, pre-smoothing solve -- the same value the pipeline both
+    reports over the wire and hands to the cursor backend, before
+    `MarkerSourceController`'s `SmoothingCursorBackend` does anything to
+    it. That split is what makes this a meaningful transport check
+    post-smoothing: the wire report is unaffected by it.
+    """
+    if result.position is None:
+        return None
+    return (round(result.position[0], 5), round(result.position[1], 5))
+
+
 # --- The transport is transparent ------------------------------------
 
 
-def test_streaming_produces_the_same_track_as_replaying(
-    client: TestClient, backend: FakeCursorBackend
-) -> None:
-    _stream(client, VIDEO_DIR)
+def test_streaming_produces_the_same_track_as_replaying(client: TestClient) -> None:
+    """Streaming and replaying must agree on the raw solved position
+    reported for each frame -- what a client renders as the aim point --
+    even though the position actually sent to the cursor backend now
+    also passes through aim smoothing, which is timing-sensitive and so
+    is not expected to reproduce identically between a live socket and
+    a tight offline loop. See `_rounded_position`."""
+    reports = _stream(client, VIDEO_DIR)
 
-    reference_backend = FakeCursorBackend()
-    replay(
+    reference = replay(
         VIDEO_DIR,
-        AimPipeline(load_marker_map(DEFAULT_CONFIG_PATH), reference_backend),
+        AimPipeline(load_marker_map(DEFAULT_CONFIG_PATH), FakeCursorBackend()),
     )
 
-    assert backend.calls == reference_backend.calls
-    assert len(backend.calls) == len(_manifest(VIDEO_DIR)["frames"])
+    assert [(report["x"], report["y"]) for report in reports] == [
+        _rounded_position(result) for result in reference
+    ]
+    assert len(reports) == len(_manifest(VIDEO_DIR)["frames"])
 
 
 def test_every_streamed_frame_is_solved_and_reported(client: TestClient) -> None:
@@ -149,6 +170,39 @@ def test_an_unsolvable_frame_moves_nothing_and_keeps_the_connection(
 
     assert next_report["outcome"] == "solved"
     assert len(backend.calls) == 1
+
+
+def test_a_dropout_after_a_solve_is_still_reported_as_unsolved(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    """`aim-hold` re-sends the last solved position to the cursor backend
+    through a brief dropout, but that is a cursor-backend-only effect --
+    the wire report for the dropout frame must stay exactly what an
+    unsolved frame reports without holding, with no position implied."""
+    solvable = _manifest(VIDEO_DIR)["frames"][0]
+    blank = next(
+        entry
+        for entry in _manifest(CLOSE_RANGE_DIR)["frames"]
+        if entry["expected_markers_when_generated"] == 0
+    )
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, solvable)))
+        solved_report = socket.receive_json()
+        socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(CLOSE_RANGE_DIR, blank)))
+        dropout_report = socket.receive_json()
+
+    assert solved_report["outcome"] == "solved"
+    assert dropout_report["outcome"] == "no_markers"
+    assert dropout_report["x"] is None
+    assert dropout_report["y"] is None
+    # The cursor backend, meanwhile, was privately re-sent the solved
+    # position -- the held resend this test exists to confirm happened.
+    assert len(backend.calls) == 2
+    assert backend.calls[0] == pytest.approx(backend.calls[1], abs=1e-9)
+    assert backend.calls[0] == pytest.approx(
+        (solved_report["x"], solved_report["y"]), abs=1e-4
+    )
 
 
 # --- Malformed input --------------------------------------------------
@@ -294,7 +348,13 @@ def test_trigger_interleaved_with_frames_does_not_disturb_frame_handling(
     assert [report["outcome"] for report in reports] == [
         result.outcome.value for result in expected
     ]
-    assert backend.calls == [result.position for result in expected if result.emitted]
+    # The reported position is the pipeline's raw solved position (what
+    # a client renders as the aim point), not whatever the cursor
+    # backend was asked to move to -- that split is what lets aim
+    # smoothing exist without this being a smoothed-vs-raw comparison.
+    assert [(report["x"], report["y"]) for report in reports] == [
+        _rounded_position(result) for result in expected
+    ]
 
 
 def test_stats_report_trigger_count(

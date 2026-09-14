@@ -115,11 +115,32 @@ def build_overlay_widget(
     return Overlay()
 
 
+def _area_px(geometry, available, extra_margin_px: int) -> tuple[int, int, int, int]:
+    """The usable area, in screen-local pixels, after an optional manual
+    margin is subtracted from Qt's own `availableGeometry()`.
+
+    Pure geometry, factored out so `extra_margin_px`'s effect is
+    testable without a `QApplication` -- `QRect` needs no display to
+    construct, only to obtain from a real screen.
+    """
+    if extra_margin_px:
+        available = available.adjusted(
+            extra_margin_px, extra_margin_px, -extra_margin_px, -extra_margin_px
+        )
+    return (
+        available.x() - geometry.x(),
+        available.y() - geometry.y(),
+        available.width(),
+        available.height(),
+    )
+
+
 def run(
     screen_index: int | None = None,
     tag_px: int | None = None,
     inset_px: int | None = None,
     report_only: bool = False,
+    extra_margin_px: int = 0,
 ) -> int:
     """Show the overlay and run the Qt event loop until interrupted.
 
@@ -131,6 +152,14 @@ def run(
     without mapping a window -- enough for a parent to learn the display
     size, and useful for exercising the handshake without putting tags
     on someone's screen.
+
+    `extra_margin_px` shrinks the auto-detected available area by that
+    amount on every side, on top of whatever Qt itself already
+    subtracted. It exists because Qt's panel detection reads X11's
+    `_NET_WORKAREA`, which is one rectangle for the whole virtual
+    desktop rather than one per monitor -- confirmed, on a real
+    multi-monitor setup, to report zero reservation for a monitor with
+    a visibly occupied taskbar. Left at zero, this changes nothing.
     """
     check_supported()
     _force_xwayland_on_wayland()
@@ -155,12 +184,7 @@ def run(
     # above even an always-on-top window, and fighting it would break
     # the panel rather than fix the tag.
     available = screen.availableGeometry()
-    area_px = (
-        available.x() - geometry.x(),
-        available.y() - geometry.y(),
-        available.width(),
-        available.height(),
-    )
+    area_px = _area_px(geometry, available, extra_margin_px)
     area_size = (area_px[2], area_px[3])
 
     # Resolved here rather than left to the renderer, because the

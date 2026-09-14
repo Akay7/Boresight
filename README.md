@@ -280,7 +280,22 @@ Two paths for the aim coordinate, selectable by config flag.
 **Direct injection.** Windows `SendInput` with
 `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE`, or a uinput virtual absolute
 pointer on Linux. Zero added latency, trivial to implement, works with
-emulators. Some fullscreen-exclusive titles ignore synthetic events.
+emulators. Some fullscreen-exclusive titles ignore synthetic events —
+confirmed on one real title (Blue Estate) that switches its own input
+handling to raw/relative mouse capture specifically in fullscreen,
+ignoring the OS cursor entirely; its own "Light Gun Mode" setting
+turned out to be the actual fix, not anything on Boresight's side.
+
+For a title where no such in-game setting exists, the Linux backend can
+also emit a relative delta alongside its normal absolute placement —
+**off by default, and not safe to enable casually.** Continuous
+relative deltas computed from a noisy tracked position accumulate
+error with no correction the way absolute placement has, and drift
+into a screen corner given enough time; confirmed exactly that way in
+practice. `BORESIGHT_REL_SCALE` (device-motion units per full screen
+sweep) enables it if set to anything nonzero — treat this as a
+supervised experiment for one specific title, not a setting to leave
+on.
 
 **Hardware round-trip (future).** PC computes the coordinate, sends it
 over serial to an ESP32-S3 (native USB), which emits the absolute HID
@@ -507,14 +522,14 @@ blank the cursor in exactly the close-range case the midpoint marker
 ring exists to serve. But the same flag also covers the single-marker
 extrapolation measured 2m off, which clamps to a screen corner and looks
 like a plausible cursor position. Without temporal state there is no
-principled way to tell those apart, which is the argument for the
-1-euro filter being the next thing built.
+principled way to tell those apart — which was the argument for a
+1-euro filter, now added a layer below this one (see "Aim smoothing").
 
-So what's still absent, and deliberately: **no filtering, and no
-hold-last-good-and-decay on dropout.** An unsolvable frame simply leaves
-the cursor where it was rather than inventing a position. There is also
-no real capture source and no wiring into `server.py` — the pipeline is
-the seam those land on, not a substitute for them.
+So what's still absent from `pipeline.py` itself, and deliberately: **no
+filtering, and no hold-last-good-and-decay on dropout.** An unsolvable
+frame simply leaves the cursor where it was rather than inventing a
+position. Smoothing lives outside this module on purpose, so it stays
+true; see "Aim smoothing" for where it actually lives.
 
 Tests are in two layers. `tests/test_pipeline.py` stubs the detector to
 drive each policy branch directly; `tests/test_pipeline_e2e.py` replays
@@ -530,6 +545,74 @@ tolerance, because RANSAC averages a per-marker permutation away across
 32 correspondences. The sparse close-range assertions catch it, since
 there the permutation is the entire fit. Corner order is pinned exactly
 in a unit test; the full-visibility numbers should not be trusted for it.
+
+## Aim smoothing
+
+`one_euro.py` implements a one-euro filter (Casiez et al.) over the
+normalized 2D aim position, and `inject.py`'s `SmoothingCursorBackend`
+wraps it around a `CursorBackend`: `move_absolute` runs its input
+through the filter before forwarding it, `click` passes straight
+through. It lives at that seam rather than inside `pipeline.py` on
+purpose — `AimPipeline` stays exactly as stateless as the section above
+describes, and one `SmoothingCursorBackend`, built once by
+`MarkerSourceController`, keeps the same filter state across a
+marker-source switch instead of resetting it every time the pipeline is
+rebuilt.
+
+The tradeoff is the point: a steady aim is smoothed heavily (frame-to-
+frame detection noise stops reading as visible dribble), while a fast,
+sustained swing to a new target is smoothed much less, so it does not
+feel laggy. Both follow from the same speed-adaptive cutoff — see the
+module docstring for the formula.
+
+`POST /cursor/move` is unaffected: the route keeps the raw, unwrapped
+backend from `app.state.cursor_backend`, so an explicit requested
+coordinate always lands exactly, never smoothed toward wherever
+aim-derived movement last left the filter.
+
+### Tuning: less lag or less jitter
+
+`MarkerSourceController` builds the filter with `min_cutoff=0.5,
+beta=1.0` — tuned by feel, not measurement, so what feels right depends
+on your own camera's noise floor and how fast you swing. Two env vars
+override either without a code change (read once, at server startup):
+
+    BORESIGHT_AIM_MIN_CUTOFF=5.0 uv run python -m boresight.server
+
+- **`BORESIGHT_AIM_MIN_CUTOFF`** (default `0.5`) — how hard a *held*
+  aim is smoothed. This is the one to raise if the cursor visibly
+  creeps into position after you stop moving instead of landing there
+  immediately: at a low cutoff the filter only approaches the true
+  position a little more each frame rather than snapping to it. Too
+  high, and a steady aim starts visibly shaking with raw detection
+  noise instead.
+- **`BORESIGHT_AIM_BETA`** (default `1.0`) — how much a *fast* swing
+  cuts through the smoothing. Raise this if a quick swing to a new
+  target still feels smoothed/laggy mid-motion, as opposed to only
+  after arriving.
+
+Both are read by `_aim_filter()` in `marker_source.py`; an unset or
+non-numeric value falls back to `OneEuroFilter`'s own default for that
+parameter.
+
+### Holding through a brief dropout
+
+`aim_hold.py`'s `HoldingPipeline` wraps an `AimPipeline`: on a frame
+that does not solve, if a solved frame landed within the last 0.75s, it
+re-sends that same position to the (smoothing-wrapped) cursor backend.
+This exists because of a real platform behaviour, not a solving
+concern — a Wayland compositor hides a pointer that produces no events
+for a while, and an ordinary short dropout (a marker briefly occluded,
+motion blur) would otherwise read as the OS cursor blinking out and
+back. Re-sending an unchanged position through the one-euro filter
+converges to that same position regardless of elapsed time, so holding
+cannot itself introduce a jump — only fresh device traffic. Once the
+window lapses with no new solve, holding stops and the cursor is
+allowed to go idle. `MarkerSourceController` builds a fresh
+`HoldingPipeline` per marker source, so a switch does not carry a held
+position from the old source into the new one. The wire report and
+debug overlay are unaffected either way — a held frame is still
+reported exactly as the unsolved frame it is.
 
 ## The phone client
 
@@ -780,6 +863,38 @@ unusual.
 | 2560x1440 | 115 px | 29 px | 6.5% |
 | 3840x2160 | 173 px | 43 px | 6.5% |
 
+### A monitor whose panel isn't detected
+
+The overlay avoids desktop panels and docks automatically, by asking
+the windowing toolkit for the display's available area. On a
+multi-monitor Linux/X11 or XWayland setup this can under-report: the
+`_NET_WORKAREA` property it reads is one rectangle for the whole
+virtual desktop rather than one per monitor, so a monitor whose panel
+happens to fall outside that single rectangle's reserved band is
+reported as having no reservation at all — confirmed on a real
+multi-monitor machine, where a taskbar visibly covered a tag near a
+monitor's edge despite the overlay's own log reporting nothing
+reserved there.
+
+`--extra-margin-px` shrinks the auto-detected area by that amount on
+every side, on top of whatever was already found — zero by default, no
+effect unless set:
+
+    uv run python -m boresight.overlay --extra-margin-px 50
+
+Threaded through the server too, for the normal (phone-driven) way of
+starting on-screen markers:
+
+    uv run python -m boresight.server --overlay-extra-margin-px 50
+
+The CLI flag only sets a starting value, though — judging whether a tag
+now clears a taskbar means looking at the display, which is where the
+phone is, not the machine running the server. The phone client's
+Markers row has a `−`/`+` stepper for it next to the source buttons:
+adjusting it takes effect immediately, restarting the overlay with the
+new margin if on-screen markers are currently active (`POST
+/markers/overlay-margin`), with no need to touch the server directly.
+
 ### The overlay is transparent to input
 
 Every mouse and keyboard event passes straight through to whatever is
@@ -813,12 +928,60 @@ The obvious objection is that FPS counters manage it — RTSS, the Steam
 and Discord overlays, MangoHud. They do, by not being overlays: they run
 *inside* the game process and hook the presentation call
 (`IDXGISwapChain::Present`, `vkQueuePresentKHR`), drawing into the back
-buffer before it reaches the display. That approach would also sidestep
-the Wayland limitation above. It is not built here because a
-software-rendered emulator presents no swapchain to hook, it requires
-launching the game *through* the layer, and on Windows it means DLL
-injection. Worth revisiting if borderless-windowed turns out not to be
-enough.
+buffer before it reaches the display. That approach also sidesteps the
+Wayland limitation above, and is exactly what "Vulkan present overlay"
+below does for titles that present through Vulkan (natively, or via
+DXVK/VKD3D-Proton). It does not help a software-rendered emulator,
+which presents no swapchain to hook, or anything presenting outside
+Vulkan (wined3d's OpenGL path); the window overlay and printed markers
+remain the answer there.
+
+## Vulkan present overlay
+
+A second on-screen-markers backend, for exactly the case above the
+window-based overlay cannot reach: a title running **exclusive
+fullscreen**, where the compositor is bypassed entirely and there is no
+window stack for an overlay window to sit above — hit in practice on
+Blue Estate (Unreal Engine 3 over Proton/DXVK, `Fullscreen=True`), whose
+window carried every correct "stay on top" property and still never
+appeared on screen. This backend draws the same marker patches
+`render_overlay` computes, but from *inside* the game's own process, by
+hooking `vkQueuePresentKHR` through a Vulkan explicit layer — the same
+mechanism MangoHud, RenderDoc and the Steam overlay use. It covers any
+title that presents through real Vulkan calls, which includes
+DXVK/VKD3D-Proton-translated D3D9/11/12 titles as well as native Vulkan
+ones.
+
+It is a separate, optional native component, not part of the default
+install — building it needs a C compiler and CMake, not just `uv sync`:
+
+    cmake -S native/vulkan_overlay -B native/vulkan_overlay/build
+    cmake --build native/vulkan_overlay/build
+
+Then, per game, in Steam's launch options:
+
+    /path/to/Boresight/.venv/bin/python -m boresight.overlay.vulkan_backend --screen 1920x1080 -- %command%
+
+Steam runs launch options from the game's own install directory, in a
+plain environment with no `uv`/venv context — `uv run` there can't find
+which project to use and fails with `ModuleNotFoundError: No module
+named 'boresight'`, so the game never launches at all. Calling the
+venv's own `python` by its full path sidesteps that entirely
+(`uv run --project /path/to/Boresight python -m ...` also works, if
+you'd rather keep using `uv run`).
+
+This is always **per-launch, explicit activation** — an explicit Vulkan
+layer, named in `VK_INSTANCE_LAYERS` for one process, never installed
+system-wide as an implicit layer that would run for every Vulkan
+application on the machine. A title that does not present via Vulkan,
+or a system with no compatible Vulkan loader, gets the same actionable
+message pattern as the window overlay's own refusals, naming this
+backend's alternatives — the window overlay or printed markers — rather
+than silently drawing nothing.
+
+Full detail — the build, the manifest, manual verification against
+`vkcube`, and the present-hook's design — lives in
+`native/vulkan_overlay/README.md`.
 
 ## Repo layout
 
@@ -855,8 +1018,8 @@ a defect invisible to a test suite that always runs from a checkout.
           render.py           # painting them
           backend.py          # can this platform host an overlay?
           qt_backend.py       # the always-on-top, input-transparent window
-        inject.py             # uinput backend (+ future SendInput)
-        filter.py             # future: 1-euro
+        inject.py             # uinput backend (+ future SendInput); SmoothingCursorBackend
+        one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
@@ -941,14 +1104,19 @@ in, so the two sequences pair positionally.
       marker map, the solver and cursor injection into one stateless
       per-frame call, replayable over the checked-in fixtures with
       `python -m boresight.pipeline` (see "Frame to cursor"), and now
-      also fed live by the phone over a WebSocket — still unfiltered
+      also fed live by the phone over a WebSocket — smoothed by a layer
+      below it, not by the pipeline itself (see "Aim smoothing")
 - [x] On-screen markers: `python -m boresight.overlay` draws the tags
       over the live display, always on top and transparent to mouse and
       keyboard, with the solver and the renderer sharing one layout
       function so they cannot disagree (see "On-screen markers") — X11
       verified offscreen, never yet run against a camera or on Windows
 - [ ] Debug overlay with per-frame reprojection error
-- [ ] 1-euro filter tuning
+- [x] 1-euro filter tuning: a `CursorBackend` decorator (`inject.py`'s
+      `SmoothingCursorBackend`, over `one_euro.py`) smooths aim-derived
+      cursor movement before it reaches the OS, with defaults tuned by
+      feel rather than measurement; does not affect `POST /cursor/move`
+      (see "Aim smoothing")
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
       directly (uinput, Linux) — built ahead of the pipeline above as a
       standalone proof; not yet wired to real aim data or Mesen

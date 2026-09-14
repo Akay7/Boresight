@@ -1,40 +1,40 @@
 ## 1. The filter
 
-- [ ] 1.1 Add a one-euro filter implementation (2D position, monotonic
+- [x] 1.1 Add a one-euro filter implementation (2D position, monotonic
       timestamp per update, minimum cutoff frequency and speed
       coefficient as constructor parameters with defaults) and unit
       test it directly: a near-constant input stays close to its mean,
       a fast consistent ramp tracks with little lag, and the first call
       returns its input unchanged
-- [ ] 1.2 Test that timing is driven by a monotonic clock rather than
+- [x] 1.2 Test that timing is driven by a monotonic clock rather than
       call count — feeding calls with an explicit, varying `dt` produces
       different smoothing than feeding the same values at a fixed `dt`
-- [ ] 1.3 Test that a large `dt` after a gap does not overshoot or sweep
+- [x] 1.3 Test that a large `dt` after a gap does not overshoot or sweep
       through intermediate positions — the next value after a gap moves
       toward the new input at least as fast as an equal-`dt` step
       earlier in a steady sequence
 
 ## 2. The cursor backend decorator
 
-- [ ] 2.1 Add a `CursorBackend` implementation that wraps another
+- [x] 2.1 Add a `CursorBackend` implementation that wraps another
       `CursorBackend`: `move_absolute` runs `(x, y)` through the filter
       before forwarding the result, `click` forwards unchanged
-- [ ] 2.2 Test against a `FakeCursorBackend`: filtered `move_absolute`
+- [x] 2.2 Test against a `FakeCursorBackend`: filtered `move_absolute`
       calls reach the wrapped backend already smoothed, and `click`
       calls reach it untouched and don't themselves feed the filter
-- [ ] 2.3 Test that `click()` after a filtered move lands at the
+- [x] 2.3 Test that `click()` after a filtered move lands at the
       filtered position, not the position that was passed in
 
 ## 3. Wiring
 
-- [ ] 3.1 Have `MarkerSourceController` wrap the backend it is given
+- [x] 3.1 Have `MarkerSourceController` wrap the backend it is given
       once, at its own construction, and pass the wrapped backend to
       every `AimPipeline` it builds — including on a marker-source
       switch
-- [ ] 3.2 Test that two `AimPipeline`s built by the same controller
+- [x] 3.2 Test that two `AimPipeline`s built by the same controller
       (e.g. across a switch) share one filter's state rather than each
       starting fresh
-- [ ] 3.3 Confirm `server.py`'s `POST /cursor/move` route still uses
+- [x] 3.3 Confirm `server.py`'s `POST /cursor/move` route still uses
       the unwrapped backend from `app.state.cursor_backend`, and add a
       test that a manual move request is unaffected by prior
       aim-derived filter state (moves to exactly the requested
@@ -42,12 +42,12 @@
 
 ## 4. Integration tests
 
-- [ ] 4.1 Extend the pipeline/marker-source test fixtures to drive
+- [x] 4.1 Extend the pipeline/marker-source test fixtures to drive
       several frames with small position variation through a real
       `AimPipeline` wired through the wrapped backend, and assert the
       backend's recorded positions vary less than the raw solved
       positions did
-- [ ] 4.2 Test that a switch between marker sources mid-sequence, with
+- [x] 4.2 Test that a switch between marker sources mid-sequence, with
       an unchanged underlying aim point, produces no discontinuity in
       the wrapped backend's recorded positions attributable to the
       switch itself
@@ -75,10 +75,10 @@
 
 ## 6. Documentation and gate
 
-- [ ] 6.1 Check off `1-euro filter tuning` in README's milestones list
+- [x] 6.1 Check off `1-euro filter tuning` in README's milestones list
       and add a short "Aim smoothing" note describing the tradeoff
       (steady aim is smoothed, fast movement is not) and that it does
       not affect `/cursor/move`
-- [ ] 6.2 Run `uv run pytest`, `uv run ruff check`, `uv run ruff format
+- [x] 6.2 Run `uv run pytest`, `uv run ruff check`, `uv run ruff format
       --check` and `uv run pre-commit run --all-files` clean
-- [ ] 6.3 Run `openspec validate add-aim-smoothing --strict`
+- [x] 6.3 Run `openspec validate add-aim-smoothing --strict`

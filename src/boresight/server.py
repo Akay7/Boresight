@@ -99,6 +99,14 @@ class MarkerSourceRequest(BaseModel):
     source: Literal["printed", "screen"]
 
 
+class OverlayMarginRequest(BaseModel):
+    # Bounded well above any real panel height, so a garbled value is a
+    # 422 rather than a margin that swallows the whole display; the
+    # overlay's own `OverlayGeometryError` still covers a value that is
+    # merely too large for a particular monitor.
+    extra_margin_px: int = Field(ge=0, le=2000)
+
+
 def get_cursor_backend(request: Request) -> CursorBackend:
     return request.app.state.cursor_backend
 
@@ -112,6 +120,7 @@ def create_app(
     marker_map_factory: Callable[[], MarkerMap] = _default_marker_map,
     config: ServerConfig | None = None,
     display: int | None = None,
+    overlay_extra_margin_px: int = 0,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -129,7 +138,10 @@ def create_app(
         app.state.cursor_backend = backend_factory()
         app.state.marker_map = marker_map_factory()
         app.state.markers = MarkerSourceController(
-            app.state.cursor_backend, app.state.marker_map, display=display
+            app.state.cursor_backend,
+            app.state.marker_map,
+            display=display,
+            overlay_extra_margin_px=overlay_extra_margin_px,
         )
         app.state.settings = ViewSettings()
         try:
@@ -186,6 +198,21 @@ def create_app(
             # overlay extra absent, no display. The body carries the
             # overlay's own words, and the state still reports printed
             # markers as active, because they are.
+            return JSONResponse(
+                {"detail": str(error), **controller.state()}, status_code=409
+            )
+
+    @app.post("/markers/overlay-margin")
+    def set_overlay_margin(selection: OverlayMarginRequest, request: Request) -> dict:
+        controller = request.app.state.markers
+        try:
+            return controller.set_overlay_extra_margin_px(selection.extra_margin_px)
+        except MarkerSourceError as error:
+            # Same shape as a failed source switch: the margin the
+            # request asked for is still stored (the next successful
+            # start uses it), but the overlay that was supposed to pick
+            # it up right now did not, so printed markers stay active
+            # and the state says so.
             return JSONResponse(
                 {"detail": str(error), **controller.state()}, status_code=409
             )
@@ -512,6 +539,16 @@ def main(argv: list[str] | None = None) -> int:
         "'screen:<W>x<H>' for tags drawn on the display by "
         "`python -m boresight.overlay` (default: %(default)s)",
     )
+    parser.add_argument(
+        "--overlay-extra-margin-px",
+        type=int,
+        default=0,
+        help="shrink the on-screen overlay's auto-detected available "
+        "area by this much on every side, on top of whatever the "
+        "desktop's own panels already reserve. For a display whose "
+        "panel reservation isn't detected automatically (default: 0, "
+        "no change; see `python -m boresight.overlay --help`)",
+    )
     args = parser.parse_args(argv)
 
     # Uvicorn configures its own loggers and leaves the root alone, so
@@ -562,7 +599,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     uvicorn.run(
-        create_app(marker_map_factory=layout_factory, config=config),
+        create_app(
+            marker_map_factory=layout_factory,
+            config=config,
+            overlay_extra_margin_px=args.overlay_extra_margin_px,
+        ),
         host=config.host,
         port=config.port,
         **ssl_options,
