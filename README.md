@@ -280,7 +280,22 @@ Two paths for the aim coordinate, selectable by config flag.
 **Direct injection.** Windows `SendInput` with
 `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE`, or a uinput virtual absolute
 pointer on Linux. Zero added latency, trivial to implement, works with
-emulators. Some fullscreen-exclusive titles ignore synthetic events.
+emulators. Some fullscreen-exclusive titles ignore synthetic events —
+confirmed on one real title (Blue Estate) that switches its own input
+handling to raw/relative mouse capture specifically in fullscreen,
+ignoring the OS cursor entirely; its own "Light Gun Mode" setting
+turned out to be the actual fix, not anything on Boresight's side.
+
+For a title where no such in-game setting exists, the Linux backend can
+also emit a relative delta alongside its normal absolute placement —
+**off by default, and not safe to enable casually.** Continuous
+relative deltas computed from a noisy tracked position accumulate
+error with no correction the way absolute placement has, and drift
+into a screen corner given enough time; confirmed exactly that way in
+practice. `BORESIGHT_REL_SCALE` (device-motion units per full screen
+sweep) enables it if set to anything nonzero — treat this as a
+supervised experiment for one specific title, not a setting to leave
+on.
 
 **Hardware round-trip (future).** PC computes the coordinate, sends it
 over serial to an ESP32-S3 (native USB), which emits the absolute HID
@@ -554,6 +569,31 @@ module docstring for the formula.
 backend from `app.state.cursor_backend`, so an explicit requested
 coordinate always lands exactly, never smoothed toward wherever
 aim-derived movement last left the filter.
+
+### Tuning: less lag or less jitter
+
+`MarkerSourceController` builds the filter with `min_cutoff=0.5,
+beta=1.0` — tuned by feel, not measurement, so what feels right depends
+on your own camera's noise floor and how fast you swing. Two env vars
+override either without a code change (read once, at server startup):
+
+    BORESIGHT_AIM_MIN_CUTOFF=5.0 uv run python -m boresight.server
+
+- **`BORESIGHT_AIM_MIN_CUTOFF`** (default `0.5`) — how hard a *held*
+  aim is smoothed. This is the one to raise if the cursor visibly
+  creeps into position after you stop moving instead of landing there
+  immediately: at a low cutoff the filter only approaches the true
+  position a little more each frame rather than snapping to it. Too
+  high, and a steady aim starts visibly shaking with raw detection
+  noise instead.
+- **`BORESIGHT_AIM_BETA`** (default `1.0`) — how much a *fast* swing
+  cuts through the smoothing. Raise this if a quick swing to a new
+  target still feels smoothed/laggy mid-motion, as opposed to only
+  after arriving.
+
+Both are read by `_aim_filter()` in `marker_source.py`; an unset or
+non-numeric value falls back to `OneEuroFilter`'s own default for that
+parameter.
 
 ### Holding through a brief dropout
 
@@ -918,10 +958,17 @@ install — building it needs a C compiler and CMake, not just `uv sync`:
     cmake -S native/vulkan_overlay -B native/vulkan_overlay/build
     cmake --build native/vulkan_overlay/build
 
-Then, per game, in Steam's launch options (or any shell launching the
-game directly):
+Then, per game, in Steam's launch options:
 
-    uv run python -m boresight.overlay.vulkan_backend --screen 1920x1080 -- %command%
+    /path/to/Boresight/.venv/bin/python -m boresight.overlay.vulkan_backend --screen 1920x1080 -- %command%
+
+Steam runs launch options from the game's own install directory, in a
+plain environment with no `uv`/venv context — `uv run` there can't find
+which project to use and fails with `ModuleNotFoundError: No module
+named 'boresight'`, so the game never launches at all. Calling the
+venv's own `python` by its full path sidesteps that entirely
+(`uv run --project /path/to/Boresight python -m ...` also works, if
+you'd rather keep using `uv run`).
 
 This is always **per-launch, explicit activation** — an explicit Vulkan
 layer, named in `VK_INSTANCE_LAYERS` for one process, never installed

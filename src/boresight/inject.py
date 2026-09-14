@@ -4,15 +4,51 @@ Coordinates are normalized floats in [0.0, 1.0] (fraction of screen
 width/height). The uinput backend maps them onto the device's absolute
 axis range, 0-32767, matching the 16-bit HID absolute range Boresight's
 future hardware paths also target.
+
+The uinput backend can *optionally* also drive a relative delta
+alongside its normal absolute placement, for a game that switches to
+raw/relative mouse capture for camera or reticle control in fullscreen
+instead of reading the OS cursor position. Off by default, and should
+stay off unless `BORESIGHT_REL_SCALE` is set deliberately -- see
+`DEFAULT_REL_SCALE`'s comment for why continuous relative deltas are a
+materially riskier feature than the absolute placement, not just an
+alternative shape of the same thing.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Protocol
 
 from boresight.one_euro import OneEuroFilter
 
 ABS_MAX = 32767
+
+# Device-motion units per full [0.0, 1.0] sweep of the relative axis.
+# Zero (off) by default -- deliberately, not merely a conservative
+# starting point. Absolute placement is self-correcting: whatever
+# noise or jitter camera-based tracking has, each frame snaps to
+# wherever the aim solve currently reads, regardless of history. A
+# relative delta computed frame-to-frame from that same noisy signal
+# has no such correction -- it accumulates every frame's jitter as a
+# random walk, which drifts without bound given enough frames and
+# eventually pins against a screen or reticle edge and stays there.
+# Confirmed exactly that way in practice: enabling this at a first-
+# guess scale sent the cursor to a corner and left it there. A smaller
+# scale only slows the drift, it does not remove it -- this is not
+# presently safe to enable outside a deliberate, supervised experiment.
+DEFAULT_REL_SCALE = 0.0
+
+
+def _rel_scale() -> float:
+    raw = os.environ.get("BORESIGHT_REL_SCALE")
+    if not raw:
+        return DEFAULT_REL_SCALE
+    try:
+        return float(raw)
+    except ValueError:
+        return DEFAULT_REL_SCALE
+
 
 # python-evdev's `UInput` defaults every device to vendor/product/version
 # 1/1/1 (USB) unless told otherwise. Two Boresight devices left at that
@@ -99,30 +135,36 @@ class UinputCursorBackend:
             ) from exc
 
         try:
-            # click()'s own device, deliberately separate from the one
-            # above. Adding BTN_LEFT to the ABS_X/Y + BTN_TOUCH +
-            # INPUT_PROP_DIRECT device above changes udev's
-            # classification of it from ID_INPUT_TOUCHSCREEN to
-            # ID_INPUT_MOUSE, which would send move_absolute's
-            # positioning back through relative-motion acceleration
-            # instead of the direct placement the touch capability
-            # alone earns it.
+            # click()'s device, and now also the relative-motion one --
+            # deliberately separate from `self._device` above. Adding
+            # BTN_LEFT to the ABS_X/Y + BTN_TOUCH + INPUT_PROP_DIRECT
+            # device above changes udev's classification of it from
+            # ID_INPUT_TOUCHSCREEN to ID_INPUT_MOUSE, which would send
+            # move_absolute's positioning back through relative-motion
+            # acceleration instead of the direct placement the touch
+            # capability alone earns it.
             #
-            # REL_X/REL_Y are declared here but never written to. A
-            # button with no motion axis at all was confirmed against a
-            # plain Xorg session (querying the X core pointer's button
-            # state via Xlib before/after a write) to still land on the
+            # REL_X/REL_Y are declared here and now written on every move
+            # (previously declared but unused): a title reading the OS
+            # cursor position gets `self._device`'s absolute placement,
+            # one reading raw/relative mouse motion for its own camera or
+            # reticle gets this device's deltas instead. Motivated by a
+            # real title (Blue Estate, exclusive fullscreen) that did not
+            # respond to this backend's absolute-only placement there,
+            # while a real mouse's relative motion worked fine in the same
+            # fullscreen session -- the working theory this change acts
+            # on, not yet re-confirmed in-game after the change. A button
+            # with no motion axis at all was separately confirmed, against
+            # a plain Xorg session (querying the X core pointer's button
+            # state via Xlib before/after a write), to still land on the
             # shared core pointer -- X11 merges every pointer-capable
-            # device into one core pointer regardless of which one
-            # reports what. Under a Wayland compositor, though, libinput
-            # itself decides per device whether BTN_LEFT means anything:
-            # without a motion capability it classifies the device as a
-            # bare keyboard, and the button event never reaches an
-            # application as a click. REL_X/REL_Y earn it
-            # LIBINPUT_DEVICE_CAP_POINTER -- the same classification a
-            # real relative mouse gets, at the cost of it also having a
-            # (silent, unused) capability for exactly the motion this
-            # device is not meant to move the cursor with.
+            # device into one core pointer regardless of which one reports
+            # what. Under a Wayland compositor, though, libinput itself
+            # decides per device whether BTN_LEFT means anything: without
+            # a motion capability it classifies the device as a bare
+            # keyboard, and the button event never reaches an application
+            # as a click. REL_X/REL_Y earn it LIBINPUT_DEVICE_CAP_POINTER
+            # -- the same classification a real relative mouse gets.
             #
             # `product=` also matters here, separately from the name:
             # python-evdev's `UInput` defaults every device to the same
@@ -135,7 +177,7 @@ class UinputCursorBackend:
             # --user`), a known category of X input bug when device
             # identity collides. Giving each device its own product ID
             # is a one-line difference with no other effect.
-            self._click_device = UInput(
+            self._relative_device = UInput(
                 {
                     ecodes.EV_KEY: [ecodes.BTN_LEFT],
                     ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y],
@@ -150,6 +192,11 @@ class UinputCursorBackend:
             ) from exc
 
         self._ecodes = ecodes
+        self._rel_scale = _rel_scale()
+        # None until the first move_absolute call -- there is no prior
+        # position to take a delta against yet, and emitting one against
+        # an arbitrary starting point would be a spurious jump.
+        self._last_position: tuple[float, float] | None = None
 
         # Bring the pen into proximity once and leave it there for the
         # life of the backend. Proximity is what makes the cursor track
@@ -170,15 +217,32 @@ class UinputCursorBackend:
         self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_Y, abs_y)
         self._device.syn()
 
+        # Alongside the absolute placement above: a relative delta from
+        # the last position, for a title reading raw mouse motion
+        # instead. See `self._relative_device`'s construction comment.
+        if self._last_position is not None:
+            last_x, last_y = self._last_position
+            rel_x = round((x - last_x) * self._rel_scale)
+            rel_y = round((y - last_y) * self._rel_scale)
+            if rel_x or rel_y:
+                self._relative_device.write(
+                    self._ecodes.EV_REL, self._ecodes.REL_X, rel_x
+                )
+                self._relative_device.write(
+                    self._ecodes.EV_REL, self._ecodes.REL_Y, rel_y
+                )
+                self._relative_device.syn()
+        self._last_position = (x, y)
+
     def click(self) -> None:
         # BTN_LEFT press then release, on the dedicated click device, at
         # whatever position the last move_absolute call left the
         # cursor -- a click reports that the trigger was pulled, not a
         # new position.
-        self._click_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 1)
-        self._click_device.syn()
-        self._click_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 0)
-        self._click_device.syn()
+        self._relative_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 1)
+        self._relative_device.syn()
+        self._relative_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 0)
+        self._relative_device.syn()
 
     def close(self) -> None:
         # Leave proximity before going away, so the pen is not left
@@ -186,7 +250,7 @@ class UinputCursorBackend:
         self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOOL_PEN, 0)
         self._device.syn()
         self._device.close()
-        self._click_device.close()
+        self._relative_device.close()
 
 
 class SmoothingCursorBackend:

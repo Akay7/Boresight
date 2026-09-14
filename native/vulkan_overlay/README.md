@@ -47,15 +47,32 @@ are both present, writes the marker canvas for your display resolution,
 and execs your game with the right environment set:
 
 ```sh
-uv run python -m boresight.overlay.vulkan_backend \
+uv run python -m boresight.overlay.vulkan_backend --screen 1920x1080
+```
+
+That form (bare `uv run`) is only for trying it from a terminal inside
+this checkout. **In Steam's launch options, use the venv's `python` by
+its full path instead:**
+
+```sh
+/path/to/Boresight/.venv/bin/python -m boresight.overlay.vulkan_backend \
     --screen 1920x1080 -- %command%
 ```
 
-In Steam, put that whole line (after `uv run`, or point at the venv's
-python directly) in a game's launch options, with `%command%` as
-Steam's own placeholder. Without a trailing command, it just checks
-availability and writes the canvas, printing the equivalent manual
-environment variables:
+`%command%` is Steam's own placeholder. This distinction matters
+because Steam runs launch options from the *game's* install directory,
+in a plain environment with no `uv`/venv context at all -- `uv run`
+there has no project to resolve and fails with `ModuleNotFoundError: No
+module named 'boresight'` -- and since that failure happens before this
+wrapper ever gets to exec the game (`%command%` is everything after
+`--`, only reached once the wrapper's own `import boresight` succeeds),
+the game doesn't launch at all, which is easy to mistake for a broken
+launch option rather than a missing venv. `uv run --project
+/path/to/Boresight python -m ...` is an equivalent fix if you'd rather
+keep using `uv run`.
+
+Without a trailing command, it just checks availability and writes the
+canvas, printing the equivalent manual environment variables:
 
 ```
 VK_INSTANCE_LAYERS=VK_LAYER_boresight_overlay

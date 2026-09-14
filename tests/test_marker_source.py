@@ -24,6 +24,7 @@ from boresight.marker_source import (
     MarkerSourceError,
     _overlay_command,
 )
+from boresight.one_euro import OneEuroFilter
 
 PRINTED = resolve_layout("file")
 
@@ -343,6 +344,45 @@ def test_a_marker_source_switch_shares_the_same_filter_state() -> None:
         assert before is after_switch_back
     finally:
         controller.shutdown()
+
+
+def test_the_aim_filter_defaults_match_one_euro_filters_own_defaults(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("BORESIGHT_AIM_MIN_CUTOFF", raising=False)
+    monkeypatch.delenv("BORESIGHT_AIM_BETA", raising=False)
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+
+    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+
+    assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
+    assert filter_._beta == OneEuroFilter()._beta  # noqa: SLF001
+
+
+def test_env_vars_override_the_aim_filters_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("BORESIGHT_AIM_MIN_CUTOFF", "2.5")
+    monkeypatch.setenv("BORESIGHT_AIM_BETA", "0.3")
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+
+    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+
+    assert filter_._min_cutoff == 2.5  # noqa: SLF001
+    assert filter_._beta == 0.3  # noqa: SLF001
+
+
+def test_an_invalid_aim_filter_env_var_falls_back_to_the_default(monkeypatch) -> None:
+    monkeypatch.setenv("BORESIGHT_AIM_MIN_CUTOFF", "not-a-number")
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+
+    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+
+    assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
 
 
 # --- Overlay margin, set at runtime --------------------------------------

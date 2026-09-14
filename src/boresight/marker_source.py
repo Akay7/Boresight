@@ -46,6 +46,7 @@ from boresight.aim_hold import HoldingPipeline
 from boresight.inject import CursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
 from boresight.marker_map import MarkerMap
+from boresight.one_euro import OneEuroFilter
 from boresight.overlay.layout import overlay_layout
 from boresight.overlay.qt_backend import GEOMETRY_EVENT
 from boresight.pipeline import AimPipeline
@@ -60,6 +61,33 @@ GEOMETRY_TIMEOUT_S = 20.0
 STOP_TIMEOUT_S = 5.0
 
 logger = logging.getLogger("boresight")
+
+
+def _aim_filter() -> OneEuroFilter:
+    """`OneEuroFilter`'s defaults, overridable without a code change.
+
+    Both knobs are tuned by feel, not measurement (see one_euro.py's
+    module docstring), and "by feel" differs by camera, lighting and
+    what the aim is actually driving -- a phone's camera noise floor,
+    or a specific game's own sensitivity, are not something Boresight
+    can calibrate for ahead of time. Raise BORESIGHT_AIM_MIN_CUTOFF if
+    a held aim feels laggy (less smoothing of a slow-moving signal);
+    raise BORESIGHT_AIM_BETA if a fast swing still feels smoothed.
+    """
+    min_cutoff = os.environ.get("BORESIGHT_AIM_MIN_CUTOFF")
+    beta = os.environ.get("BORESIGHT_AIM_BETA")
+    kwargs = {}
+    if min_cutoff:
+        try:
+            kwargs["min_cutoff"] = float(min_cutoff)
+        except ValueError:
+            pass
+    if beta:
+        try:
+            kwargs["beta"] = float(beta)
+        except ValueError:
+            pass
+    return OneEuroFilter(**kwargs)
 
 
 class MarkerSource(Enum):
@@ -156,7 +184,7 @@ class MarkerSourceController:
         # whoever else holds a reference to it -- the manual
         # `/cursor/move` route in particular, which an explicit request
         # should reach exactly, not through this filter.
-        self._backend = SmoothingCursorBackend(backend)
+        self._backend = SmoothingCursorBackend(backend, filter=_aim_filter())
         self._printed_layout = printed_layout
         self._display = display
         self._launcher = launcher

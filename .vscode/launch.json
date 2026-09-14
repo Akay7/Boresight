@@ -73,7 +73,10 @@
             // its own event loop; there is nothing here to debug in it.
             "subProcess": false,
             "console": "integratedTerminal",
-            "justMyCode": true
+            "justMyCode": true,
+            "env": {
+                "BORESIGHT_AIM_MIN_CUTOFF": "5.0"
+            }
         }
     ]
 }
