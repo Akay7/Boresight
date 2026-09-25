@@ -112,6 +112,14 @@ class SessionStats:
     position: tuple[float, float] | None = None
     triggers: int = 0
 
+    # Who is on the other end, from its `hello`. None until it says:
+    # more than one kind of device can stream now, and a log line that
+    # says "phone" about an ESP32-CAM sends the operator to the wrong
+    # device.
+    client_kind: str | None = None
+    client_version: str | None = None
+    frame_size: tuple[int, int] | None = None
+
     # Per connection, never per app or per pipeline: one phone turning
     # the debug view on must not change what another phone receives, and
     # the pipeline behind them is shared.
@@ -173,3 +181,76 @@ class SessionStats:
         if self.debug_enabled:
             message["debug"] = self.debug
         return message
+
+
+UNIDENTIFIED = "unidentified"
+
+
+# Identity, not field equality: two fresh sessions from the same address
+# compare equal field by field, and unregistering one must not remove
+# the other.
+@dataclass(eq=False)
+class ActiveSession:
+    address: str
+    stats: SessionStats
+    started: float
+
+    def label(self) -> str:
+        """How logs name this session: its kind once known, then where."""
+        return f"{self.stats.client_kind or UNIDENTIFIED} {self.address}"
+
+
+class SessionRegistry:
+    """The frame sessions currently connected, for reading from outside.
+
+    A client with no screen of its own -- an ESP32-CAM inside a gun
+    shell -- cannot display its telemetry, so it has to be readable from
+    another device. Entries are added when a session starts and removed
+    when it ends, never retained: a listing that kept closed sessions
+    would show a dead camera as streaming.
+
+    Touched only from the event loop, so no locking.
+    """
+
+    def __init__(self) -> None:
+        self._sessions: list[ActiveSession] = []
+
+    def register(
+        self, address: str, stats: SessionStats, started: float
+    ) -> ActiveSession:
+        session = ActiveSession(address, stats, started)
+        self._sessions.append(session)
+        return session
+
+    def unregister(self, session: ActiveSession) -> None:
+        if session in self._sessions:
+            self._sessions.remove(session)
+
+    def __len__(self) -> int:
+        return len(self._sessions)
+
+    def listing(self, now: float) -> list[dict]:
+        """Each live session's identity and its latest telemetry.
+
+        Debug geometry is left out: it is kilobytes per frame, describes
+        an image nobody reading this can see, and belongs to the client
+        that asked for it.
+        """
+        entries = []
+        for session in self._sessions:
+            stats = session.stats
+            telemetry = stats.as_message()
+            telemetry.pop("debug", None)
+            entries.append(
+                {
+                    "address": session.address,
+                    "client": stats.client_kind or UNIDENTIFIED,
+                    "version": stats.client_version,
+                    "frame_size": (
+                        None if stats.frame_size is None else list(stats.frame_size)
+                    ),
+                    "connected_s": round(now - session.started, 1),
+                    "stats": telemetry,
+                }
+            )
+        return entries

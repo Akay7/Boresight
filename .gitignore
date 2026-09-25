@@ -9,3 +9,14 @@ native/*/build/
 # Generated TLS certificate and key for the phone path. Machine-local,
 # regenerated on demand, and the key must never be committed.
 .boresight/
+
+# ESP32-CAM firmware: build output, fetched components, and the local
+# configuration -- which holds the Wi-Fi password and token -- plus the
+# server certificate copied in for TLS pinning. Never committed.
+firmware/*/build/
+firmware/*/build-host/
+firmware/*/managed_components/
+firmware/*/dependencies.lock
+firmware/*/sdkconfig
+firmware/*/sdkconfig.old
+firmware/*/main/server_cert.pem

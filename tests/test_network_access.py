@@ -331,3 +331,77 @@ def test_a_wildcard_bind_resolves_to_a_dialable_address() -> None:
 def test_plain_http_is_reflected_in_the_url_scheme() -> None:
     assert ServerConfig(host="127.0.0.1").phone_url().startswith("http://")
     assert ServerConfig(host="127.0.0.1", tls=True).phone_url().startswith("https://")
+
+
+# --- Connection details for a headless device ------------------------
+
+
+def test_the_certificate_fingerprint_is_sha256_over_der(tmp_path: Path) -> None:
+    import hashlib
+    import ssl
+
+    from boresight.netaccess import certificate_fingerprint
+
+    certfile, _key = resolve_certificate(
+        ServerConfig(host="127.0.0.1", tls=True, cert_dir=tmp_path)
+    )
+    der = ssl.PEM_cert_to_DER_cert(certfile.read_text())
+
+    fingerprint = certificate_fingerprint(certfile)
+
+    assert len(fingerprint.split(":")) == 32
+    assert fingerprint.replace(":", "") == hashlib.sha256(der).hexdigest().upper()
+
+
+def test_the_fingerprint_is_stable_across_restarts(tmp_path: Path) -> None:
+    """A device pins the certificate it was flashed with, so a restart
+    that changed it would silently strand every device."""
+    from boresight.netaccess import certificate_fingerprint
+
+    config = ServerConfig(host="127.0.0.1", tls=True, cert_dir=tmp_path)
+
+    first = certificate_fingerprint(resolve_certificate(config)[0])
+    second = certificate_fingerprint(resolve_certificate(config)[0])
+
+    assert first == second
+
+
+def _run_main(monkeypatch, argv: list[str]) -> None:
+    from boresight import server
+
+    monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "create_app", lambda **kwargs: object())
+    server.main(argv)
+
+
+def test_plain_text_device_details_are_printed(monkeypatch, capsys) -> None:
+    _run_main(monkeypatch, ["--host", "192.168.1.20", "--token", TOKEN])
+
+    out = capsys.readouterr().out
+
+    assert "host    192.168.1.20" in out
+    assert "port    7331" in out
+    assert f"path    {FRAME_SOCKET_PATH}" in out
+    assert "tls     off" in out
+    assert f"token   {TOKEN}" in out
+    assert "sha256" not in out
+
+
+def test_tls_device_details_carry_the_certificate_fingerprint(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    from boresight.netaccess import certificate_fingerprint
+
+    certfile, keyfile = resolve_certificate(
+        ServerConfig(host="127.0.0.1", tls=True, cert_dir=tmp_path)
+    )
+
+    _run_main(
+        monkeypatch, ["--tls", "--certfile", str(certfile), "--keyfile", str(keyfile)]
+    )
+
+    out = capsys.readouterr().out
+    assert "tls     on" in out
+    assert "token   (none)" in out
+    assert f"cert    {certfile}" in out
+    assert f"sha256  {certificate_fingerprint(certfile)}" in out

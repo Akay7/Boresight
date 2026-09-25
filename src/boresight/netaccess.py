@@ -169,6 +169,21 @@ def resolve_certificate(config: ServerConfig) -> tuple[Path, Path]:
     return certfile, keyfile
 
 
+def certificate_fingerprint(certfile: Path) -> str:
+    """SHA-256 over the certificate's DER, as colon-separated hex.
+
+    Printed at startup so a device that embeds the certificate as its
+    only trust anchor can be checked against the one being served. The
+    device logs the same figure for what it embedded; two lines to
+    compare beats a TLS handshake that just fails.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+
+    certificate = x509.load_pem_x509_certificate(certfile.read_bytes())
+    return ":".join(f"{byte:02X}" for byte in certificate.fingerprint(hashes.SHA256()))
+
+
 def _write_self_signed(certfile: Path, keyfile: Path, host: str) -> None:
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization

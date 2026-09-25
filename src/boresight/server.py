@@ -33,6 +33,7 @@ from boresight.markers import router as markers_router
 from boresight.netaccess import (
     TOKEN_QUERY_PARAM,
     ServerConfig,
+    certificate_fingerprint,
     presented_token,
     token_matches,
 )
@@ -40,6 +41,7 @@ from boresight.pipeline import DEFAULT_CONFIG_PATH, AimPipeline, FrameResult
 from boresight.stream import (
     FrameDecodeError,
     FrameSlot,
+    SessionRegistry,
     SessionStats,
     unpack_frame,
 )
@@ -57,9 +59,12 @@ FRAME_SOCKET_PATH = "/ws/frames"
 WS_POLICY_VIOLATION = 1008
 
 # How often a live session reports itself. Frequent enough to answer
-# "is the phone actually sending anything" at a glance, rare enough not
+# "is the camera actually sending anything" at a glance, rare enough not
 # to bury the log under a line per frame.
 SESSION_LOG_INTERVAL_S = 5.0
+
+# Longest client kind or version kept from a `hello`.
+HELLO_FIELD_MAX = 64
 
 logger = logging.getLogger("boresight")
 
@@ -144,6 +149,7 @@ def create_app(
             overlay_extra_margin_px=overlay_extra_margin_px,
         )
         app.state.settings = ViewSettings()
+        app.state.sessions = SessionRegistry()
         try:
             yield
         finally:
@@ -227,6 +233,12 @@ def create_app(
         logger.info("viewfinder overlay %s", "on" if selection.enabled else "off")
         return {"enabled": selection.enabled}
 
+    # Async so it runs on the event loop, the only place the registry is
+    # ever mutated: a threadpool route could read it mid-update.
+    @app.get("/sessions")
+    async def read_sessions(request: Request) -> dict:
+        return {"sessions": request.app.state.sessions.listing(time.monotonic())}
+
     @app.websocket(FRAME_SOCKET_PATH)
     async def stream_frames(websocket: WebSocket) -> None:
         # A browser cannot set headers on a WebSocket handshake, so the
@@ -242,13 +254,16 @@ def create_app(
             await websocket.close(code=WS_POLICY_VIOLATION)
             return
         await websocket.accept()
-        logger.info("phone connected: %s", client)
+        # Unidentified until its `hello` arrives, which is the first
+        # thing a current client sends.
+        logger.info("client connected: %s", client)
         await run_frame_session(
             websocket,
             websocket.app.state.markers,
             websocket.app.state.cursor_backend,
             client,
             websocket.app.state.settings,
+            websocket.app.state.sessions,
         )
 
     if WEB_DIR.is_dir():
@@ -292,8 +307,9 @@ async def run_frame_session(
     websocket: WebSocket,
     markers: MarkerSourceController,
     backend: CursorBackend,
-    client: str = "phone",
+    address: str = "unknown address",
     settings: ViewSettings | None = None,
+    sessions: SessionRegistry | None = None,
 ) -> None:
     """One connection: receive frames, solve the newest, report back.
 
@@ -313,6 +329,10 @@ async def run_frame_session(
     other way, which is negligible, and it makes the transport
     deterministic to test: a client can wait for frame N to be
     acknowledged before sending frame N+1.
+
+    The session is listed in `sessions` for exactly as long as the
+    connection lasts, so a client with no screen can be watched from
+    another device, and a dead one is never shown as streaming.
     """
     settings = settings or ViewSettings()
     slot = FrameSlot()
@@ -325,6 +345,8 @@ async def run_frame_session(
     started = time.monotonic()
     last_logged = started
     seen_first_frame = False
+    sessions = sessions if sessions is not None else SessionRegistry()
+    session = sessions.register(address, stats, started)
 
     async def receive_loop() -> None:
         nonlocal seen_first_frame
@@ -335,12 +357,20 @@ async def run_frame_session(
             payload = message.get("bytes")
             if payload is None:
                 # Text: control and telemetry, including the trigger.
+                known_kind = stats.client_kind
                 _handle_control(stats, backend, message.get("text"), settings)
+                if stats.client_kind != known_kind:
+                    logger.info(
+                        "client identified: %s (version %s, frames %s)",
+                        session.label(),
+                        stats.client_version or "unknown",
+                        "x".join(map(str, stats.frame_size or ())) or "unknown",
+                    )
                 continue
             stats.received += 1
             if not seen_first_frame:
                 seen_first_frame = True
-                logger.info("first frame received from %s", client)
+                logger.info("first frame received from %s", session.label())
             try:
                 client_ms, jpeg = unpack_frame(payload)
             except FrameDecodeError:
@@ -383,8 +413,9 @@ async def run_frame_session(
             if now - last_logged >= SESSION_LOG_INTERVAL_S:
                 fps = stats.processed / max(now - started, 1e-9)
                 logger.info(
-                    "streaming: %.1f fps, %s markers, %s, "
+                    "streaming from %s: %.1f fps, %s markers, %s, "
                     "%d received / %d solved / %d dropped / %d failed",
+                    session.label(),
                     fps,
                     stats.markers_detected,
                     stats.outcome,
@@ -405,12 +436,13 @@ async def run_frame_session(
         # connection, so the next one starts from zero.
         processor.cancel()
         await asyncio.gather(processor, return_exceptions=True)
+        sessions.unregister(session)
         elapsed = time.monotonic() - started
         if seen_first_frame:
             logger.info(
-                "phone disconnected: %s after %.1fs, "
+                "client disconnected: %s after %.1fs, "
                 "%d received / %d solved / %d dropped / %d failed (%.1f fps)",
-                client,
+                session.label(),
                 elapsed,
                 stats.received,
                 stats.processed,
@@ -420,10 +452,10 @@ async def run_frame_session(
             )
         else:
             # Connected but never streamed: the page was open and Start
-            # was never pressed, or capture failed on the phone.
+            # was never pressed, or capture failed on the device.
             logger.info(
-                "phone disconnected: %s after %.1fs without sending a frame",
-                client,
+                "client disconnected: %s after %.1fs without sending a frame",
+                session.label(),
                 elapsed,
             )
 
@@ -444,6 +476,10 @@ def _handle_control(
     The trigger carries no position of its own -- it fires wherever the
     last processed frame left the cursor -- so there is nothing to
     validate beyond the message's type.
+
+    `hello` names the kind of client on the other end. Like `rtt`, a
+    field that cannot be read is ignored rather than guessed at: a
+    session that stays unidentified is served exactly as before.
 
     The debug flag is set on this session's stats and nowhere else. The
     pipeline behind every session is one shared object, so anything
@@ -466,6 +502,17 @@ def _handle_control(
     elif message.get("type") == "trigger":
         backend.click()
         stats.triggers += 1
+    elif message.get("type") == "hello":
+        kind = message.get("client")
+        if not isinstance(kind, str) or not kind.strip():
+            return
+        # Bounded: these end up in log lines and in GET /sessions.
+        stats.client_kind = kind.strip()[:HELLO_FIELD_MAX]
+        version = message.get("version")
+        stats.client_version = (
+            version.strip()[:HELLO_FIELD_MAX] if isinstance(version, str) else None
+        )
+        stats.frame_size = _frame_size(message.get("frame_size"))
     elif message.get("type") == "debug":
         enabled = message.get("enabled")
         if not isinstance(enabled, bool):
@@ -483,6 +530,18 @@ def _handle_control(
         settings.debug = enabled
 
 
+def _frame_size(value: object) -> tuple[int, int] | None:
+    """A `[width, height]` pair of positive integers, or nothing."""
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    if not all(
+        isinstance(side, int) and not isinstance(side, bool) and side > 0
+        for side in value
+    ):
+        return None
+    return value[0], value[1]
+
+
 async def _report(
     websocket: WebSocket, stats: SessionStats, client_ms: float | None
 ) -> None:
@@ -492,6 +551,29 @@ async def _report(
         # The socket closed under us mid-report. The receive loop is
         # about to notice; nothing here needs to escalate.
         return
+
+
+def _device_details(config: ServerConfig, certfile: Path | None) -> str:
+    """What a client without a browser has to be configured with.
+
+    A phone is handed a URL to open. A device has its settings typed into
+    a build configuration, so it needs them as separate values -- and,
+    under TLS, a fingerprint to check the certificate it embedded against
+    the one actually being served. Regenerating `.boresight/` changes it,
+    and from the device that looks only like a connection that fails.
+    """
+    lines = [
+        "  For a device (ESP32-CAM), configure:",
+        f"    host    {config.advertised_host()}",
+        f"    port    {config.port}",
+        f"    path    {FRAME_SOCKET_PATH}",
+        f"    tls     {'on' if config.tls else 'off'}",
+        f"    token   {config.token or '(none)'}",
+    ]
+    if certfile is not None:
+        lines.append(f"    cert    {certfile}")
+        lines.append(f"    sha256  {certificate_fingerprint(certfile)}")
+    return "\n".join(lines) + "\n"
 
 
 app = create_app()
@@ -580,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.exit(2, f"{error}\n")
 
     ssl_options = {}
+    certfile = None
     if config.tls:
         certfile, keyfile = resolve_certificate(config)
         ssl_options = {"ssl_certfile": str(certfile), "ssl_keyfile": str(keyfile)}
@@ -589,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     # anything else can happen. Buffered, it appears after the server
     # has already been running for a while -- or never.
     print(f"\n  Open this on the phone:  {config.phone_url()}\n", flush=True)
+    print(_device_details(config, certfile), flush=True)
     if not config.tls and not is_loopback(config.host):
         print(
             "  Warning: serving plain HTTP. The camera will not be available\n"

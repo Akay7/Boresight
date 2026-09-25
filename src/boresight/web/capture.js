@@ -547,12 +547,29 @@ const CAMERA_TIMEOUT_MS = 30000;
 // the same machine over adb.
 const SOCKET_TIMEOUT_MS = 8000;
 
+// The server takes more than one kind of client now; without this its
+// logs and GET /sessions cannot say whether a session is this phone or
+// a camera inside a gun. Sends the size the camera granted, not the one
+// requested.
+function helloMessage() {
+  const track = state.stream && state.stream.getVideoTracks()[0];
+  const settings = track ? track.getSettings() : {};
+  const message = { type: "hello", client: "phone" };
+  if (Number.isInteger(settings.width) && Number.isInteger(settings.height)) {
+    message.frame_size = [settings.width, settings.height];
+  }
+  return message;
+}
+
 function connect() {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(socketUrl());
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
       set("stat-connection", "connected");
+      // On every connection, not once per page: the server's identity
+      // for a session belongs to that connection.
+      socket.send(JSON.stringify(helloMessage()));
       resolve(socket);
     };
     socket.onerror = () => reject(new Error("could not connect to the server"));

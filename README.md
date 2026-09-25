@@ -1,13 +1,16 @@
 # Boresight
 
 A computer-vision light gun. Printed fiducial markers around the display,
-an Android phone as the barrel camera, absolute mouse output injected
-straight into the OS.
+an Android phone or an ESP32-CAM as the barrel camera, absolute mouse
+output injected straight into the OS.
 
 The phone just streams video and renders an on-screen trigger button in
 a browser tab, over Wi-Fi to a small web server on the PC. All detection
-and solving runs on the PC — no firmware, no wiring, no pairing beyond
-joining the same network.
+and solving runs on the PC — the phone path needs no firmware, no
+wiring, no pairing beyond joining the same network. For a gun that is
+its own hardware, an ESP32-CAM inside the shell streams the same frames
+over the same socket and wires to the shell's real trigger — see
+[The ESP32-CAM client](#the-esp32-cam-client).
 
 Works with NES emulators, MAME, and anything with mouse aim.
 
@@ -47,18 +50,21 @@ any subset that surrounds the aim point stays within ~18mm.
 | Part | Notes |
 | --- | --- |
 | Android phone | Any phone with a modern browser and a rear camera. Doubles as the trigger — no dedicated webcam module or microcontroller needed |
-| NES Zapper shell | Gut the phototransistor board. Houses/mounts the phone instead of a camera PCB; the trigger microswitch goes unused since the trigger is on-screen |
+| *or* ESP32-CAM (AI-Thinker) | OV2640 camera, Wi-Fi and 4 MB PSRAM on one small board. Streams to the same server as the phone; see [The ESP32-CAM client](#the-esp32-cam-client) |
+| USB-serial adapter, 3.3 V logic | ESP32-CAM only. The board has no USB port of its own, so flashing goes through one |
+| 5 V supply, at least 1 A | ESP32-CAM only. The camera and radio draw current in bursts, and a weak supply shows up as brown-out resets |
+| NES Zapper shell | Gut the phototransistor board. With the phone, the trigger microswitch goes unused since the trigger is on-screen; with an ESP32-CAM it is wired to GPIO13 and becomes the trigger |
 | Matte cardstock | Marker substrate. Never glossy |
 
 Phone cameras auto-expose aggressively and hit the same dynamic-range
 problem as any other sensor here — pin exposure via the browser's
 `MediaTrackConstraints` where the device/browser exposes that control.
 
-### Future: dedicated hardware path
+### Dedicated hardware
 
-Camera and trigger don't have to be a phone — see
-[Future work](#future-work) for the ESP32-CAM / ESP32-S3 hardware path.
-Rolling shutter is workable at short exposure; a global-shutter camera
+Camera and trigger don't have to be a phone. The ESP32-CAM path is
+built — see [The ESP32-CAM client](#the-esp32-cam-client); the ESP32-S3
+native-USB path is still [Future work](#future-work). Rolling shutter is workable at short exposure; a global-shutter camera
 module trades cost for less motion blur if the stock OV2640 isn't
 enough.
 
@@ -254,7 +260,7 @@ if jitter is unacceptable.
 | Filtering | 1-euro filter, hand-rolled (~30 lines) |
 | Marker generation | `generateImageMarker` -> SVG -> PDF |
 | Calibration | `calibrateCamera`, chessboard target |
-| Firmware | None required for v1. Future hardware path, independently optional: a Wi-Fi camera (mirrors the phone architecture) needs an ESP32 with a camera interface (e.g. ESP32-CAM); a wired native-USB HID trigger needs an ESP32-S3 (TinyUSB) — the plain ESP32 in ESP32-CAM has no native USB. A camera-equipped ESP32-S3 board (e.g. XIAO ESP32S3 Sense) does both on one chip |
+| Firmware | None required for the phone path. The ESP32-CAM client, a Wi-Fi camera mirroring the phone architecture, is `firmware/boresight-cam/` (ESP-IDF v5.x, C). Still future and independently optional: a wired native-USB HID trigger needs an ESP32-S3 (TinyUSB) — the plain ESP32 in ESP32-CAM has no native USB. A camera-equipped ESP32-S3 board (e.g. XIAO ESP32S3 Sense) does both on one chip |
 | Config | TOML |
 | Testing | `pytest` |
 | Code quality | `ruff` (lint + format) + `pre-commit`, enforced at commit time |
@@ -745,6 +751,10 @@ One binary WebSocket message per frame, to `/ws/frames`:
 
     [8 bytes: float64 LE, client capture time in ms][JPEG bytes...]
 
+A frame may arrive as one message split into fragments — the ESP32-CAM
+sends the header and the JPEG as two, to avoid copying the JPEG — and is
+reassembled before the server sees it; the bytes are identical.
+
 Text messages on the same socket carry JSON — telemetry from the server,
 control from the client. The trigger will land there without needing a
 second connection or any change to frame handling.
@@ -796,6 +806,144 @@ Still absent, deliberately: **no filtering and no dropout decay.** An
 unsolvable frame leaves the cursor where it was rather than inventing a
 position; holding the last good pose and decaying it needs state the
 per-frame path does not have, and is the next thing to build.
+
+## The ESP32-CAM client
+
+An AI-Thinker ESP32-CAM inside the shell replaces the phone: the OV2640
+is the barrel camera, and the shell's own trigger microswitch, wired to
+a GPIO, is the trigger. It connects to the same `/ws/frames` socket and
+sends frames in the same wire format, so nothing between the socket and
+the cursor knows which device is aiming. It identifies itself with a
+`hello` message, which is how the server's logs tell the two apart.
+
+**Never yet run on a board.** The wire format, debouncing, pin checks,
+reconnect back-off and LED patterns are unit-tested on the host
+(`firmware/boresight-cam/test_host`), and the server side has been
+exercised by a stand-in client streaming the fixtures as fragmented
+messages over a real socket. Nothing has been flashed. Every camera
+default — resolution, frame rate, exposure — is a guess, exactly as the
+phone's were.
+
+### Wiring
+
+| Connection | Pin | Notes |
+| --- | --- | --- |
+| Trigger microswitch | GPIO13 ↔ GND | Internal pull-up, so two wires and no resistor |
+| Spare button | GPIO14 ↔ GND | The only other free pin; no action is defined for it yet |
+| Status LED | GPIO33 | The on-board red LED |
+| Power | 5V and GND | At least 1 A; a 470–1000 µF capacitor across 5V/GND at the board stops brown-outs |
+
+Everything else is taken, and the firmware refuses at boot to put a
+button anywhere but GPIO13 or GPIO14. GPIO0, 2, 12 and 15 are boot
+straps — **GPIO12 pulled high at boot selects 1.8 V flash and the board
+will not start** — GPIO1/3 are the serial console, GPIO16 is PSRAM,
+GPIO4 is the white flash LED, and the camera has the rest.
+
+Inside a shell the PCB antenna loses range. The board has a u.FL
+connector for an external antenna, selected by moving a 0 Ω resistor
+next to it.
+
+### Configure and flash
+
+Start the server bound to the network, as for the phone. It prints the
+device's settings below the phone URL:
+
+    uv run python -m boresight.server --host 0.0.0.0 --token-auto
+
+    Open this on the phone:  http://192.168.1.20:7331/?token=xK3f...
+
+    For a device (ESP32-CAM), configure:
+      host    192.168.1.20
+      port    7331
+      path    /ws/frames
+      tls     off
+      token   xK3f...
+
+A token generated by `--token-auto` changes on every start; a device
+needs a fixed one, so pass `--token` with a value of your own once it
+works. Copy those values into the firmware configuration and flash it:
+
+    cd firmware/boresight-cam
+    idf.py set-target esp32
+    idf.py menuconfig        # Boresight camera -> Network
+    idf.py -p /dev/ttyUSB0 flash monitor
+
+The ESP32-CAM has no USB port: flash through a 3.3 V USB-serial adapter,
+holding GPIO0 to GND while it powers up. `firmware/boresight-cam/README.md`
+has the details, and the firewall section above applies unchanged.
+
+The configuration is saved to `sdkconfig`, which is gitignored because it
+holds the Wi-Fi password and the token.
+
+### TLS, and what plain text costs
+
+The phone needs TLS because browsers only expose the camera in a secure
+context. The device has no such rule, so plain `ws://` works — but then
+the token crosses the Wi-Fi readable by anything on it, and the token is
+what stands in front of your mouse.
+
+With `--tls`, enable **Connect over TLS** in `menuconfig` and copy the
+server's certificate into the firmware before building:
+
+    cp .boresight/cert.pem firmware/boresight-cam/main/server_cert.pem
+
+The device trusts that certificate and no other: a different server
+fails the handshake before the token is sent. The server prints the
+certificate's SHA-256 under `sha256` at startup and the device logs the
+same figure at boot, so a certificate regenerated since the device was
+flashed shows up as two lines that do not match, rather than as a
+connection that just fails. One `--tls` server serves a phone and a
+device at the same time.
+
+TLS costs the classic ESP32 a multi-second handshake and some heap; that
+is a one-off per connection, not per frame.
+
+### Watching a camera that has no screen
+
+The status LED is the only display on the gun:
+
+| LED | Meaning |
+| --- | --- |
+| Slow blink (1 Hz) | Joining Wi-Fi |
+| Fast blink (4 Hz) | Connecting to the server |
+| Three flashes, pause | Configuration, token or certificate error — read the serial log |
+| Solid | Streaming, and the last frame solved |
+| Brief flash each second | Streaming, but the last frame did not solve — no markers in view |
+
+Everything else is on the server. Its log names the device:
+
+    client identified: esp32-cam 192.168.1.37:52110 (version 0.1.0, frames 800x600)
+
+and `GET /sessions` lists every connected client with the same telemetry
+the phone displays — frame counts, drops, round-trip time, the last
+outcome and trigger count — readable from any browser or `curl`:
+
+    curl 'http://192.168.1.20:7331/sessions?token=xK3f...'
+
+A wrong token is refused during the handshake (HTTP 403). The device
+shows the error pattern and waits 30 seconds between attempts instead of
+hammering the server; a lost network or a restarted server is retried
+from 1 second, backing off to 30.
+
+### Frames and the trigger
+
+The camera driver keeps only the newest frame, so the device has the same
+newest-wins rule as the server one hop earlier. Frames are sent at no
+more than the configured rate (20 fps by default); a frame that cannot
+start sending within the send timeout (200 ms) is skipped and counted,
+never retried. One that fails halfway through leaves half a message on
+the wire, which cannot be taken back, so the device reconnects.
+
+A trigger press is debounced (10 ms) and sends exactly one `trigger`
+message: release, hold and contact bounce send nothing. It waits at most
+for the frame send already in progress — so never longer than the send
+timeout — and a press while disconnected is discarded rather than sent
+later, when the cursor would be somewhere else.
+
+If a phone has turned the debug view on, new sessions inherit it and the
+server's per-frame reports grow to kilobytes. The device ignores reports
+that large rather than assemble them, so its LED and round-trip reports
+pause until debug is off again; the serial log says so.
 
 ## On-screen markers
 
@@ -1005,7 +1153,7 @@ a defect invisible to a test suite that always runs from a checkout.
           index.html          # phone client: capture, status, telemetry
           capture.js          # getUserMedia, JPEG encode, WebSocket send
         server.py             # HTTP + frame socket, serves web/ to the phone
-        stream.py             # frame codec, drop slot, per-session counters
+        stream.py             # frame codec, drop slot, per-session counters, live sessions
         netaccess.py          # bind address, shared token, TLS certificate
         detect.py             # ArUco detection (+ future subpixel refinement)
         marker_map.py         # markers.toml -> id to screen-plane corners
@@ -1026,6 +1174,11 @@ a defect invisible to a test suite that always runs from a checkout.
         calibrate.py          # future: chessboard intrinsics
         map_markers.py        # future: build markers.toml for a real TV
       firmware/
+        boresight-cam/        # ESP32-CAM client: camera + trigger over Wi-Fi (ESP-IDF)
+          main/               # Wi-Fi, camera, frame socket, buttons, status LED
+          components/
+            boresight_proto/  # wire format, debouncer, LED patterns -- no ESP-IDF
+          test_host/          # host tests for boresight_proto (CMake + CTest)
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
       tests/
         fixtures/             # rendered frame sequences (Git LFS)
@@ -1128,6 +1281,11 @@ in, so the two sequences pair positionally.
 - [ ] Wi-Fi latency/jitter measurement and tuning — the instrument
       exists (round-trip time and drop counts are on the phone's
       screen); nobody has read it against real hardware yet
+- [ ] ESP32-CAM client: `firmware/boresight-cam/` streams over the same
+      socket in the same wire format and wires the shell's real trigger;
+      the server lists it by name at `GET /sessions` (see "The ESP32-CAM
+      client"). Host-tested and exercised by a stand-in client against a
+      live server, never yet flashed onto a board
 - [ ] (Future) ESP32 hardware HID round-trip path
 - [ ] (Future) IMU dropout bridging
 - [ ] (Future) Recoil solenoid
@@ -1152,10 +1310,9 @@ enough.
 ## Future work
 
 **Dedicated hardware path.** Two independent, separately optional
-upgrades — not a pair you need together. An ESP32-CAM can replace the
-phone as the barrel camera, streaming to the same web server over Wi-Fi
-with no separate USB webcam module — dedicated hardware in the same
-architecture, instead of a borrowed phone. Separately, an ESP32-S3 with
+upgrades — not a pair you need together. The first, an ESP32-CAM
+replacing the phone as the barrel camera, is built: see
+[The ESP32-CAM client](#the-esp32-cam-client). Separately, an ESP32-S3 with
 native USB HID is the option for a genuinely wired, lower-latency
 trigger and injection path, and the natural home for IMU dropout
 bridging (MPU6050/BNO085) and a recoil solenoid — the plain ESP32 in

@@ -1,0 +1,15 @@
+# Tracked defaults. No secrets here: Wi-Fi, server and token are set with
+# `idf.py menuconfig` and land in the untracked `sdkconfig`.
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# The AI-Thinker board's 4 MB PSRAM holds the camera frame buffers.
+CONFIG_SPIRAM=y
+
+# 1 ms ticks, so debounce and frame pacing resolve in milliseconds.
+CONFIG_FREERTOS_HZ=1000
+
+# Larger TCP send buffer: a frame is tens of kilobytes.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_LWIP_TCP_WND_DEFAULT=32768
