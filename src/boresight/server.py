@@ -45,6 +45,13 @@ from boresight.netaccess import (
     token_matches,
 )
 from boresight.pipeline import DEFAULT_CONFIG_PATH, FrameResult
+from boresight.recording import (
+    FrameRecorder,
+    NothingToRecordError,
+    RecordingConfig,
+    recording_request,
+    save_recording,
+)
 from boresight.shooter import CursorArbiter
 from boresight.shot import AimHistory, Point, TriggerAction, TriggerQueue
 from boresight.stream import (
@@ -155,6 +162,7 @@ def create_app(
     config: ServerConfig | None = None,
     display: int | None = None,
     overlay_extra_margin_px: int = 0,
+    recording: RecordingConfig | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -181,6 +189,8 @@ def create_app(
         app.state.sessions = SessionRegistry()
         app.state.trigger_hold = TriggerHold(app.state.cursor_backend)
         app.state.arbiter = CursorArbiter(app.state.cursor_backend)
+        # Each live session's recorder, for POST /recordings.
+        app.state.recorders = {}
         try:
             yield
         finally:
@@ -193,6 +203,7 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.config = config
+    app.state.recording = recording or RecordingConfig()
 
     # Enforced in one place rather than per route, so a route added
     # later is protected by default instead of by remembering. It also
@@ -287,6 +298,31 @@ def create_app(
     async def read_sessions(request: Request) -> dict:
         return {"sessions": request.app.state.sessions.listing(time.monotonic())}
 
+    # For a client with no screen to press a button on: saves every live
+    # session's recent frames. The phone asks over its own socket
+    # instead, which names its session without an ID scheme.
+    @app.post("/recordings")
+    async def save_recordings(request: Request):
+        state = request.app.state
+        if not state.recording.enabled:
+            return JSONResponse(
+                {"detail": "recording is disabled (--record-seconds 0)"},
+                status_code=409,
+            )
+        saved = []
+        for session, recorder in list(state.recorders.items()):
+            entry = {"client": session.label()}
+            try:
+                entry.update(
+                    (await _save(recorder, state.markers)).as_message(),
+                )
+            except (NothingToRecordError, OSError) as error:
+                entry["error"] = str(error)
+            saved.append(entry)
+        if not saved:
+            return JSONResponse({"detail": "no session is streaming"}, status_code=409)
+        return {"recordings": saved}
+
     @app.websocket(FRAME_SOCKET_PATH)
     async def stream_frames(websocket: WebSocket) -> None:
         # A browser cannot set headers on a WebSocket handshake, but it
@@ -316,6 +352,8 @@ def create_app(
             websocket.app.state.sessions,
             websocket.app.state.trigger_hold,
             websocket.app.state.arbiter,
+            websocket.app.state.recording,
+            websocket.app.state.recorders,
         )
 
     if WEB_DIR.is_dir():
@@ -388,6 +426,8 @@ async def run_frame_session(
     sessions: SessionRegistry | None = None,
     hold: TriggerHold | None = None,
     arbiter: CursorArbiter | None = None,
+    recording: RecordingConfig | None = None,
+    recorders: dict | None = None,
 ) -> None:
     """One connection: receive frames, solve the newest, report back.
 
@@ -415,6 +455,10 @@ async def run_frame_session(
     Its aim is its own: the session smooths and holds through its own
     `SessionPipeline`, and reaches the cursor only through `arbiter`,
     which lets one session at a time -- the active shooter -- move it.
+
+    With `recording` enabled, the session also keeps its last seconds of
+    frames and triggers (`recording.FrameRecorder`), saved when the
+    client sends a `record` message; otherwise it keeps nothing.
     """
     settings = settings or ViewSettings()
     slot = FrameSlot()
@@ -444,10 +488,45 @@ async def run_frame_session(
     triggers = _SessionTriggers(
         stats, hold, cursor, loop, claim=lambda: arbiter.claim(stats, session.label)
     )
+    recorder = (
+        FrameRecorder(recording)
+        if recording is not None and recording.enabled
+        else None
+    )
+    if recorder is not None and recorders is not None:
+        recorders[session] = recorder
+    # Saves in progress. Kept so they are not collected mid-write.
+    saving: set[asyncio.Task] = set()
 
     async def report(client_ms: float | None) -> None:
         stats.cursor = arbiter.status(stats)
+        if recorder is not None and client_ms is not None:
+            recorder.result(client_ms, stats.outcome, stats.position)
         await _report(websocket, stats, client_ms)
+
+    async def save_and_answer() -> None:
+        if recorder is None:
+            answer = {
+                "type": "recording",
+                "error": "recording is disabled on this server (--record-seconds 0)",
+            }
+        else:
+            try:
+                saved = await _save(recorder, markers)
+            except (NothingToRecordError, OSError) as error:
+                answer = {"type": "recording", "error": str(error)}
+            else:
+                logger.info(
+                    "saved %d frame(s) from %s to %s",
+                    saved.frames,
+                    session.label(),
+                    saved.path,
+                )
+                answer = saved.as_message()
+        try:
+            await websocket.send_json(answer)
+        except (RuntimeError, ConnectionError):
+            return
 
     async def receive_loop() -> None:
         nonlocal seen_first_frame, last_heard
@@ -459,6 +538,14 @@ async def run_frame_session(
             payload = message.get("bytes")
             if payload is None:
                 # Text: control and telemetry, including the trigger.
+                text = message.get("text")
+                if recorder is not None:
+                    recorder.control(text)
+                if recording_request(text):
+                    task = asyncio.create_task(save_and_answer())
+                    saving.add(task)
+                    task.add_done_callback(saving.discard)
+                    continue
                 known_kind = stats.client_kind
                 _handle_control(stats, triggers, message.get("text"), settings)
                 if stats.client_kind != known_kind:
@@ -479,6 +566,8 @@ async def run_frame_session(
                 stats.failed += 1
                 await report(None)
                 continue
+            if recorder is not None:
+                recorder.frame(client_ms, jpeg, markers.pipeline.marker_map)
             slot.put(client_ms, jpeg)
 
     frame_errors = 0
@@ -641,6 +730,10 @@ async def run_frame_session(
         # it straight back when it lands.
         cursor.close()
         sessions.unregister(session)
+        if recorders is not None:
+            recorders.pop(session, None)
+        for task in saving:
+            task.cancel()
         elapsed = time.monotonic() - started
         if seen_first_frame:
             logger.info(
@@ -675,6 +768,14 @@ async def run_frame_session(
         await asyncio.wait(pending)
         for task in (receiver, processor, watchdog):
             _retrieve(task)
+
+
+async def _save(recorder: FrameRecorder, markers: MarkerSourceController):
+    """Snapshot on the loop, write on a worker thread."""
+    snapshot = recorder.snapshot()
+    state = markers.state()
+    source = {"source": state["source"], "overlay_geometry": state["geometry"]}
+    return await asyncio.to_thread(save_recording, snapshot, source)
 
 
 def _retrieve(future: asyncio.Future) -> None:
@@ -972,6 +1073,20 @@ def main(argv: list[str] | None = None) -> int:
         "panel reservation isn't detected automatically (default: 0, "
         "no change; see `python -m boresight.overlay --help`)",
     )
+    parser.add_argument(
+        "--record-seconds",
+        type=float,
+        default=RecordingConfig.seconds,
+        help="keep each session's last N seconds of frames in memory, so "
+        "the phone's Save button can write them to .boresight/recordings/ "
+        "as a replayable sequence; 0 disables (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--record-max-mb",
+        type=float,
+        default=RecordingConfig.max_bytes / (1024 * 1024),
+        help="cap on those frames per session, in MiB (default: %(default)s)",
+    )
     args = parser.parse_args(argv)
 
     # Uvicorn configures its own loggers and leaves the root alone, so
@@ -1031,6 +1146,10 @@ def main(argv: list[str] | None = None) -> int:
             marker_map_factory=layout_factory,
             config=config,
             overlay_extra_margin_px=args.overlay_extra_margin_px,
+            recording=RecordingConfig(
+                seconds=max(0.0, args.record_seconds),
+                max_bytes=int(max(0.0, args.record_max_mb) * 1024 * 1024),
+            ),
         ),
         host=config.host,
         port=config.port,

@@ -110,7 +110,7 @@ Contents:
   `frames` with `frame` and `file`), plus `recording`: format version,
   saved-at time, window and cap, `marker_source` (the controller's
   source and overlay geometry), `client`, `omitted_frames`, and per-frame
-  `client_ms`, `received_s` (seconds before the save) and `live`;
+  `client_ms`, `received_s` (seconds since the first saved frame arrived) and `live`;
   `triggers` alongside.
 
 Writing is done on a worker thread (`asyncio.to_thread`) so a save of a
@@ -127,8 +127,8 @@ scheme. The answer is `{"type": "recording", "path", "frames"}` or
 ignores types it does not know, so older pages are unaffected.
 `POST /recordings` saves every live session that has a recorder (for an
 ESP32-CAM, from a laptop with `curl`), protected by the existing token
-middleware like every other route. The registry gains nothing: the
-recorder hangs off `SessionStats`-adjacent session state kept in a
+middleware like every other route. The session registry is untouched:
+each session registers its recorder in a
 small dict on `app.state` keyed by the `ActiveSession`.
 
 ### The replay CLI prefers the directory's layout
