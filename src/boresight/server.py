@@ -19,12 +19,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
+from boresight.calibration import CalibrationCapture
 from boresight.inject import CursorBackend, TriggerHold, UinputCursorBackend
 from boresight.layout_source import (
     DEFAULT_SPEC,
     LayoutSourceError,
     marker_map_factory,
 )
+from boresight.lens import DEFAULT_LENS_PATH, LensModel, LensStore, lens_key
 from boresight.marker_map import MarkerMap, load_marker_map
 from boresight.marker_source import (
     MarkerSource,
@@ -133,6 +135,14 @@ class MarkerSourceRequest(BaseModel):
     source: Literal["printed", "screen"]
 
 
+class CalibrationRequest(BaseModel):
+    # As `GET /sessions` lists it. Optional: with one session connected,
+    # which is the usual case for a screenless camera, there is only one
+    # thing it could mean.
+    address: str | None = Field(default=None, max_length=128)
+    action: Literal["start", "cancel"] = "start"
+
+
 class OverlayMarginRequest(BaseModel):
     # Bounded well above any real panel height, so a garbled value is a
     # 422 rather than a margin that swallows the whole display; the
@@ -155,6 +165,7 @@ def create_app(
     config: ServerConfig | None = None,
     display: int | None = None,
     overlay_extra_margin_px: int = 0,
+    lens_store_factory: Callable[[], LensStore] = lambda: LensStore(None),
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -164,6 +175,10 @@ def create_app(
     startup rather than on first request, so a broken environment
     (no `/dev/uinput` permission, an unparseable layout) fails fast
     instead of failing on the first frame.
+
+    Lens calibrations default to an in-memory store, so an app built for
+    a test never reads or writes the operator's `.boresight/lenses.json`;
+    `main()` passes the persistent one.
     """
     config = config or ServerConfig()
 
@@ -178,6 +193,7 @@ def create_app(
             overlay_extra_margin_px=overlay_extra_margin_px,
         )
         app.state.settings = ViewSettings()
+        app.state.lenses = lens_store_factory()
         app.state.sessions = SessionRegistry()
         app.state.trigger_hold = TriggerHold(app.state.cursor_backend)
         app.state.arbiter = CursorArbiter(app.state.cursor_backend)
@@ -287,6 +303,45 @@ def create_app(
     async def read_sessions(request: Request) -> dict:
         return {"sessions": request.app.state.sessions.listing(time.monotonic())}
 
+    @app.get("/calibration")
+    def read_calibrations(request: Request) -> dict:
+        return {"lenses": request.app.state.lenses.listing()}
+
+    # Async for the same reason as `/sessions`: it reads the registry.
+    @app.post("/calibration")
+    async def calibrate_session(
+        selection: CalibrationRequest, request: Request
+    ) -> JSONResponse:
+        sessions = [
+            session
+            for session in request.app.state.sessions
+            if selection.address in (None, session.address)
+        ]
+        if not sessions:
+            return JSONResponse(
+                {"detail": "no such session is streaming"}, status_code=404
+            )
+        if len(sessions) > 1:
+            return JSONResponse(
+                {
+                    "detail": "several sessions are streaming; name one by the "
+                    "address GET /sessions lists",
+                    "addresses": [session.address for session in sessions],
+                },
+                status_code=409,
+            )
+        session = sessions[0]
+        _calibration_action(
+            session.stats, selection.action, request.app.state.lenses, session.label
+        )
+        calibration = session.stats.calibration
+        return JSONResponse(
+            {
+                "address": session.address,
+                "calibration": None if calibration is None else calibration.status(),
+            }
+        )
+
     @app.websocket(FRAME_SOCKET_PATH)
     async def stream_frames(websocket: WebSocket) -> None:
         # A browser cannot set headers on a WebSocket handshake, but it
@@ -316,6 +371,7 @@ def create_app(
             websocket.app.state.sessions,
             websocket.app.state.trigger_hold,
             websocket.app.state.arbiter,
+            lenses=websocket.app.state.lenses,
         )
 
     if WEB_DIR.is_dir():
@@ -357,7 +413,10 @@ def _decode_and_solve(
     payload: bytes,
     debug: bool = False,
     t: float | None = None,
-) -> tuple[FrameResult | None, float, float]:
+    lenses: LensStore | None = None,
+    identity: tuple[str | None, str | None] = (None, None),
+    calibration: CalibrationCapture | None = None,
+) -> tuple[FrameResult | None, float, float, LensModel | None]:
     """Blocking work, kept off the event loop.
 
     Both halves are CPU-bound and would otherwise stall every other
@@ -365,18 +424,62 @@ def _decode_and_solve(
     because OpenCV releases the GIL during detection, and moving a
     1280x720 array across a process boundary would cost more than the
     few milliseconds of work being parallelised.
+
+    The lens is looked up by the decoded frame's size, not the size the
+    client's `hello` claimed: the frame is what the camera produced. A
+    running calibration sees the same frame afterwards.
     """
     started = time.perf_counter()
     frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
     decoded_at = time.perf_counter()
     if frame is None:
-        return None, (decoded_at - started) * 1000.0, 0.0
-    result = pipeline.process_frame(frame, debug=debug, t=t)
+        return None, (decoded_at - started) * 1000.0, 0.0, None
+    height, width = frame.shape[:2]
+    key = lens_key(*identity, (width, height))
+    lens = None if lenses is None else lenses.get(key)
+    result = pipeline.process_frame(frame, debug=debug, t=t, lens=lens)
+    if calibration is not None and calibration.active:
+        calibration.offer(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), key)
     return (
         result,
         (decoded_at - started) * 1000.0,
         (time.perf_counter() - decoded_at) * 1000.0,
+        lens,
     )
+
+
+def _calibration_action(
+    stats: SessionStats,
+    action: object,
+    lenses: LensStore | None,
+    label: Callable[[], str],
+) -> None:
+    """Start or cancel a session's lens calibration.
+
+    Starting replaces whatever calibration the session had, finished or
+    not. The capture reaches the store only through its callback, which
+    runs on the session's executor thread with an accepted model.
+    """
+    if action == "cancel":
+        if stats.calibration is not None:
+            stats.calibration.cancel()
+            logger.info("lens calibration cancelled for %s", label())
+        return
+    if action != "start" or lenses is None:
+        return
+
+    def store(key: str, lens: LensModel) -> None:
+        lenses.put(key, lens)
+        logger.info(
+            "lens calibrated for %s: %s, %.2fpx RMS over %d views",
+            label(),
+            key,
+            lens.rms_px,
+            lens.views,
+        )
+
+    stats.calibration = CalibrationCapture(store)
+    logger.info("lens calibration started for %s", label())
 
 
 async def run_frame_session(
@@ -388,6 +491,7 @@ async def run_frame_session(
     sessions: SessionRegistry | None = None,
     hold: TriggerHold | None = None,
     arbiter: CursorArbiter | None = None,
+    lenses: LensStore | None = None,
 ) -> None:
     """One connection: receive frames, solve the newest, report back.
 
@@ -460,7 +564,15 @@ async def run_frame_session(
             if payload is None:
                 # Text: control and telemetry, including the trigger.
                 known_kind = stats.client_kind
-                _handle_control(stats, triggers, message.get("text"), settings)
+                _handle_control(
+                    stats,
+                    triggers,
+                    message.get("text"),
+                    settings,
+                    calibrate=lambda action: _calibration_action(
+                        stats, action, lenses, session.label
+                    ),
+                )
                 if stats.client_kind != known_kind:
                     logger.info(
                         "client identified: %s (version %s, frames %s)",
@@ -506,13 +618,16 @@ async def run_frame_session(
                     jpeg,
                     stats.debug_enabled,
                     captured_at,
+                    lenses,
+                    (stats.client_kind, stats.camera),
+                    stats.calibration,
                 )
                 # Retrieved here as well, for a job that fails after its
                 # session stopped awaiting it.
                 in_flight.add_done_callback(_retrieve)
                 # Shielded: cancelling the processor must not orphan the
                 # job's future, or teardown could not wait for it.
-                result, decode_ms, solve_ms = await asyncio.shield(in_flight)
+                result, decode_ms, solve_ms, lens = await asyncio.shield(in_flight)
             except Exception:
                 triggers.processing = False
                 # Anything the pipeline does not already turn into an
@@ -537,6 +652,7 @@ async def run_frame_session(
             triggers.processing = False
             stats.decode_ms = decode_ms
             stats.solve_ms = solve_ms
+            stats.lens_rms_px = None if lens is None else lens.rms_px
             if result is None:
                 # Undecodable bytes cost one frame, not the session. A
                 # corrupt frame on a lossy link should not disconnect
@@ -693,6 +809,7 @@ def _handle_control(
     triggers: _SessionTriggers,
     text: str | None,
     settings: ViewSettings,
+    calibrate: Callable[[object], None] | None = None,
 ) -> None:
     """Client-side telemetry and control arriving the other way.
 
@@ -753,6 +870,16 @@ def _handle_control(
             version.strip()[:HELLO_FIELD_MAX] if isinstance(version, str) else None
         )
         stats.frame_size = _frame_size(message.get("frame_size"))
+        camera = message.get("camera")
+        stats.camera = (
+            camera.strip()[:HELLO_FIELD_MAX] or None
+            if isinstance(camera, str)
+            else None
+        )
+    elif message.get("type") == "calibrate":
+        # An unknown action is ignored there, as everywhere here.
+        if calibrate is not None:
+            calibrate(message.get("action"))
     elif message.get("type") == "debug":
         enabled = message.get("enabled")
         if not isinstance(enabled, bool):
@@ -1023,6 +1150,8 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+    lens_store = LensStore(DEFAULT_LENS_PATH)
+
     # Before `uvicorn.run`, whose logging setup keeps logger filters.
     # The banner above is the one place the token is meant to appear.
     install_log_redaction()
@@ -1031,6 +1160,7 @@ def main(argv: list[str] | None = None) -> int:
             marker_map_factory=layout_factory,
             config=config,
             overlay_extra_margin_px=args.overlay_extra_margin_px,
+            lens_store_factory=lambda: lens_store,
         ),
         host=config.host,
         port=config.port,

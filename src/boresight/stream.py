@@ -20,8 +20,12 @@ import asyncio
 import math
 import struct
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from boresight.calibration import CalibrationCapture
 
 # One float64, little-endian: milliseconds from the client's own clock.
 # Only ever compared against a later reading of that same clock, so the
@@ -184,6 +188,16 @@ class SessionStats:
     client_kind: str | None = None
     client_version: str | None = None
     frame_size: tuple[int, int] | None = None
+    # Which camera, when the client says: part of the lens calibration
+    # key, so one phone's two rear cameras do not share a calibration.
+    camera: str | None = None
+
+    # RMS error of the lens calibration applied to the latest frame, or
+    # None when none was (see `lens.py`).
+    lens_rms_px: float | None = None
+    # This session's lens calibration, once one has been started in it.
+    # Kept after it finishes so the result stays readable.
+    calibration: CalibrationCapture | None = field(default=None, repr=False)
 
     # Whether this session drives the cursor: "yours", "other" or
     # "free" (see `shooter.CursorArbiter`). Set by the server per report.
@@ -248,6 +262,13 @@ class SessionStats:
             "triggers": self.triggers,
             "cursor": self.cursor,
         }
+        # Keyed in only when there is something to say, like `debug`: a
+        # session that never calibrated sees exactly the payload it did
+        # before calibration existed.
+        if self.lens_rms_px is not None:
+            message["lens"] = {"rms_px": round(self.lens_rms_px, 3)}
+        if self.calibration is not None:
+            message["calibration"] = self.calibration.status()
         if self.debug_enabled:
             message["debug"] = self.debug
         return message
@@ -299,6 +320,9 @@ class SessionRegistry:
     def __len__(self) -> int:
         return len(self._sessions)
 
+    def __iter__(self) -> Iterator[ActiveSession]:
+        return iter(list(self._sessions))
+
     def listing(self, now: float) -> list[dict]:
         """Each live session's identity and its latest telemetry.
 
@@ -316,6 +340,7 @@ class SessionRegistry:
                     "address": session.address,
                     "client": stats.client_kind or UNIDENTIFIED,
                     "version": stats.client_version,
+                    "camera": stats.camera,
                     "frame_size": (
                         None if stats.frame_size is None else list(stats.frame_size)
                     ),

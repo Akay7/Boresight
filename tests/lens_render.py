@@ -14,6 +14,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from boresight.calibration import SQUARE_PX, board_image
+
 # A phone-like 640x480 camera with strong barrel distortion: at the
 # frame corners this moves points by ~25px, well past anything the
 # homography could absorb.
@@ -71,3 +73,39 @@ def render(
     if maps is None:
         return ideal
     return cv2.remap(ideal, maps[0], maps[1], cv2.INTER_LINEAR, borderValue=background)
+
+
+def padded_board() -> np.ndarray:
+    image = board_image()
+    return cv2.copyMakeBorder(
+        image,
+        SQUARE_PX,
+        SQUARE_PX,
+        SQUARE_PX,
+        SQUARE_PX,
+        cv2.BORDER_CONSTANT,
+        value=255,
+    )
+
+
+def board_view(rvec, tvec, maps) -> np.ndarray:
+    """The padded board, centred on the plane origin, 1 px == 1 plane unit."""
+    texture = padded_board()
+    height, width = texture.shape
+    centre = np.array([[1.0, 0, -width / 2], [0, 1.0, -height / 2], [0, 0, 1.0]])
+    return render(texture, plane_homography(rvec, tvec) @ centre, maps)
+
+
+def random_board_views(maps, count: int, seed: int = 1) -> list[np.ndarray]:
+    rng = np.random.default_rng(seed)
+    frames = []
+    for _ in range(count):
+        rvec = rng.uniform(-0.5, 0.5, 3) * np.array([1.0, 1.0, 0.3])
+        # Wide enough to put board corners near the frame edges: a fit is
+        # only good where its views reached, so a test that stays central
+        # cannot tell a right model from one that is wrong at the edges.
+        tvec = np.array(
+            [rng.uniform(-260, 260), rng.uniform(-195, 195), rng.uniform(450, 750)]
+        )
+        frames.append(board_view(rvec, tvec, maps))
+    return frames

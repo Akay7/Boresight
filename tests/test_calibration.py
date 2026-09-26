@@ -9,16 +9,15 @@ from lens_render import (
     CAMERA_MATRIX,
     DIST_COEFFS,
     IMAGE_SIZE,
+    board_view,
     distortion_maps,
-    plane_homography,
-    render,
+    padded_board,
+    random_board_views,
 )
 
 from boresight.calibration import (
-    SQUARE_PX,
     CalibrationCapture,
     board,
-    board_image,
     board_svg,
     calibrate,
     detect_view,
@@ -33,59 +32,23 @@ def maps():
     return distortion_maps()
 
 
-def _padded_board() -> np.ndarray:
-    image = board_image()
-    return cv2.copyMakeBorder(
-        image,
-        SQUARE_PX,
-        SQUARE_PX,
-        SQUARE_PX,
-        SQUARE_PX,
-        cv2.BORDER_CONSTANT,
-        value=255,
-    )
-
-
-def _board_view(rvec, tvec, maps) -> np.ndarray:
-    """The padded board, centred on the plane origin, 1 px == 1 plane unit."""
-    texture = _padded_board()
-    height, width = texture.shape
-    centre = np.array([[1.0, 0, -width / 2], [0, 1.0, -height / 2], [0, 0, 1.0]])
-    return render(texture, plane_homography(rvec, tvec) @ centre, maps)
-
-
-def _random_views(maps, count: int, seed: int = 1) -> list[np.ndarray]:
-    rng = np.random.default_rng(seed)
-    frames = []
-    for _ in range(count):
-        rvec = rng.uniform(-0.5, 0.5, 3) * np.array([1.0, 1.0, 0.3])
-        # Wide enough to put board corners near the frame edges: a fit is
-        # only good where its views reached, so a test that stays central
-        # cannot tell a right model from one that is wrong at the edges.
-        tvec = np.array(
-            [rng.uniform(-260, 260), rng.uniform(-195, 195), rng.uniform(450, 750)]
-        )
-        frames.append(_board_view(rvec, tvec, maps))
-    return frames
-
-
 # --- The board ----------------------------------------------------------
 
 
 def test_board_raster_is_fully_detected() -> None:
     detector = cv2.aruco.CharucoDetector(board())
-    view = detect_view(detector, _padded_board())
+    view = detect_view(detector, padded_board())
     assert view is not None
     assert len(view.ids) == inner_corner_count()
 
 
 def test_aim_detector_ignores_the_board() -> None:
-    assert detect_markers(_padded_board()) == []
+    assert detect_markers(padded_board()) == []
 
 
 def test_board_svg_reproduces_the_raster_exactly() -> None:
     svg = board_svg(250.0)
-    padded = _padded_board()
+    padded = padded_board()
     rebuilt = np.full_like(padded, 255)
     for x, y, width in re.findall(
         r'<rect x="(\d+)" y="(\d+)" width="(\d+)" height="1"/>', svg
@@ -95,7 +58,7 @@ def test_board_svg_reproduces_the_raster_exactly() -> None:
 
 
 def test_board_svg_dimensions() -> None:
-    height, width = _padded_board().shape
+    height, width = padded_board().shape
     svg = board_svg(250.0)
     assert 'width="250mm"' in svg
     height_mm = float(re.search(r'height="([\d.]+)mm"', svg).group(1))
@@ -113,7 +76,7 @@ def test_board_svg_rejects_non_positive_width(width: float) -> None:
 
 def test_synthetic_distortion_is_recovered(maps) -> None:
     detector = cv2.aruco.CharucoDetector(board())
-    views = [detect_view(detector, frame) for frame in _random_views(maps, 30)]
+    views = [detect_view(detector, frame) for frame in random_board_views(maps, 30)]
     views = [view for view in views if view is not None]
     assert len(views) >= 25
 
@@ -146,12 +109,12 @@ def _capture(**kwargs):
 
 def test_board_held_still_gives_one_view(maps) -> None:
     capture, _ = _capture()
-    frame = _board_view(np.zeros(3), np.array([0.0, 0.0, 700.0]), maps)
+    frame = board_view(np.zeros(3), np.array([0.0, 0.0, 700.0]), maps)
     for _ in range(5):
         capture.offer(frame, "k")
     assert capture.status()["views"] == 1
 
-    moved = _board_view(np.array([0.3, 0.0, 0.0]), np.array([60.0, 0.0, 700.0]), maps)
+    moved = board_view(np.array([0.3, 0.0, 0.0]), np.array([60.0, 0.0, 700.0]), maps)
     capture.offer(moved, "k")
     assert capture.status()["views"] == 2
 
@@ -170,7 +133,7 @@ def test_frames_without_the_board_are_not_kept() -> None:
 
 def test_a_resolution_change_restarts_capture(maps) -> None:
     capture, _ = _capture()
-    capture.offer(_board_view(np.zeros(3), np.array([0.0, 0.0, 700.0]), maps), "k")
+    capture.offer(board_view(np.zeros(3), np.array([0.0, 0.0, 700.0]), maps), "k")
     assert capture.status()["views"] == 1
     capture.offer(np.full((600, 800), 128, np.uint8), "k")
     assert capture.status()["views"] == 0
@@ -178,7 +141,7 @@ def test_a_resolution_change_restarts_capture(maps) -> None:
 
 def test_capture_completes_and_stores(maps) -> None:
     capture, stored = _capture(views_needed=12)
-    for frame in _random_views(maps, 30, seed=3):
+    for frame in random_board_views(maps, 30, seed=3):
         capture.offer(frame, "phone||640x480")
         if not capture.active:
             break
@@ -190,7 +153,7 @@ def test_capture_completes_and_stores(maps) -> None:
 
 def test_a_poor_fit_is_not_stored(maps) -> None:
     capture, stored = _capture(views_needed=6, max_rms_px=1e-6)
-    for frame in _random_views(maps, 20, seed=4):
+    for frame in random_board_views(maps, 20, seed=4):
         capture.offer(frame, "k")
         if not capture.active:
             break
@@ -203,6 +166,6 @@ def test_a_poor_fit_is_not_stored(maps) -> None:
 def test_cancel_stops_capture(maps) -> None:
     capture, _ = _capture()
     capture.cancel()
-    capture.offer(_board_view(np.zeros(3), np.array([0.0, 0.0, 700.0]), maps), "k")
+    capture.offer(board_view(np.zeros(3), np.array([0.0, 0.0, 700.0]), maps), "k")
     assert capture.status()["state"] == "cancelled"
     assert capture.status()["views"] == 0
