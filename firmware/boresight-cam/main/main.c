@@ -122,8 +122,7 @@ static void capture_task(void *arg)
         if (!camera_grab(&frame)) {
             skipped++;
         } else {
-            double client_ms = (double)esp_timer_get_time() / 1000.0;
-            if (link_send_frame(client_ms, frame.data, frame.length,
+            if (link_send_frame(frame.captured_ms, frame.data, frame.length,
                                 CONFIG_BORESIGHT_SEND_TIMEOUT_MS) == ESP_OK) {
                 sent++;
             } else {

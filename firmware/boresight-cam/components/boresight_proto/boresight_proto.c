@@ -17,6 +17,16 @@ void bp_pack_header(double client_ms, uint8_t out[BP_HEADER_SIZE])
     }
 }
 
+double bp_capture_ms(double driver_ms, double now_ms)
+{
+    /* Written so a NaN fails every comparison and falls through. */
+    if (driver_ms > 0.0 && driver_ms <= now_ms &&
+        now_ms - driver_ms <= BP_CAPTURE_MAX_AGE_MS) {
+        return driver_ms;
+    }
+    return now_ms;
+}
+
 /* --- Control messages -------------------------------------------------- */
 
 const char BP_TRIGGER_MESSAGE[] = "{\"type\":\"trigger\"}";

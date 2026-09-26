@@ -1,8 +1,9 @@
 """The transport layer between the phone's camera and the pipeline.
 
-Three pieces, all independent of FastAPI so they can be tested without
-a server: the frame message codec, a single-slot mailbox that drops
-stale frames, and the per-connection counters.
+Four pieces, all independent of FastAPI so they can be tested without
+a server: the frame message codec, the clock that turns a session's
+capture timestamps into time for the aim filter, a single-slot mailbox
+that drops stale frames, and the per-connection counters.
 
 The wire format is one frame per binary WebSocket message -- an 8-byte
 little-endian timestamp taken by the client at capture, followed by the
@@ -16,7 +17,10 @@ connection.
 from __future__ import annotations
 
 import asyncio
+import math
 import struct
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 # One float64, little-endian: milliseconds from the client's own clock.
@@ -56,6 +60,67 @@ def unpack_frame(message: bytes) -> tuple[float, bytes]:
     if not payload:
         raise FrameDecodeError("frame message carries a header but no image data")
     return client_ms, payload
+
+
+class CaptureClock:
+    """One session's capture timestamps, as seconds for the aim filter.
+
+    The filter's interval between two frames should be how far apart
+    they were *captured*, which only the client's clock knows. The
+    server's clock at processing time adds every millisecond of Wi-Fi,
+    slot and decode jitter to that interval, and the filter turns it
+    into aim jitter.
+
+    Client timestamps are only ever differenced against the same
+    client's previous one. The first frame is placed at the server's
+    clock, and each later one that far after the one before it. A step
+    that cannot be a real frame interval -- not a number, not forward,
+    or longer than `MAX_STEP_S` -- is replaced by the server's own
+    interval since the last stamp, clamped to `[MIN_STEP_S,
+    MAX_STEP_S]`, and the client timeline resumes from that frame. So
+    whatever the client's clock does, time only moves forward, by a
+    bounded amount: a zero or negative interval would spike the
+    filter's speed estimate, and a clock jump is not an interval at all.
+    """
+
+    MIN_STEP_S = 0.001
+    MAX_STEP_S = 1.0
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._last_client_ms: float | None = None
+        self._last_t: float | None = None
+        self._last_server: float | None = None
+        self.fallbacks = 0
+
+    def stamp(self, client_ms: float) -> float:
+        server_now = self._clock()
+        if self._last_t is None or self._last_server is None:
+            t = server_now
+        else:
+            step = self._client_step(client_ms)
+            if step is None:
+                self.fallbacks += 1
+                step = min(
+                    self.MAX_STEP_S,
+                    max(self.MIN_STEP_S, server_now - self._last_server),
+                )
+            t = self._last_t + step
+        # Even an untrusted timestamp becomes the reference for the
+        # next step: after a jump, the client's clock is right again
+        # from here on, just from a different origin.
+        self._last_client_ms = client_ms if math.isfinite(client_ms) else None
+        self._last_t = t
+        self._last_server = server_now
+        return t
+
+    def _client_step(self, client_ms: float) -> float | None:
+        if self._last_client_ms is None or not math.isfinite(client_ms):
+            return None
+        step = (client_ms - self._last_client_ms) / 1000.0
+        if not 0.0 < step <= self.MAX_STEP_S:
+            return None
+        return step
 
 
 class FrameSlot:

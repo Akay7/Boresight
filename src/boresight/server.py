@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
+from boresight.aim_hold import HoldingPipeline
 from boresight.inject import CursorBackend, TriggerHold, UinputCursorBackend
 from boresight.layout_source import (
     DEFAULT_SPEC,
@@ -42,8 +43,9 @@ from boresight.netaccess import (
     presented_token,
     token_matches,
 )
-from boresight.pipeline import DEFAULT_CONFIG_PATH, AimPipeline, FrameResult
+from boresight.pipeline import DEFAULT_CONFIG_PATH, FrameResult
 from boresight.stream import (
+    CaptureClock,
     FrameDecodeError,
     FrameSlot,
     SessionRegistry,
@@ -340,7 +342,10 @@ def _describe(websocket: WebSocket) -> str:
 
 
 def _decode_and_solve(
-    pipeline: AimPipeline, payload: bytes, debug: bool = False
+    pipeline: HoldingPipeline,
+    payload: bytes,
+    debug: bool = False,
+    t: float | None = None,
 ) -> tuple[FrameResult | None, float, float]:
     """Blocking work, kept off the event loop.
 
@@ -355,7 +360,7 @@ def _decode_and_solve(
     decoded_at = time.perf_counter()
     if frame is None:
         return None, (decoded_at - started) * 1000.0, 0.0
-    result = pipeline.process_frame(frame, debug=debug)
+    result = pipeline.process_frame(frame, debug=debug, t=t)
     return (
         result,
         (decoded_at - started) * 1000.0,
@@ -398,6 +403,9 @@ async def run_frame_session(
     settings = settings or ViewSettings()
     slot = FrameSlot()
     stats = SessionStats(_slot=slot)
+    # The session's own: capture timestamps are only comparable with
+    # others from the same client clock.
+    capture_clock = CaptureClock()
     # Inherited at connect, then owned by this session. A phone that
     # left the overlay on gets it back after a reload; a phone that
     # toggles it mid-session changes only its own frames.
@@ -449,6 +457,9 @@ async def run_frame_session(
         nonlocal frame_errors
         while True:
             client_ms, jpeg = await slot.get()
+            # Aim smoothing is timed by when the frame was captured, not
+            # when it got here: the network's jitter is not the aim's.
+            captured_at = capture_clock.stamp(client_ms)
             try:
                 # Read per frame rather than captured once: a debug toggle
                 # arriving mid-session takes effect on the next frame.
@@ -458,6 +469,7 @@ async def run_frame_session(
                     markers.pipeline,
                     jpeg,
                     stats.debug_enabled,
+                    captured_at,
                 )
             except Exception:
                 # Anything the pipeline does not already turn into an

@@ -3,10 +3,12 @@
 // Captures from the rear camera, draws each frame to an offscreen
 // canvas, encodes it as JPEG, and sends it as one binary WebSocket
 // message: an 8-byte little-endian timestamp from this device's clock,
-// then the JPEG bytes. The timestamp is only ever compared against a
-// later reading of the same clock, so the two machines never need to
-// agree on an epoch -- the server echoes it back untouched and we
-// subtract here.
+// then the JPEG bytes. The timestamp is when the camera captured the
+// frame, not when it was sent: the server times its aim smoothing by the
+// interval between two frames' stamps, so encode time must not leak in.
+// It is only ever compared against another reading of the same clock,
+// so the two machines never need to agree on an epoch -- the server
+// echoes it back untouched and we subtract here.
 
 "use strict";
 
@@ -58,6 +60,17 @@ const state = {
   // Whether this page has told the server the trigger is down. Guards
   // against a second `down` and against an `up` for nothing.
   triggerHeld: false,
+  // The capture time of the camera frame the preview is showing, from
+  // requestVideoFrameCallback, and when that callback last ran. Null
+  // where the browser has no such callback.
+  frameStamp: null,
+  frameSeenAt: 0,
+  // Bumped on every stop, so a callback chain from an earlier stream
+  // ends instead of running alongside the next one.
+  frameWatch: 0,
+  // The stamp of the last frame sent. The same stamp again means the
+  // same camera frame, which is not worth sending twice.
+  lastSentStamp: null,
 };
 
 function show(kind, text) {
@@ -745,6 +758,44 @@ async function pinExposure(track) {
 const canvas = document.createElement("canvas");
 const context = canvas.getContext("2d", { willReadFrequently: false });
 
+// A frame stamp older than this is not trusted to describe what the
+// preview is showing: the callback stops when the video is not being
+// composited, and the capture loop must not stall waiting for it.
+const FRAME_STAMP_STALE_MS = 250;
+
+// Records, per camera frame the preview presents, when it was captured.
+// captureTime is the camera's own timestamp where the browser exposes
+// it; expectedDisplayTime is not a capture time but sits a steady offset
+// after one, and only differences between stamps are ever used. Both are
+// on the performance.now() timebase.
+function watchFrames(video) {
+  if (typeof video.requestVideoFrameCallback !== "function") return;
+  const generation = state.frameWatch;
+  const onFrame = (_now, metadata) => {
+    if (generation !== state.frameWatch) return;
+    const stamp = Number.isFinite(metadata.captureTime)
+      ? metadata.captureTime
+      : metadata.expectedDisplayTime;
+    if (Number.isFinite(stamp)) {
+      state.frameStamp = stamp;
+      state.frameSeenAt = performance.now();
+    }
+    video.requestVideoFrameCallback(onFrame);
+  };
+  video.requestVideoFrameCallback(onFrame);
+}
+
+// When the frame about to be drawn was captured: the preview's frame
+// stamp while it is fresh, otherwise this instant, taken before drawing
+// -- never after encoding, whose duration varies frame to frame.
+function captureStamp() {
+  const now = performance.now();
+  if (state.frameStamp !== null && now - state.frameSeenAt < FRAME_STAMP_STALE_MS) {
+    return state.frameStamp;
+  }
+  return now;
+}
+
 async function captureAndSend() {
   if (state.sending) return;
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
@@ -757,6 +808,11 @@ async function captureAndSend() {
 
   const video = els.preview;
   if (!video.videoWidth) return;
+
+  // Still the frame sent last tick: the camera has not delivered a new
+  // one. Not a skip -- there is nothing new to send.
+  const stamp = captureStamp();
+  if (stamp === state.lastSentStamp) return;
 
   state.sending = true;
   try {
@@ -771,9 +827,10 @@ async function captureAndSend() {
 
     const jpeg = new Uint8Array(await blob.arrayBuffer());
     const message = new Uint8Array(CONFIG.headerBytes + jpeg.length);
-    new DataView(message.buffer).setFloat64(0, performance.now(), true);
+    new DataView(message.buffer).setFloat64(0, stamp, true);
     message.set(jpeg, CONFIG.headerBytes);
     send(message.buffer);
+    state.lastSentStamp = stamp;
   } catch (error) {
     show("error", `Capture failed: ${error.message}`);
   } finally {
@@ -787,6 +844,9 @@ function stop() {
   releaseTrigger();
   if (state.timer) clearInterval(state.timer);
   state.timer = null;
+  state.frameWatch += 1;
+  state.frameStamp = null;
+  state.lastSentStamp = null;
   if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
   state.stream = null;
   // Closed, not just forgotten: an abandoned socket stays open until the
@@ -845,6 +905,7 @@ els.start.addEventListener("click", async () => {
     set("stat-connection", "camera ready");
     els.preview.srcObject = state.stream;
     await els.preview.play();
+    watchFrames(els.preview);
     // Before the socket: the reticle is a property of the preview, not
     // of the connection, and it should be there the moment there is an
     // image to mark.

@@ -233,7 +233,21 @@ class AimPipeline:
         self._backend = backend
         self._detect = detector
 
-    def process_frame(self, frame: np.ndarray, *, debug: bool = False) -> FrameResult:
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        debug: bool = False,
+        backend: CursorBackend | None = None,
+    ) -> FrameResult:
+        """Solve one frame and emit its position.
+
+        `backend`, when given, receives this one frame's move instead of
+        the pipeline's own. An argument, like `debug`, so the pipeline
+        still holds nothing per call: a caller that knows when the frame
+        was captured hands over a backend already stamped with that time
+        (see `inject.stamped`).
+        """
         height, width = frame.shape[:2]
         image_size_px = (int(width), int(height))
 
@@ -297,7 +311,7 @@ class AimPipeline:
         raw = (aim_x_mm / screen_width_mm, aim_y_mm / screen_height_mm)
         position = (_clamp_unit(raw[0]), _clamp_unit(raw[1]))
 
-        self._backend.move_absolute(*position)
+        (self._backend if backend is None else backend).move_absolute(*position)
 
         return FrameResult(
             outcome=FrameOutcome.SOLVED,

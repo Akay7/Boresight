@@ -577,6 +577,26 @@ sustained swing to a new target is smoothed much less, so it does not
 feel laggy. Both follow from the same speed-adaptive cutoff — see the
 module docstring for the formula.
 
+### Timed by the camera, not the network
+
+The filter's notion of time between two frames is the difference of
+their capture timestamps — the 8-byte header each frame already carries
+(see "Wire protocol") — not when they happened to reach the server. Wi-Fi
+and queueing jitter would otherwise become a wrong interval, and the
+filter would turn it into aim jitter. The phone stamps a frame when the
+camera captured it (`requestVideoFrameCallback` metadata where the
+browser has it, otherwise the moment it is drawn from the video, never
+after JPEG encoding), and the ESP32-CAM uses the camera driver's frame
+timestamp.
+
+`stream.CaptureClock` does the conversion, once per session: client
+timestamps are only differenced against the same client's previous
+one, never compared with the server's clock or another session's. A
+timestamp that cannot be a real frame interval — repeated, backwards,
+more than a second after the last one, or not a number — is replaced by
+the server's own interval for that one frame (clamped to 1 ms–1 s), so a
+misbehaving clock can neither stall the filter nor blow it up.
+
 `POST /cursor/move` is unaffected: the route keeps the raw, unwrapped
 backend from `app.state.cursor_backend`, so an explicit requested
 coordinate always lands exactly, never smoothed toward wherever
@@ -783,9 +803,13 @@ fixtures already are, so a fixture file is a wire payload, and the
 end-to-end test streams the checked-in frames down a real socket and
 asserts the cursor track is *identical* to replaying them from disk.
 
-The timestamp is echoed back untouched. The server cannot compute
-round-trip time itself — the two clocks share no epoch — so the phone
-subtracts against its own monotonic clock and reports the result back.
+The timestamp is the moment of capture, and is echoed back untouched.
+The server cannot compute round-trip time itself — the two clocks share
+no epoch — so the phone subtracts against its own monotonic clock and
+reports the result back. Because the stamp is taken at capture, that
+figure includes encoding: it is capture-to-report latency, what the
+player actually feels. The server also differences consecutive stamps
+to time aim smoothing (see "Aim smoothing").
 
 ### Frames that arrive too fast are dropped, newest first
 

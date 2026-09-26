@@ -9,6 +9,7 @@
  */
 #include "boresight_cam.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "camera";
 
@@ -69,6 +70,8 @@ bool camera_grab(camera_frame_t *frame)
 {
     frame->data = s_frames[s_next].start;
     frame->length = (size_t)(s_frames[s_next].end - s_frames[s_next].start);
+    /* No sensor, so no capture time: the grab is the capture. */
+    frame->captured_ms = (double)esp_timer_get_time() / 1000.0;
     frame->handle = NULL;
     s_next = (s_next + 1) % FRAME_COUNT;
     return true;

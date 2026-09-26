@@ -310,7 +310,21 @@ class SmoothingCursorBackend:
         self._filter = filter if filter is not None else OneEuroFilter()
 
     def move_absolute(self, x: float, y: float) -> None:
-        smoothed_x, smoothed_y = self._filter.apply((x, y))
+        self._move((x, y), None)
+
+    def at(self, t: float) -> CursorBackend:
+        """This backend, with every move filtered as if made at time `t`.
+
+        For a move that comes from a frame: the frame's capture time is
+        the right `dt` source, not whenever the move happens to reach
+        this object after the network and the decoder. A view per call
+        rather than a settable "current time", because frames from
+        different sessions are processed concurrently.
+        """
+        return _StampedMoves(self, t)
+
+    def _move(self, point: tuple[float, float], t: float | None) -> None:
+        smoothed_x, smoothed_y = self._filter.apply(point, t=t)
         self._backend.move_absolute(smoothed_x, smoothed_y)
 
     def click(self) -> None:
@@ -321,6 +335,38 @@ class SmoothingCursorBackend:
 
     def release(self) -> None:
         self._backend.release()
+
+
+class _StampedMoves:
+    """A `SmoothingCursorBackend` whose moves all happen at one time."""
+
+    def __init__(self, smoothing: SmoothingCursorBackend, t: float) -> None:
+        self._smoothing = smoothing
+        self._t = t
+
+    def move_absolute(self, x: float, y: float) -> None:
+        self._smoothing._move((x, y), self._t)  # noqa: SLF001 - its own view
+
+    def click(self) -> None:
+        self._smoothing.click()
+
+    def press(self) -> None:
+        self._smoothing.press()
+
+    def release(self) -> None:
+        self._smoothing.release()
+
+
+def stamped(backend: CursorBackend, t: float | None) -> CursorBackend:
+    """`backend`, with its moves timed at `t` where timing means anything.
+
+    Only a smoothing backend has a use for the time; any other backend
+    moves where it is told whenever it is told, so it is returned as is,
+    as is every backend when there is no time to give.
+    """
+    if t is None or not isinstance(backend, SmoothingCursorBackend):
+        return backend
+    return backend.at(t)
 
 
 class FakeCursorBackend:

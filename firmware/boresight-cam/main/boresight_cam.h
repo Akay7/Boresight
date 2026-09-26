@@ -37,6 +37,9 @@ esp_err_t camera_start(int *width, int *height);
 typedef struct {
     const uint8_t *data;
     size_t length;
+    /* When the frame was captured, in milliseconds on the esp_timer clock:
+     * what goes in the frame header. */
+    double captured_ms;
     void *handle; /* the source's own, for camera_release */
 } camera_frame_t;
 

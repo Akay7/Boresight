@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from itertools import pairwise
 from pathlib import Path
 
 import cv2
@@ -506,7 +507,7 @@ class _HeldPipeline:
         self.release = threading.Event()
         self.seen: list[int] = []
 
-    def process_frame(self, frame, *, debug: bool = False) -> FrameResult:
+    def process_frame(self, frame, *, debug: bool = False, t=None) -> FrameResult:
         # A cheap fingerprint that differs per fixture frame, so the
         # test can assert *which* frames survived, not merely how many.
         self.seen.append(int(frame.sum()))
@@ -780,3 +781,34 @@ def test_a_dead_processor_closes_the_session_instead_of_hanging(
     assert "frame processing" in caplog.text
     assert "simulated processor fault" in caplog.text
     assert len(app.state.sessions) == 0
+
+
+# --- Aim smoothing is timed by capture, not arrival ---------------------
+
+
+def test_smoothing_is_timed_by_the_client_capture_timestamps(
+    client: TestClient,
+) -> None:
+    """Frames captured 50 ms apart, arriving at deliberately uneven
+    intervals: the aim filter must see 50 ms each time."""
+    filter_ = client.app.state.markers._backend._filter  # noqa: SLF001
+    seen: list[float] = []
+    apply = filter_.apply
+
+    def recording_apply(point, *, t=None):
+        seen.append(t)
+        return apply(point, t=t)
+
+    filter_.apply = recording_apply
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+    payload = _frame_bytes(VIDEO_DIR, entry)
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        for index, pause in enumerate([0.0, 0.12, 0.0, 0.08]):
+            time.sleep(pause)
+            socket.send_bytes(pack_frame(5000.0 + 50.0 * index, payload))
+            assert socket.receive_json()["outcome"] == "solved"
+
+    assert None not in seen
+    intervals = [later - earlier for earlier, later in pairwise(seen)]
+    assert intervals == pytest.approx([0.05, 0.05, 0.05])

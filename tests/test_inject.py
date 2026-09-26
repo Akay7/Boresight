@@ -1,4 +1,9 @@
-from boresight.inject import FakeCursorBackend, SmoothingCursorBackend, TriggerHold
+from boresight.inject import (
+    FakeCursorBackend,
+    SmoothingCursorBackend,
+    TriggerHold,
+    stamped,
+)
 from boresight.one_euro import OneEuroFilter
 
 
@@ -162,3 +167,57 @@ def test_click_while_held_does_not_lift_the_button() -> None:
 
     assert backend.clicks == 0
     assert backend.held
+
+
+# --- Moves timed by the frame, not the clock ---------------------------
+
+
+def _unused_clock() -> float:
+    raise AssertionError("a stamped move must not read the filter's clock")
+
+
+def test_a_stamped_move_is_filtered_at_the_given_time() -> None:
+    """Two backends, same inputs: one timed by its clock, one by stamps
+    carrying the same times. They must agree exactly."""
+    times = [0.0, 0.05, 0.3]
+    points = [(0.2, 0.2), (0.6, 0.4), (0.62, 0.41)]
+    clocked = FakeCursorBackend()
+    ticks = iter(times)
+    by_clock = SmoothingCursorBackend(
+        clocked, filter=OneEuroFilter(clock=lambda: next(ticks))
+    )
+    stamped_raw = FakeCursorBackend()
+    by_stamp = SmoothingCursorBackend(
+        stamped_raw, filter=OneEuroFilter(clock=_unused_clock)
+    )
+
+    for t, point in zip(times, points, strict=True):
+        by_clock.move_absolute(*point)
+        by_stamp.at(t).move_absolute(*point)
+
+    assert stamped_raw.calls == clocked.calls
+
+
+def test_stamped_leaves_an_unsmoothed_backend_alone() -> None:
+    raw = FakeCursorBackend()
+
+    assert stamped(raw, 1.0) is raw
+    stamped(raw, 1.0).move_absolute(0.3, 0.7)
+    assert raw.calls == [(0.3, 0.7)]
+
+
+def test_stamped_without_a_time_is_the_backend_itself() -> None:
+    smoothing = SmoothingCursorBackend(FakeCursorBackend())
+
+    assert stamped(smoothing, None) is smoothing
+
+
+def test_a_stamped_view_passes_buttons_through() -> None:
+    raw = FakeCursorBackend()
+    view = SmoothingCursorBackend(raw).at(1.0)
+
+    view.press()
+    view.release()
+    view.click()
+
+    assert (raw.presses, raw.releases, raw.clicks) == (1, 1, 1)
