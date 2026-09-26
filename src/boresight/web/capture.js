@@ -32,7 +32,7 @@ const CONFIG = {
 
 const els = {};
 for (const id of [
-  "preview", "overlay", "start", "trigger", "message", "marker-sheet",
+  "preview", "overlay", "start", "trigger", "record", "message", "marker-sheet",
   "source-printed", "source-screen", "debug-on", "debug-off",
   "overlay-margin-down", "overlay-margin-up", "overlay-margin-value",
   "row-decoded", "row-reprojection", "row-lag",
@@ -677,6 +677,10 @@ function onTelemetry(data) {
   } catch {
     return;
   }
+  if (stats.type === "recording") {
+    showRecording(stats);
+    return;
+  }
   if (stats.type !== "stats") return;
   // For the page's other scripts (zeroing.js), unthrottled.
   document.dispatchEvent(new CustomEvent("boresight:stats", { detail: stats }));
@@ -931,6 +935,7 @@ function stop() {
   els.trigger.disabled = true;
   els["calibrate-start"].disabled = true;
   els["calibrate-cancel"].disabled = true;
+  els.record.disabled = true;
   // The camera is gone, so there is no longer an image for the reticle
   // to mark a point on. The debug toggle keeps its setting.
   drawOverlay();
@@ -1002,6 +1007,7 @@ els.start.addEventListener("click", async () => {
     els.start.textContent = "Stop streaming";
     els.trigger.disabled = false;
     els["calibrate-start"].disabled = false;
+    els.record.disabled = false;
     show("info", "Streaming. Aim at the display; the cursor follows the frame centre.");
   } catch (error) {
     // Cancelled mid-start: closing the half-open socket rejects the
@@ -1193,3 +1199,31 @@ tuningEls.save.addEventListener("click", async () => {
 });
 
 loadTuning();
+
+// --- Recording --------------------------------------------------------
+
+// The server keeps each session's last few seconds of frames; this asks
+// it to write them out as a replayable sequence. Over the frame socket,
+// which is already authenticated and already names this session. The
+// files land on the PC, so the answer is the path to find them at there.
+els.record.addEventListener("click", () => {
+  els.record.disabled = true;
+  show("info", "Saving the last few seconds…");
+  send(JSON.stringify({ type: "record" }));
+});
+
+function showRecording(answer) {
+  if (state.socket) els.record.disabled = false;
+  if (answer.error) {
+    show("warn", `Nothing saved: ${answer.error}`);
+    return;
+  }
+  const omitted = answer.omitted
+    ? ` (${answer.omitted} from before a marker switch left out)`
+    : "";
+  show(
+    "info",
+    `Saved ${answer.frames} frames, ${answer.seconds} s${omitted}, on the PC at:\n` +
+      `${answer.path}\nReplay: python -m boresight.pipeline <that path> --dry-run`
+  );
+}
