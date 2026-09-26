@@ -925,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
+    from boresight import terminal_qr
     from boresight.netaccess import (
         DEFAULT_HOST,
         DEFAULT_PORT,
@@ -972,6 +973,12 @@ def main(argv: list[str] | None = None) -> int:
         "panel reservation isn't detected automatically (default: 0, "
         "no change; see `python -m boresight.overlay --help`)",
     )
+    parser.add_argument(
+        "--no-qr",
+        action="store_true",
+        help="do not print the phone URL as a QR code (it is printed only "
+        "to an interactive terminal large enough for it anyway)",
+    )
     args = parser.parse_args(argv)
 
     # Uvicorn configures its own loggers and leaves the root alone, so
@@ -1013,6 +1020,10 @@ def main(argv: list[str] | None = None) -> int:
     # anything else can happen. Buffered, it appears after the server
     # has already been running for a while -- or never.
     print(f"\n  Open this on the phone:  {config.phone_url()}\n", flush=True)
+    # Printed, never logged, like the line above: see `terminal_qr`.
+    qr = None if args.no_qr else terminal_qr.for_terminal(config.phone_url())
+    if qr is not None:
+        print(qr, flush=True)
     print(_device_details(config, certfile), flush=True)
     if not config.tls and not is_loopback(config.host):
         print(

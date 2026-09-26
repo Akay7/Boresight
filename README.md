@@ -742,6 +742,11 @@ which prints the exact URL to open, token included:
 
     Open this on the phone:  https://192.168.1.20:7331/?token=xK3f...
 
+followed, in an interactive terminal big enough for it, by the same URL
+as a QR code to scan with the phone's camera. It is printed, never
+logged, and left out when output is redirected; `--no-qr` turns it off
+(e.g. while screen-sharing).
+
 The certificate is self-signed, so the phone shows a warning the first
 time. It is generated once into `.boresight/` and reused, so accepting
 it is a one-time cost rather than a per-restart one.

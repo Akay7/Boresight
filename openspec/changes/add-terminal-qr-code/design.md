@@ -39,8 +39,9 @@ under our control and easy to test.
 Two module rows share one text line: `▀`, `▄`, `█` or a space, with the
 foreground set to black and the background to bright white (SGR
 `30;107`), reset at the end of each line. A typical tokenised LAN URL
-fits version 3 at error correction L: 29 modules, so with the quiet
-zone about 33 columns by 17 lines.
+is version 4 (33 modules; `segno` raises the error correction to M for
+free at that size, which helps with terminal line gaps), so with the
+quiet zone about 37 columns by 19 lines.
 
 Setting colours explicitly makes the polarity right on both dark and
 light terminal themes. The alternative, drawing light modules in the
