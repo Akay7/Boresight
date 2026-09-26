@@ -228,3 +228,17 @@ def test_calibration_routes_require_the_token(store) -> None:
     with TestClient(app) as test_client:
         assert test_client.get("/calibration").status_code == 401
         assert test_client.post("/calibration", json={}).status_code == 401
+
+
+# --- The phone page -----------------------------------------------------
+
+
+def test_the_phone_page_offers_calibration(client: TestClient) -> None:
+    page = client.get("/").text
+    script = client.get("/capture.js").text
+
+    assert 'id="calibrate-start"' in page
+    assert 'id="calibrate-cancel"' in page
+    assert 'href="markers/charuco"' in page
+    assert '{ type: "calibrate", action: "start" }' in script
+    assert "message.camera = track.label" in script

@@ -204,8 +204,9 @@ case that matters.
 
 The real fix for sparse visibility is pose estimation from a marker of
 known physical size (`solvePnP`) rather than homography extrapolation,
-which turns four coplanar points into a metric pose. That needs camera
-intrinsics, so it is blocked on the calibration milestone.
+which turns four coplanar points into a metric pose. It needs camera
+intrinsics, which [lens calibration](#lens-calibration) now measures;
+the pose step itself is still to do.
 
 ## Pipeline
 
@@ -523,8 +524,8 @@ project dependency:
 
 `detect.py` wraps `cv2.aruco.ArucoDetector` with cornerSubPix
 refinement enabled (`CORNER_REFINE_SUBPIX`, window one marker module
-wide); undistortPoints is still a separate Pipeline step and future
-work. `uv run python tests/measure_detection.py` prints corner and aim
+wide); undistortPoints is a separate step, applied only once the
+camera is calibrated (see [Lens calibration](#lens-calibration)). `uv run python tests/measure_detection.py` prints corner and aim
 error per fixture, with and without refinement. Per-frame behaviour over a synthetic frame sequence is covered
 below; what's still missing is a real video source, 1-euro filtering,
 and any wiring into `server.py`.
@@ -1102,6 +1103,30 @@ the real server:
 It says nothing about the sensor, Wi-Fi, the LED or timing. See
 `firmware/boresight-cam/README.md` for the details.
 
+## Lens calibration
+
+Wide phone lenses and the OV2640 bend straight lines, which skews the
+homography most near the frame edges. Once a camera is calibrated, its
+detected marker corners (and the frame centre) are run through
+`undistortPoints` before the solve. Until then every frame is solved
+exactly as before.
+
+1. Open `/markers/charuco` and print the board at any size (stick it to
+   something flat), or show it full-screen on a monitor.
+2. While streaming, press **Calibrate** on the phone. For a camera with
+   no screen, run `curl -X POST https://<server>/calibration` (with the
+   token), naming `{"address": ...}` from `GET /sessions` when more than
+   one session is connected.
+3. Move the camera so the board appears everywhere, **right up to the
+   frame edges and corners**, tilted, near and far. After 20 different
+   views the server fits the lens and reports the RMS reprojection error
+   (it accepts ≤1.5px; good ones are well under 1px).
+
+Results are kept in `.boresight/lenses.json`, one per client kind,
+camera and resolution, and apply from the next frame. `GET /calibration`
+lists them. Delete the file to go back to uncorrected aim. Full
+`solvePnP` pose estimation on top of the intrinsics is future work.
+
 ## On-screen markers
 
 Instead of printing the tags and sticking them to the bezel, draw them
@@ -1305,7 +1330,6 @@ a defect invisible to a test suite that always runs from a checkout.
       src/boresight/
         config/
           markers.toml        # id -> (x, y) in screen mm; reference layout
-          camera.toml         # future: intrinsics + distortion
         web/
           index.html          # phone client: capture, status, telemetry
           capture.js          # getUserMedia, JPEG encode, WebSocket send
@@ -1316,6 +1340,8 @@ a defect invisible to a test suite that always runs from a checkout.
         marker_map.py         # markers.toml -> id to screen-plane corners
         markers.py            # printable marker SVG, served over HTTP
         solve.py              # homography, RANSAC, aim point
+        lens.py               # lens model, undistortPoints, .boresight/lenses.json
+        calibration.py        # ChArUco board and per-session lens calibration
         pipeline.py           # frame -> detect -> solve -> normalize -> inject
         layout_source.py      # printed layout or on-screen, by config
         overlay/
@@ -1330,7 +1356,6 @@ a defect invisible to a test suite that always runs from a checkout.
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
-        calibrate.py          # future: chessboard intrinsics
         map_markers.py        # future: build markers.toml for a real TV
       firmware/
         boresight-cam/        # ESP32-CAM client: camera + trigger over Wi-Fi (ESP-IDF)
@@ -1393,7 +1418,10 @@ in, so the two sequences pair positionally.
       /markers` and `GET /markers/{id}.svg` (`markers.py`) serve
       print-ready vector tags at exact mm dimensions from the browser;
       verifying a physical print against a ruler is still a manual step
-- [ ] Camera intrinsic calibration (phone camera)
+- [ ] Camera intrinsic calibration — ChArUco calibration from the
+      live stream is built and tested on synthetic distorted frames
+      (see [Lens calibration](#lens-calibration)); not yet measured on
+      a real phone or ESP32-CAM
 - [x] Web server: phone connects over Wi-Fi, streams video, PC decodes
       frames — the client page, the frame socket, the newest-wins drop
       policy, token auth and TLS all exist and are tested by replaying

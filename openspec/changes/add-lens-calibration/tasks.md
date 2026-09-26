@@ -18,12 +18,12 @@
 
 - [x] 4.1 `hello` accepts `camera`; the session looks up its lens per frame by decoded size; telemetry carries `lens` and `calibration` only when relevant; verify in `tests/test_lens_calibration_server.py` that an uncalibrated session's telemetry is unchanged and a calibrated one reports `lens`
 - [x] 4.2 `calibrate` control message and `POST /calibration` / `GET /calibration`; the capture runs on the session's executor thread and stores into the app's `LensStore`; verify start/cancel over the socket, HTTP 404/409 cases, the single-session default, and the listing
-- [ ] 4.3 Phone UI: "Calibrate lens" / "Cancel" buttons, status row, board link, and `camera` in `hello`; verify by `node --check` on `capture.js` and by the served page containing the new controls
+- [x] 4.3 Phone UI: "Calibrate lens" / "Cancel" buttons, status row, board link, and `camera` in `hello`; verify by `node --check` on `capture.js` and by the served page containing the new controls
 
 ## 5. Docs and checks
 
-- [ ] 5.1 README: a short "Lens calibration" section; verify it is present and brief
-- [ ] 5.2 Run `uv run ruff check`, `uv run ruff format --check`, `uv run pytest -q` and `openspec validate --all --strict`, and verify all pass
+- [x] 5.1 README: a short "Lens calibration" section; verify it is present and brief
+- [x] 5.2 Run `uv run ruff check`, `uv run ruff format --check`, `uv run pytest -q` and `openspec validate --all --strict`, and verify all pass
 
 ## 6. Hardware (needs a device; not verifiable in CI)
 
