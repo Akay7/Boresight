@@ -4,8 +4,8 @@ The two things an overlay must do -- sit above everything, and refuse
 all input -- have no common mechanism across X11, Wayland and Windows.
 Qt papers over most of it: `WindowTransparentForInput` becomes an empty
 XShape input region on X11 and `WS_EX_TRANSPARENT` on Windows, so one
-widget would cover both. Only X11 is exercised: Boresight has no
-Windows cursor backend, so nothing runs the overlay there.
+widget would cover both. Only X11 is exercised: the Windows path has
+never been run.
 
 Wayland is the exception, and deliberately so upstream: an ordinary
 client is not allowed to place itself above other windows. The

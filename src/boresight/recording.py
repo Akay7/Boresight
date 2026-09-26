@@ -126,6 +126,11 @@ class FrameRecorder:
         self._triggers: deque[dict] = deque()
         self._bytes = 0
         self._client: dict = {}
+        # The lens the session's frames were last undistorted with, set
+        # by the server as frames are processed; saved as context.
+        self.lens: object | None = None
+        # Returns the session's own context (lens, zero) for a save.
+        self.context: Callable[[], dict] | None = None
 
     @property
     def retained_bytes(self) -> int:
@@ -261,6 +266,7 @@ def _new_directory(root: Path, now: datetime) -> Path:
 def save_recording(
     snapshot: RecordingSnapshot,
     marker_source: dict | None = None,
+    session: dict | None = None,
     now: datetime | None = None,
 ) -> SavedRecording:
     """Write a snapshot as a replayable frame sequence.
@@ -335,6 +341,9 @@ def save_recording(
             "omitted_frames": omitted,
             "client": snapshot.client or None,
             "marker_source": marker_source,
+            # The session's lens and zero when saved. Context for a
+            # reader: `pipeline.replay()` does not apply them yet.
+            "session": session,
             "layout_file": "markers.toml",
         },
         "triggers": [

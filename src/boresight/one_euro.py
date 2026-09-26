@@ -72,6 +72,25 @@ class OneEuroFilter:
         self._last_point: Point | None = None
         self._last_time: float | None = None
 
+    @property
+    def min_cutoff(self) -> float:
+        return self._min_cutoff
+
+    @property
+    def beta(self) -> float:
+        return self._beta
+
+    def tune(self, min_cutoff: float, beta: float) -> None:
+        """Change both knobs, keeping everything the filter has seen.
+
+        Only the parameters change: the smoothed position and speed
+        estimate stay, so a steady aim stays exactly where it is and the
+        next sample is filtered from there with the new values. Meant to
+        be called from whichever thread calls `apply`, between samples.
+        """
+        self._min_cutoff = min_cutoff
+        self._beta = beta
+
     def apply(self, point: Point, *, t: float | None = None) -> Point:
         """Filter one sample. `t` overrides the clock; tests use this to
         drive an explicit, reproducible `dt` instead of real wall time."""

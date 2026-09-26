@@ -131,6 +131,24 @@ middleware like every other route. The session registry is untouched:
 each session registers its recorder in a
 small dict on `app.state` keyed by the `ActiveSession`.
 
+### Session context: lens and zero are saved, not yet replayed
+
+A session may undistort its frames with a calibrated lens and offset its
+aim with a zero. Both are written into the manifest
+(`recording.session`: `camera`, `lens`, `zero`, each as its own
+`as_dict()`), read from the session when the save happens.
+`pipeline.replay()` does not apply either yet, so a recording made with
+a lens or zero replays the uncorrected solve; making it apply them is
+future work, and the manifest already holds what it would need.
+
+### Off in `create_app`, on in `main()`
+
+`create_app()` without a `recording` argument keeps nothing, like the
+in-memory lens store and zeroing path: an app built for a test buffers
+no frames and can write nothing under the working directory.
+`python -m boresight.server` passes the flags, whose default window is
+10 s.
+
 ### The replay CLI prefers the directory's layout
 
 `--config` defaults to `None`; when omitted, `<frames_dir>/markers.toml`

@@ -225,7 +225,9 @@ def test_request_content_never_reaches_the_child_command(backend) -> None:
         client._patch_launcher()
         client.post("/markers/source", json={"source": "screen"})
 
-        assert client._launch.started == [[sys.executable, "-m", "boresight.overlay"]]
+        assert client._launch.started == [
+            [sys.executable, "-m", "boresight.overlay", "--commands"]
+        ]
 
 
 def test_the_display_index_comes_from_startup_not_the_request(backend) -> None:

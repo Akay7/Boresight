@@ -81,9 +81,8 @@ def test_the_first_move_emits_no_relative_delta(fake_uinput) -> None:
     assert _relative_events(relative_device, evdev.ecodes.REL_Y) == []
 
 
-def test_a_second_move_emits_a_delta_from_the_first(fake_uinput, monkeypatch) -> None:
-    monkeypatch.setenv("BORESIGHT_REL_SCALE", "1000")
-    backend = UinputCursorBackend()
+def test_a_second_move_emits_a_delta_from_the_first(fake_uinput) -> None:
+    backend = UinputCursorBackend(rel_scale=1000)
 
     backend.move_absolute(0.5, 0.5)
     backend.move_absolute(0.6, 0.45)
@@ -104,14 +103,11 @@ def test_a_zero_delta_emits_no_relative_event(fake_uinput) -> None:
     assert _relative_events(relative_device, evdev.ecodes.REL_Y) == []
 
 
-def test_every_move_still_emits_the_absolute_placement(
-    fake_uinput, monkeypatch
-) -> None:
+def test_every_move_still_emits_the_absolute_placement(fake_uinput) -> None:
     """The relative delta is additional, not a replacement -- a title
     reading the OS cursor position must see every move exactly as
     before this change."""
-    monkeypatch.setenv("BORESIGHT_REL_SCALE", "1000")
-    backend = UinputCursorBackend()
+    backend = UinputCursorBackend(rel_scale=1000)
 
     backend.move_absolute(0.5, 0.5)
     backend.move_absolute(0.6, 0.45)
@@ -127,11 +123,8 @@ def test_every_move_still_emits_the_absolute_placement(
     assert abs_y[-2:] == [round(0.5 * 32767), round(0.45 * 32767)]
 
 
-def test_rel_scale_env_var_controls_the_delta_magnitude(
-    fake_uinput, monkeypatch
-) -> None:
-    monkeypatch.setenv("BORESIGHT_REL_SCALE", "2000")
-    backend = UinputCursorBackend()
+def test_rel_scale_controls_the_delta_magnitude(fake_uinput) -> None:
+    backend = UinputCursorBackend(rel_scale=2000)
 
     backend.move_absolute(0.5, 0.5)
     backend.move_absolute(0.6, 0.5)
@@ -140,17 +133,19 @@ def test_rel_scale_env_var_controls_the_delta_magnitude(
     assert _relative_events(relative_device, evdev.ecodes.REL_X) == [200]
 
 
-def test_an_invalid_rel_scale_env_var_falls_back_to_disabled(
-    fake_uinput, monkeypatch
-) -> None:
-    monkeypatch.setenv("BORESIGHT_REL_SCALE", "not-a-number")
+def test_rel_scale_can_change_between_moves(fake_uinput) -> None:
+    """A live setting: the next move uses the new scale, and the delta
+    is still taken from the last position, not reset."""
     backend = UinputCursorBackend()
 
     backend.move_absolute(0.5, 0.5)
     backend.move_absolute(0.6, 0.5)
+    backend.rel_scale = 1000
+    backend.move_absolute(0.7, 0.5)
 
     relative_device = fake_uinput[1]
-    assert _relative_events(relative_device, evdev.ecodes.REL_X) == []
+    assert backend.rel_scale == 1000
+    assert _relative_events(relative_device, evdev.ecodes.REL_X) == [100]
 
 
 def test_relative_deltas_are_off_by_default(fake_uinput) -> None:

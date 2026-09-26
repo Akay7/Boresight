@@ -204,8 +204,9 @@ case that matters.
 
 The real fix for sparse visibility is pose estimation from a marker of
 known physical size (`solvePnP`) rather than homography extrapolation,
-which turns four coplanar points into a metric pose. That needs camera
-intrinsics, so it is blocked on the calibration milestone.
+which turns four coplanar points into a metric pose. It needs camera
+intrinsics, which [lens calibration](#lens-calibration) now measures;
+the pose step itself is still to do.
 
 ## Pipeline
 
@@ -313,26 +314,33 @@ unaffected. Trigger messages keep their order, so a quick tap whose
 
 Two paths for the aim coordinate, selectable by config flag.
 
-**Direct injection.** A uinput virtual absolute pointer on Linux, the
-only backend that exists. (A Windows backend over `SendInput` with
-`MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE` is planned, not implemented:
-the server does not run on Windows today.) Zero added latency, works
-with emulators. Some fullscreen-exclusive titles ignore synthetic events —
+**Direct injection.** Chosen by platform: a uinput virtual absolute
+pointer on Linux, `SendInput` with `MOUSEEVENTF_ABSOLUTE |
+MOUSEEVENTF_VIRTUALDESK` on Windows (`inject_win32.py`), and Quartz
+`CGEvent`s on macOS (`inject_darwin.py`), both over plain `ctypes`.
+The Windows and macOS backends are unit-tested against fakes but not
+yet run on real hardware. On those two the cursor maps onto the primary
+display; on a multi-monitor desktop set `BORESIGHT_CURSOR_RECT=x,y,w,h`
+(pixels on Windows, points on macOS, in desktop coordinates) to the
+monitor the markers surround. macOS needs the Accessibility permission
+for the terminal (or Python) that starts the server; without it the
+server refuses to start and says where to grant it. Zero added latency,
+works with emulators. Some fullscreen-exclusive titles ignore synthetic events —
 confirmed on one real title (Blue Estate) that switches its own input
 handling to raw/relative mouse capture specifically in fullscreen,
 ignoring the OS cursor entirely; its own "Light Gun Mode" setting
 turned out to be the actual fix, not anything on Boresight's side.
 
-For a title where no such in-game setting exists, the Linux backend can
+For a title where no such in-game setting exists, every backend can
 also emit a relative delta alongside its normal absolute placement —
 **off by default, and not safe to enable casually.** Continuous
 relative deltas computed from a noisy tracked position accumulate
 error with no correction the way absolute placement has, and drift
 into a screen corner given enough time; confirmed exactly that way in
-practice. `BORESIGHT_REL_SCALE` (device-motion units per full screen
-sweep) enables it if set to anything nonzero — treat this as a
-supervised experiment for one specific title, not a setting to leave
-on.
+practice. `rel_scale` (device-motion units per full screen sweep; see
+[Tuning](#tuning-less-lag-or-less-jitter)) enables it if set to
+anything nonzero — treat this as a supervised experiment for one
+specific title, not a setting to leave on.
 
 **Hardware round-trip (future).** PC computes the coordinate, sends it
 over serial to an ESP32-S3 (native USB), which emits the absolute HID
@@ -523,9 +531,16 @@ project dependency:
 
 `detect.py` wraps `cv2.aruco.ArucoDetector` with cornerSubPix
 refinement enabled (`CORNER_REFINE_SUBPIX`, window one marker module
-wide); undistortPoints is still a separate Pipeline step and future
-work. `uv run python tests/measure_detection.py` prints corner and aim
-error per fixture, with and without refinement. Per-frame behaviour over a synthetic frame sequence is covered
+wide); undistortPoints is a separate step, applied only once the
+camera is calibrated (see [Lens calibration](#lens-calibration)). `uv run python tests/measure_detection.py` prints corner and aim
+error per fixture, with and without refinement. Each streaming session
+detects through its own `MarkerTracker`: while its markers stay in view
+and at least 36px across, it searches a half-size frame and refines
+corners at full resolution, falling back to the full search on any miss
+and at least every 10 frames (on one core: 1080p 27 → 5 ms, 720p phone
+3.3 → 2.1 ms; ESP32-CAM-sized markers always get the full search).
+`--full-frame-detection` turns it off; `uv run python
+tests/measure_detection_speed.py` measures it. Per-frame behaviour over a synthetic frame sequence is covered
 below; what's still missing is a real video source, 1-euro filtering,
 and any wiring into `server.py`.
 
@@ -640,33 +655,44 @@ aim-derived movement last left the filter.
 
 ### Tuning: less lag or less jitter
 
-Each session's filter is built with `min_cutoff=0.5,
-beta=1.0` — tuned by feel, not measurement, so what feels right depends
-on your own camera's noise floor and how fast you swing. Two env vars
-override either without a code change (read once, at server startup):
+Tuned by feel, not measurement, so the phone's **Aim tuning** panel
+changes these live — every streaming session picks a change up on its
+next frame, no restart or reconnect — and **Save settings** writes them
+to `.boresight/config.toml` (another path with `--config`):
+
+- **`min_cutoff`** (default `0.5` Hz, 0.01–10) — how hard a *held* aim
+  is smoothed. Raise it if the cursor visibly creeps into position after
+  you stop instead of landing there; too high and a steady aim shakes
+  with raw detection noise.
+- **`beta`** (default `1.0`, 0–10) — how much a *fast* swing cuts
+  through the smoothing. Raise it if a quick swing still feels laggy
+  mid-motion.
+- **`hold_s`** (default `0.75`, 0–5; 0 is off) — see the next section.
+- **`rel_scale`** (default `0`, 0–10000) — see
+  [Cursor injection](#cursor-injection); leave it at 0.
+
+Each is resolved at startup as flag > environment variable > file >
+default: `--aim-min-cutoff` / `BORESIGHT_AIM_MIN_CUTOFF`, `--aim-beta` /
+`BORESIGHT_AIM_BETA`, `--aim-hold-s` / `BORESIGHT_AIM_HOLD_S`,
+`--rel-scale` / `BORESIGHT_REL_SCALE`. A value that is not a number in
+range stops the server with a message naming it. A value pinned by a
+flag or variable is marked on the phone, and saving without changing it
+leaves the file's own value alone.
 
     BORESIGHT_AIM_MIN_CUTOFF=5.0 uv run boresight
 
-- **`BORESIGHT_AIM_MIN_CUTOFF`** (default `0.5`) — how hard a *held*
-  aim is smoothed. This is the one to raise if the cursor visibly
-  creeps into position after you stop moving instead of landing there
-  immediately: at a low cutoff the filter only approaches the true
-  position a little more each frame rather than snapping to it. Too
-  high, and a steady aim starts visibly shaking with raw detection
-  noise instead.
-- **`BORESIGHT_AIM_BETA`** (default `1.0`) — how much a *fast* swing
-  cuts through the smoothing. Raise this if a quick swing to a new
-  target still feels smoothed/laggy mid-motion, as opposed to only
-  after arriving.
-
-Both are read by `_aim_filter()` in `marker_source.py`; an unset or
-non-numeric value falls back to `OneEuroFilter`'s own default for that
-parameter.
+The file also keeps the phone's `[view]` choices — marker source,
+overlay margin, debug overlay — which otherwise reset on a restart;
+saved on-screen markers are started again in the background at startup.
+It is machine-written (comments are not kept); tables the server does
+not know are left as they are. Over HTTP: `GET /settings`, `POST
+/settings/tuning` (any subset, range-checked, 422 otherwise) and `POST
+/settings/save`, all behind the token like everything else.
 
 ### Holding through a brief dropout
 
 `aim_hold.py`'s `HoldingPipeline` wraps an `AimPipeline`: on a frame
-that does not solve, if a solved frame landed within the last 0.75s, it
+that does not solve, if a solved frame landed within the last `hold_s` (0.75s by default), it
 re-sends that same position to the (smoothing-wrapped) cursor backend.
 This exists because of a real platform behaviour, not a solving
 concern — a Wayland compositor hides a pointer that produces no events
@@ -705,6 +731,25 @@ two streams. Each stats message carries `"cursor": "yours" | "other" |
 now follows <client>` at every handover. The trigger button itself is
 still shared: holds from several sessions keep it down together.
 
+### Zeroing the gun
+
+The cursor goes where the *camera* points. A camera mounted 1° off the
+barrel is ~3.5 cm off at 2 m, and games hide the cursor, so zero the gun
+once: tap **Zero** on the phone, then aim through the sights at each
+target and pull the trigger. With on-screen markers the overlay draws
+the targets (four corners, then the centre); with printed markers,
+shoot the four corners of the picture. Shots during zeroing never click
+the game. The last target is optional: take it from a metre closer or
+farther and the camera-to-barrel offset (parallax) is fitted too;
+otherwise that offset is exact only at the distance you zeroed from.
+
+The correction is a fixed image-space offset for the mount's tilt,
+which holds at any distance and angle, rather than a screen-space warp
+that is right only where you stood (`zeroing.py`). It is stored per
+phone in `.boresight/zeroing.json` and reloaded on connect; **Reset**
+forgets it. Re-zero after remounting the phone or changing its camera
+resolution.
+
 ## The phone client
 
 The phone loads a page in its browser, which captures from the rear
@@ -741,6 +786,11 @@ in the latency you are trying to measure.
 which prints the exact URL to open, token included:
 
     Open this on the phone:  https://192.168.1.20:7331/?token=xK3f...
+
+followed, in an interactive terminal big enough for it, by the same URL
+as a QR code to scan with the phone's camera. It is printed, never
+logged, and left out when output is redirected; `--no-qr` turns it off
+(e.g. while screen-sharing).
 
 The certificate is self-signed, so the phone shows a warning the first
 time. It is generated once into `.boresight/` and reused, so accepting
@@ -922,7 +972,8 @@ The server keeps each session's last 10 seconds of frames in memory
 a device with no screen — writes them, byte for byte, to
 `.boresight/recordings/<timestamp>/` with a fixture-style
 `manifest.json` (plus client timestamps, triggers and each frame's live
-result) and the `markers.toml` in use. It replays like any fixture:
+result, and the session's lens and zero for reference) and the
+`markers.toml` in use. It replays like any fixture:
 
     uv run python -m boresight.pipeline .boresight/recordings/<timestamp> --dry-run
 
@@ -1116,6 +1167,30 @@ the real server:
 It says nothing about the sensor, Wi-Fi, the LED or timing. See
 `firmware/boresight-cam/README.md` for the details.
 
+## Lens calibration
+
+Wide phone lenses and the OV2640 bend straight lines, which skews the
+homography most near the frame edges. Once a camera is calibrated, its
+detected marker corners (and the frame centre) are run through
+`undistortPoints` before the solve. Until then every frame is solved
+exactly as before.
+
+1. Open `/markers/charuco` and print the board at any size (stick it to
+   something flat), or show it full-screen on a monitor.
+2. While streaming, press **Calibrate** on the phone. For a camera with
+   no screen, run `curl -X POST https://<server>/calibration` (with the
+   token), naming `{"address": ...}` from `GET /sessions` when more than
+   one session is connected.
+3. Move the camera so the board appears everywhere, **right up to the
+   frame edges and corners**, tilted, near and far. After 20 different
+   views the server fits the lens and reports the RMS reprojection error
+   (it accepts ≤1.5px; good ones are well under 1px).
+
+Results are kept in `.boresight/lenses.json`, one per client kind,
+camera and resolution, and apply from the next frame. `GET /calibration`
+lists them. Delete the file to go back to uncorrected aim. Full
+`solvePnP` pose estimation on top of the intrinsics is future work.
+
 ## On-screen markers
 
 Instead of printing the tags and sticking them to the bezel, draw them
@@ -1206,7 +1281,7 @@ starting on-screen markers:
 
     uv run boresight --overlay-extra-margin-px 50
 
-The CLI flag only sets a starting value, though — judging whether a tag
+The CLI flag only sets a starting value (it overrides a saved one), though — judging whether a tag
 now clears a taskbar means looking at the display, which is where the
 phone is, not the machine running the server. The phone client's
 Markers row has a `−`/`+` stepper for it next to the source buttons:
@@ -1228,10 +1303,10 @@ own overlay.
 | Platform | Status |
 | --- | --- |
 | X11 | Supported |
-| Windows | **Not supported.** Boresight has no Windows cursor backend, so the server does not run there (planned, not implemented) |
+| Windows | Untested. Qt's `WS_EX_TRANSPARENT` path should work, but has never been run; the cursor backend exists (see "Cursor injection") |
 | Wayland — KDE, sway, Hyprland | Supported (layer-shell) |
 | Wayland — GNOME | **Not possible.** Mutter does not implement `wlr-layer-shell`, so no client can place a surface above other windows |
-| macOS | No backend |
+| macOS | No overlay backend; it refuses to start. Use printed markers (the cursor backend works regardless) |
 
 Where it cannot work the overlay refuses to start and says why, rather
 than showing a window that renders but sits in the normal stacking
@@ -1319,17 +1394,20 @@ a defect invisible to a test suite that always runs from a checkout.
       src/boresight/
         config/
           markers.toml        # id -> (x, y) in screen mm; reference layout
-          camera.toml         # future: intrinsics + distortion
         web/
           index.html          # phone client: capture, status, telemetry
           capture.js          # getUserMedia, JPEG encode, WebSocket send
         server.py             # HTTP + frame socket, serves web/ to the phone
         stream.py             # frame codec, drop slot, per-session counters, live sessions
         netaccess.py          # bind address, shared token, TLS certificate
+        settings.py           # settings file, precedence, live tuning store
+        settings_routes.py    # GET /settings, live changes, save
         detect.py             # ArUco detection + subpixel corner refinement
         marker_map.py         # markers.toml -> id to screen-plane corners
         markers.py            # printable marker SVG, served over HTTP
         solve.py              # homography, RANSAC, aim point
+        lens.py               # lens model, undistortPoints, .boresight/lenses.json
+        calibration.py        # ChArUco board and per-session lens calibration
         pipeline.py           # frame -> detect -> solve -> normalize -> inject
         layout_source.py      # printed layout or on-screen, by config
         overlay/
@@ -1337,14 +1415,16 @@ a defect invisible to a test suite that always runs from a checkout.
           render.py           # painting them
           backend.py          # can this platform host an overlay?
           qt_backend.py       # the always-on-top, input-transparent window
-        inject.py             # uinput backend (Linux only); SmoothingCursorBackend
+        inject.py             # backend by platform, uinput (Linux); SmoothingCursorBackend
+        inject_win32.py       # SendInput backend (Windows)
+        inject_darwin.py      # Quartz event backend (macOS)
         one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
         shot.py               # firing at the named frame's unsmoothed aim
         shooter.py            # which session's aim drives the cursor
+        zeroing.py            # shoot targets to correct camera-to-barrel aim
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
-        calibrate.py          # future: chessboard intrinsics
         map_markers.py        # future: build markers.toml for a real TV
       firmware/
         boresight-cam/        # ESP32-CAM client: camera + trigger over Wi-Fi (ESP-IDF)
@@ -1407,7 +1487,10 @@ in, so the two sequences pair positionally.
       /markers` and `GET /markers/{id}.svg` (`markers.py`) serve
       print-ready vector tags at exact mm dimensions from the browser;
       verifying a physical print against a ruler is still a manual step
-- [ ] Camera intrinsic calibration (phone camera)
+- [ ] Camera intrinsic calibration — ChArUco calibration from the
+      live stream is built and tested on synthetic distorted frames
+      (see [Lens calibration](#lens-calibration)); not yet measured on
+      a real phone or ESP32-CAM
 - [x] Web server: phone connects over Wi-Fi, streams video, PC decodes
       frames — the client page, the frame socket, the newest-wins drop
       policy, token auth and TLS all exist and are tested by replaying
@@ -1447,7 +1530,9 @@ in, so the two sequences pair positionally.
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
       directly (uinput, Linux) — built ahead of the pipeline above as a
       standalone proof; not yet wired to real aim data or Mesen
-- [ ] (Planned, not implemented) Windows cursor injection via `SendInput`, test in Mesen
+- [x] Windows (`SendInput`) and macOS (Quartz) cursor injection, tested
+      against fakes of the OS calls on Linux
+- [ ] Run the Windows and macOS backends on real hardware, test in Mesen
 - [ ] On-screen trigger button wired to click injection — the frame
       socket already reserves text messages for it, so it needs no
       second connection

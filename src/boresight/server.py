@@ -19,12 +19,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
-from boresight.inject import CursorBackend, TriggerHold, UinputCursorBackend
+from boresight.calibration import CalibrationCapture
+from boresight.inject import CursorBackend, TriggerHold, default_cursor_backend
 from boresight.layout_source import (
     DEFAULT_SPEC,
     LayoutSourceError,
     marker_map_factory,
 )
+from boresight.lens import DEFAULT_LENS_PATH, LensModel, LensStore, lens_key
 from boresight.marker_map import MarkerMap, load_marker_map
 from boresight.marker_source import (
     MarkerSource,
@@ -52,6 +54,12 @@ from boresight.recording import (
     recording_request,
     save_recording,
 )
+from boresight.settings import LiveSettings, Settings, ViewPreferences
+from boresight.settings_routes import (
+    apply_rel_scale,
+    restore_marker_source,
+)
+from boresight.settings_routes import router as settings_router
 from boresight.shooter import CursorArbiter
 from boresight.shot import AimHistory, Point, TriggerAction, TriggerQueue
 from boresight.stream import (
@@ -61,6 +69,13 @@ from boresight.stream import (
     SessionRegistry,
     SessionStats,
     unpack_frame,
+)
+from boresight.zeroing import (
+    DEFAULT_ZEROING_PATH,
+    SessionZeroing,
+    SightFrame,
+    ZeroingService,
+    ZeroingStore,
 )
 
 # Inside the package, not at the repository root: the wheel target is
@@ -140,6 +155,14 @@ class MarkerSourceRequest(BaseModel):
     source: Literal["printed", "screen"]
 
 
+class CalibrationRequest(BaseModel):
+    # As `GET /sessions` lists it. Optional: with one session connected,
+    # which is the usual case for a screenless camera, there is only one
+    # thing it could mean.
+    address: str | None = Field(default=None, max_length=128)
+    action: Literal["start", "cancel"] = "start"
+
+
 class OverlayMarginRequest(BaseModel):
     # Bounded well above any real panel height, so a garbled value is a
     # 422 rather than a margin that swallows the whole display; the
@@ -157,11 +180,15 @@ def _default_marker_map() -> MarkerMap:
 
 
 def create_app(
-    backend_factory: Callable[[], CursorBackend] = UinputCursorBackend,
+    backend_factory: Callable[[], CursorBackend] = default_cursor_backend,
     marker_map_factory: Callable[[], MarkerMap] = _default_marker_map,
     config: ServerConfig | None = None,
     display: int | None = None,
     overlay_extra_margin_px: int = 0,
+    tracked_detection: bool = True,
+    settings: LiveSettings | None = None,
+    lens_store_factory: Callable[[], LensStore] = lambda: LensStore(None),
+    zeroing_path: Path | None = None,
     recording: RecordingConfig | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
@@ -172,8 +199,23 @@ def create_app(
     startup rather than on first request, so a broken environment
     (no `/dev/uinput` permission, an unparseable layout) fails fast
     instead of failing on the first frame.
+
+    `settings` is what `main()` resolved from flags, environment and the
+    settings file; without it, defaults with `overlay_extra_margin_px`
+    and nowhere to save.
+
+    Lens calibrations default to an in-memory store, so an app built for
+    a test never reads or writes the operator's `.boresight/lenses.json`;
+    `main()` passes the persistent one.
+
+    `zeroing_path` is where clients' zeroes are kept; None keeps them in
+    memory, which is what tests want. `main()` passes the real file.
     """
     config = config or ServerConfig()
+    live_settings = settings or LiveSettings(
+        Settings(view=ViewPreferences(overlay_extra_margin_px=overlay_extra_margin_px))
+    )
+    saved_view = live_settings.startup.view
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -183,12 +225,21 @@ def create_app(
             app.state.cursor_backend,
             app.state.marker_map,
             display=display,
-            overlay_extra_margin_px=overlay_extra_margin_px,
+            overlay_extra_margin_px=saved_view.overlay_extra_margin_px,
+            tracked_detection=tracked_detection,
+            tuning=lambda: live_settings.tuning,
         )
-        app.state.settings = ViewSettings()
+        app.state.settings = ViewSettings(debug=saved_view.debug)
+        app.state.live_settings = live_settings
+        apply_rel_scale(app.state.cursor_backend, live_settings.tuning)
+        restore_marker_source(app.state.markers, saved_view.marker_source)
+        app.state.lenses = lens_store_factory()
         app.state.sessions = SessionRegistry()
         app.state.trigger_hold = TriggerHold(app.state.cursor_backend)
         app.state.arbiter = CursorArbiter(app.state.cursor_backend)
+        app.state.zeroing = ZeroingService(
+            ZeroingStore(zeroing_path), app.state.markers
+        )
         # Each live session's recorder, for POST /recordings.
         app.state.recorders = {}
         try:
@@ -203,7 +254,9 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.config = config
-    app.state.recording = recording or RecordingConfig()
+    # Off unless asked for, like the lens store and zeroing path: an app
+    # built for a test keeps no frames. `main()` passes the real window.
+    app.state.recording = recording or RecordingConfig(seconds=0)
 
     # Enforced in one place rather than per route, so a route added
     # later is protected by default instead of by remembering. It also
@@ -240,6 +293,7 @@ def create_app(
         return response
 
     app.include_router(markers_router)
+    app.include_router(settings_router)
 
     @app.post("/cursor/move", status_code=204)
     def move_cursor(
@@ -298,6 +352,45 @@ def create_app(
     async def read_sessions(request: Request) -> dict:
         return {"sessions": request.app.state.sessions.listing(time.monotonic())}
 
+    @app.get("/calibration")
+    def read_calibrations(request: Request) -> dict:
+        return {"lenses": request.app.state.lenses.listing()}
+
+    # Async for the same reason as `/sessions`: it reads the registry.
+    @app.post("/calibration")
+    async def calibrate_session(
+        selection: CalibrationRequest, request: Request
+    ) -> JSONResponse:
+        sessions = [
+            session
+            for session in request.app.state.sessions
+            if selection.address in (None, session.address)
+        ]
+        if not sessions:
+            return JSONResponse(
+                {"detail": "no such session is streaming"}, status_code=404
+            )
+        if len(sessions) > 1:
+            return JSONResponse(
+                {
+                    "detail": "several sessions are streaming; name one by the "
+                    "address GET /sessions lists",
+                    "addresses": [session.address for session in sessions],
+                },
+                status_code=409,
+            )
+        session = sessions[0]
+        _calibration_action(
+            session.stats, selection.action, request.app.state.lenses, session.label
+        )
+        calibration = session.stats.calibration
+        return JSONResponse(
+            {
+                "address": session.address,
+                "calibration": None if calibration is None else calibration.status(),
+            }
+        )
+
     # For a client with no screen to press a button on: saves every live
     # session's recent frames. The phone asks over its own socket
     # instead, which names its session without an ID scheme.
@@ -352,8 +445,10 @@ def create_app(
             websocket.app.state.sessions,
             websocket.app.state.trigger_hold,
             websocket.app.state.arbiter,
-            websocket.app.state.recording,
-            websocket.app.state.recorders,
+            lenses=websocket.app.state.lenses,
+            zeroing=websocket.app.state.zeroing,
+            recording=websocket.app.state.recording,
+            recorders=websocket.app.state.recorders,
         )
 
     if WEB_DIR.is_dir():
@@ -395,7 +490,10 @@ def _decode_and_solve(
     payload: bytes,
     debug: bool = False,
     t: float | None = None,
-) -> tuple[FrameResult | None, float, float]:
+    lenses: LensStore | None = None,
+    identity: tuple[str | None, str | None] = (None, None),
+    calibration: CalibrationCapture | None = None,
+) -> tuple[FrameResult | None, float, float, LensModel | None]:
     """Blocking work, kept off the event loop.
 
     Both halves are CPU-bound and would otherwise stall every other
@@ -403,18 +501,66 @@ def _decode_and_solve(
     because OpenCV releases the GIL during detection, and moving a
     1280x720 array across a process boundary would cost more than the
     few milliseconds of work being parallelised.
+
+    Decoded straight to greyscale: detection uses nothing else, and
+    skipping the colour conversion saves about a third of the decode
+    (numbers in the `speed-up-marker-detection` change's design.md).
+
+    The lens is looked up by the decoded frame's size, not the size the
+    client's `hello` claimed: the frame is what the camera produced. A
+    running calibration sees the same frame afterwards.
     """
     started = time.perf_counter()
-    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
     decoded_at = time.perf_counter()
     if frame is None:
-        return None, (decoded_at - started) * 1000.0, 0.0
-    result = pipeline.process_frame(frame, debug=debug, t=t)
+        return None, (decoded_at - started) * 1000.0, 0.0, None
+    height, width = frame.shape[:2]
+    key = lens_key(*identity, (width, height))
+    lens = None if lenses is None else lenses.get(key)
+    result = pipeline.process_frame(frame, debug=debug, t=t, lens=lens)
+    if calibration is not None and calibration.active:
+        calibration.offer(frame, key)
     return (
         result,
         (decoded_at - started) * 1000.0,
         (time.perf_counter() - decoded_at) * 1000.0,
+        lens,
     )
+
+
+def _calibration_action(
+    stats: SessionStats,
+    action: object,
+    lenses: LensStore | None,
+    label: Callable[[], str],
+) -> None:
+    """Start or cancel a session's lens calibration.
+
+    Starting replaces whatever calibration the session had, finished or
+    not. The capture reaches the store only through its callback, which
+    runs on the session's executor thread with an accepted model.
+    """
+    if action == "cancel":
+        if stats.calibration is not None:
+            stats.calibration.cancel()
+            logger.info("lens calibration cancelled for %s", label())
+        return
+    if action != "start" or lenses is None:
+        return
+
+    def store(key: str, lens: LensModel) -> None:
+        lenses.put(key, lens)
+        logger.info(
+            "lens calibrated for %s: %s, %.2fpx RMS over %d views",
+            label(),
+            key,
+            lens.rms_px,
+            lens.views,
+        )
+
+    stats.calibration = CalibrationCapture(store)
+    logger.info("lens calibration started for %s", label())
 
 
 async def run_frame_session(
@@ -426,6 +572,8 @@ async def run_frame_session(
     sessions: SessionRegistry | None = None,
     hold: TriggerHold | None = None,
     arbiter: CursorArbiter | None = None,
+    lenses: LensStore | None = None,
+    zeroing: ZeroingService | None = None,
     recording: RecordingConfig | None = None,
     recorders: dict | None = None,
 ) -> None:
@@ -456,6 +604,9 @@ async def run_frame_session(
     `SessionPipeline`, and reaches the cursor only through `arbiter`,
     which lets one session at a time -- the active shooter -- move it.
 
+    Its zero is its own too: loaded when the client says who it is, and
+    handed to its `SessionPipeline` per frame (see `zeroing.py`).
+
     With `recording` enabled, the session also keeps its last seconds of
     frames and triggers (`recording.FrameRecorder`), saved when the
     client sends a `record` message; otherwise it keeps nothing.
@@ -483,23 +634,43 @@ async def run_frame_session(
     # lands while this session is the active shooter.
     cursor = arbiter.cursor_for(stats, session.label)
     aim = markers.session_pipeline(cursor)
+    zeroing = zeroing if zeroing is not None else ZeroingService(ZeroingStore(None))
+
+    def use_zero(zero) -> None:
+        aim.zero = zero
+
+    session_zeroing = SessionZeroing(zeroing, use_zero)
     # The gated cursor, not the smoothing one: a shot goes exactly where
     # its frame aimed, and the filter never hears about it.
     triggers = _SessionTriggers(
-        stats, hold, cursor, loop, claim=lambda: arbiter.claim(stats, session.label)
+        stats,
+        hold,
+        cursor,
+        loop,
+        claim=lambda: arbiter.claim(stats, session.label),
+        zeroing=session_zeroing,
     )
     recorder = (
         FrameRecorder(recording)
         if recording is not None and recording.enabled
         else None
     )
-    if recorder is not None and recorders is not None:
-        recorders[session] = recorder
+    if recorder is not None:
+        # What a recording needs to know about the session beyond its
+        # frames, read at save time, whichever way the save was asked for.
+        recorder.context = lambda: {
+            "camera": stats.camera,
+            "lens": _as_dict(recorder.lens),
+            "zero": _as_dict(aim.zero),
+        }
+        if recorders is not None:
+            recorders[session] = recorder
     # Saves in progress. Kept so they are not collected mid-write.
     saving: set[asyncio.Task] = set()
 
     async def report(client_ms: float | None) -> None:
         stats.cursor = arbiter.status(stats)
+        stats.zeroing = session_zeroing.status()
         if recorder is not None and client_ms is not None:
             recorder.result(client_ms, stats.outcome, stats.position)
         await _report(websocket, stats, client_ms)
@@ -547,7 +718,16 @@ async def run_frame_session(
                     task.add_done_callback(saving.discard)
                     continue
                 known_kind = stats.client_kind
-                _handle_control(stats, triggers, message.get("text"), settings)
+                _handle_control(
+                    stats,
+                    triggers,
+                    message.get("text"),
+                    settings,
+                    calibrate=lambda action: _calibration_action(
+                        stats, action, lenses, session.label
+                    ),
+                    zeroing=session_zeroing,
+                )
                 if stats.client_kind != known_kind:
                     logger.info(
                         "client identified: %s (version %s, frames %s)",
@@ -595,13 +775,18 @@ async def run_frame_session(
                     jpeg,
                     stats.debug_enabled,
                     captured_at,
+                    lenses,
+                    (stats.client_kind, stats.camera),
+                    stats.calibration,
                 )
                 # Retrieved here as well, for a job that fails after its
                 # session stopped awaiting it.
                 in_flight.add_done_callback(_retrieve)
                 # Shielded: cancelling the processor must not orphan the
                 # job's future, or teardown could not wait for it.
-                result, decode_ms, solve_ms = await asyncio.shield(in_flight)
+                result, decode_ms, solve_ms, lens = await asyncio.shield(in_flight)
+                if recorder is not None:
+                    recorder.lens = lens
             except Exception:
                 triggers.processing = False
                 # Anything the pipeline does not already turn into an
@@ -626,6 +811,7 @@ async def run_frame_session(
             triggers.processing = False
             stats.decode_ms = decode_ms
             stats.solve_ms = solve_ms
+            stats.lens_rms_px = None if lens is None else lens.rms_px
             if result is None:
                 # Undecodable bytes cost one frame, not the session. A
                 # corrupt frame on a lossy link should not disconnect
@@ -645,7 +831,9 @@ async def run_frame_session(
                 )
             # Before the report, so a shot this frame resolved is already
             # in the trigger count it carries.
-            triggers.frame_processed(client_ms, stats.position)
+            triggers.frame_processed(
+                client_ms, stats.position, None if result is None else result.sight
+            )
             await report(client_ms)
 
             nonlocal last_logged
@@ -721,6 +909,9 @@ async def run_frame_session(
         # A shot still waiting for its frame never fired, so there is
         # nothing to undo: it is simply dropped with the session.
         triggers.close()
+        # A run in progress takes its target off the screen with it, and
+        # lets another client zero.
+        session_zeroing.close()
         # Whatever ended the session, a button it was holding goes up
         # with it: nothing else would ever send the release.
         hold.release(stats)
@@ -773,9 +964,14 @@ async def run_frame_session(
 async def _save(recorder: FrameRecorder, markers: MarkerSourceController):
     """Snapshot on the loop, write on a worker thread."""
     snapshot = recorder.snapshot()
+    session = recorder.context() if recorder.context is not None else None
     state = markers.state()
     source = {"source": state["source"], "overlay_geometry": state["geometry"]}
-    return await asyncio.to_thread(save_recording, snapshot, source)
+    return await asyncio.to_thread(save_recording, snapshot, source, session)
+
+
+def _as_dict(value) -> dict | None:
+    return None if value is None else value.as_dict()
 
 
 def _retrieve(future: asyncio.Future) -> None:
@@ -794,6 +990,8 @@ def _handle_control(
     triggers: _SessionTriggers,
     text: str | None,
     settings: ViewSettings,
+    calibrate: Callable[[object], None] | None = None,
+    zeroing: SessionZeroing | None = None,
 ) -> None:
     """Client-side telemetry and control arriving the other way.
 
@@ -821,6 +1019,9 @@ def _handle_control(
     pipeline behind every session is one shared object, so anything
     stickier than a per-connection flag would let one phone's debug view
     change what another phone's frames compute.
+
+    `zeroing` starts, finishes, cancels or resets this session's zeroing
+    run; `hello`'s optional `id` says whose stored zero to use.
     """
     if not text:
         return
@@ -854,6 +1055,21 @@ def _handle_control(
             version.strip()[:HELLO_FIELD_MAX] if isinstance(version, str) else None
         )
         stats.frame_size = _frame_size(message.get("frame_size"))
+        camera = message.get("camera")
+        stats.camera = (
+            camera.strip()[:HELLO_FIELD_MAX] or None
+            if isinstance(camera, str)
+            else None
+        )
+        if zeroing is not None:
+            zeroing.identify(message.get("id"), stats.client_kind)
+    elif message.get("type") == "zeroing":
+        if zeroing is not None:
+            zeroing.control(message.get("action"))
+    elif message.get("type") == "calibrate":
+        # An unknown action is ignored there, as everywhere here.
+        if calibrate is not None:
+            calibrate(message.get("action"))
     elif message.get("type") == "debug":
         enabled = message.get("enabled")
         if not isinstance(enabled, bool):
@@ -892,6 +1108,9 @@ class _SessionTriggers:
     them. A shot still waiting after `SHOT_WAIT_S` fires anyway, with
     whatever the history has -- late, never lost.
 
+    While the session is zeroing, a press is a zeroing shot instead: it
+    hands the named frame's geometry to `zeroing` and clicks nothing.
+
     The cursor is moved only for an action that will actually press:
     with the button already down, a click or `down` presses nothing, and
     moving would drag whatever is held.
@@ -904,13 +1123,16 @@ class _SessionTriggers:
         cursor: CursorBackend,
         loop: asyncio.AbstractEventLoop,
         claim: Callable[[], None] = lambda: None,
+        zeroing: SessionZeroing | None = None,
     ) -> None:
         self._stats = stats
         self._hold = hold
         self._cursor = cursor
         self._loop = loop
         self._claim = claim
-        self.history = AimHistory()
+        self._zeroing = zeroing
+        self.history: AimHistory[Point] = AimHistory()
+        self.sights: AimHistory[SightFrame] = AimHistory()
         self._queue = TriggerQueue()
         self.processing = False
         self._deadline: asyncio.TimerHandle | None = None
@@ -920,8 +1142,14 @@ class _SessionTriggers:
         self._queue.push(action)
         self.drain()
 
-    def frame_processed(self, client_ms: float, position: Point | None) -> None:
+    def frame_processed(
+        self,
+        client_ms: float,
+        position: Point | None,
+        sight: SightFrame | None = None,
+    ) -> None:
         self.history.record(client_ms, position)
+        self.sights.record(client_ms, sight)
         self.drain()
 
     def drain(self) -> None:
@@ -952,6 +1180,16 @@ class _SessionTriggers:
     def _run(self, action: TriggerAction) -> None:
         if action.state == "up":
             self._hold.release(self._stats)
+            return
+        if self._zeroing is not None and self._zeroing.active:
+            # Not a press: no claim, no button, no move. A trigger that
+            # names no frame is aimed with the newest one.
+            frame_ms = action.frame_ms
+            if frame_ms is None:
+                frame_ms = self.sights.newest_ms
+            self._zeroing.shoot(
+                None if frame_ms is None else self.sights.aim_at(frame_ms)
+            )
             return
         if action.state == "down" and self._hold.holds(self._stats):
             return
@@ -1026,6 +1264,7 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
+    from boresight import terminal_qr
     from boresight.netaccess import (
         DEFAULT_HOST,
         DEFAULT_PORT,
@@ -1033,6 +1272,11 @@ def main(argv: list[str] | None = None) -> int:
         generate_token,
         is_loopback,
         resolve_certificate,
+    )
+    from boresight.settings import (
+        DEFAULT_SETTINGS_PATH,
+        SettingsError,
+        resolve_settings,
     )
 
     parser = argparse.ArgumentParser(prog="python -m boresight.server")
@@ -1066,12 +1310,65 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--overlay-extra-margin-px",
         type=int,
-        default=0,
+        default=None,
         help="shrink the on-screen overlay's auto-detected available "
         "area by this much on every side, on top of whatever the "
         "desktop's own panels already reserve. For a display whose "
-        "panel reservation isn't detected automatically (default: 0, "
-        "no change; see `python -m boresight.overlay --help`)",
+        "panel reservation isn't detected automatically (default: the "
+        "settings file's, else 0; see `python -m boresight.overlay --help`)",
+    )
+    # Settings: flag > BORESIGHT_* environment variable > settings file
+    # > default. See `settings.py`.
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_SETTINGS_PATH,
+        metavar="PATH",
+        help="settings file, read at startup and written when settings "
+        "are saved from the phone (default: %(default)s)",
+    )
+    tuning = parser.add_argument_group(
+        "aim tuning", "each overrides its BORESIGHT_* variable and the settings file"
+    )
+    tuning.add_argument(
+        "--aim-min-cutoff",
+        type=float,
+        default=None,
+        metavar="HZ",
+        help="one-euro min cutoff: raise if a held aim creeps into place",
+    )
+    tuning.add_argument(
+        "--aim-beta",
+        type=float,
+        default=None,
+        help="one-euro beta: raise if a fast swing still feels smoothed",
+    )
+    tuning.add_argument(
+        "--aim-hold-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="how long a brief detection dropout holds the last aim (0: off)",
+    )
+    tuning.add_argument(
+        "--rel-scale",
+        type=float,
+        default=None,
+        help="relative-motion units per full-screen sweep (0: off, the default)",
+    )
+    parser.add_argument(
+        "--no-qr",
+        action="store_true",
+        help="do not print the phone URL as a QR code (it is printed only "
+        "to an interactive terminal large enough for it anyway)",
+    )
+    parser.add_argument(
+        "--full-frame-detection",
+        action="store_true",
+        help="search every frame in full at full resolution, instead of "
+        "letting each session search a half-size frame while its markers "
+        "stay large and in view. Slower; for comparison, or if tracking "
+        "misbehaves with your camera",
     )
     parser.add_argument(
         "--record-seconds",
@@ -1104,6 +1401,20 @@ def main(argv: list[str] | None = None) -> int:
     except (LayoutSourceError, OSError, ValueError) as error:
         parser.exit(2, f"{error}\n")
 
+    try:
+        settings = resolve_settings(
+            args.config,
+            cli={
+                "tuning.min_cutoff": args.aim_min_cutoff,
+                "tuning.beta": args.aim_beta,
+                "tuning.hold_s": args.aim_hold_s,
+                "tuning.rel_scale": args.rel_scale,
+                "view.overlay_extra_margin_px": args.overlay_extra_margin_px,
+            },
+        )
+    except SettingsError as error:
+        parser.exit(2, f"{error}\n")
+
     config = ServerConfig(
         host=args.host,
         port=args.port,
@@ -1128,6 +1439,10 @@ def main(argv: list[str] | None = None) -> int:
     # anything else can happen. Buffered, it appears after the server
     # has already been running for a while -- or never.
     print(f"\n  Open this on the phone:  {config.phone_url()}\n", flush=True)
+    # Printed, never logged, like the line above: see `terminal_qr`.
+    qr = None if args.no_qr else terminal_qr.for_terminal(config.phone_url())
+    if qr is not None:
+        print(qr, flush=True)
     print(_device_details(config, certfile), flush=True)
     if not config.tls and not is_loopback(config.host):
         print(
@@ -1138,6 +1453,8 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+    lens_store = LensStore(DEFAULT_LENS_PATH)
+
     # Before `uvicorn.run`, whose logging setup keeps logger filters.
     # The banner above is the one place the token is meant to appear.
     install_log_redaction()
@@ -1145,7 +1462,10 @@ def main(argv: list[str] | None = None) -> int:
         create_app(
             marker_map_factory=layout_factory,
             config=config,
-            overlay_extra_margin_px=args.overlay_extra_margin_px,
+            tracked_detection=not args.full_frame_detection,
+            settings=settings,
+            lens_store_factory=lambda: lens_store,
+            zeroing_path=DEFAULT_ZEROING_PATH,
             recording=RecordingConfig(
                 seconds=max(0.0, args.record_seconds),
                 max_bytes=int(max(0.0, args.record_max_mb) * 1024 * 1024),

@@ -247,6 +247,17 @@ def test_a_recording_replays_to_the_same_track(tmp_path: Path) -> None:
     assert manifest["triggers"][0]["frame_ms"] == 1050.0
     assert manifest["recording"]["client"]["client"] == "phone"
     assert manifest["recording"]["marker_source"]["source"] == "printed"
+    # No lens calibrated and no zero set in a fresh app: present, empty.
+    assert manifest["recording"]["session"] == {
+        "camera": None,
+        "lens": None,
+        "zero": None,
+    }
+
+
+def test_an_app_built_without_a_recording_config_keeps_nothing() -> None:
+    with TestClient(create_app(backend_factory=FakeCursorBackend)) as client:
+        assert not client.app.state.recording.enabled
 
 
 def test_a_recording_solves_from_its_manifest_alone(tmp_path: Path) -> None:

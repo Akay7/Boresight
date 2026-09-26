@@ -9,7 +9,7 @@ The uinput backend can *optionally* also drive a relative delta
 alongside its normal absolute placement, for a game that switches to
 raw/relative mouse capture for camera or reticle control in fullscreen
 instead of reading the OS cursor position. Off by default, and should
-stay off unless `BORESIGHT_REL_SCALE` is set deliberately -- see
+stay off unless `rel_scale` is set deliberately (see `settings.py`) -- see
 `DEFAULT_REL_SCALE`'s comment for why continuous relative deltas are a
 materially riskier feature than the absolute placement, not just an
 alternative shape of the same thing.
@@ -17,7 +17,10 @@ alternative shape of the same thing.
 
 from __future__ import annotations
 
+import math
 import os
+import sys
+from dataclasses import dataclass
 from typing import Protocol
 
 from boresight.one_euro import OneEuroFilter
@@ -45,16 +48,6 @@ CLICK_PRESSURE = 512
 DEFAULT_REL_SCALE = 0.0
 
 
-def _rel_scale() -> float:
-    raw = os.environ.get("BORESIGHT_REL_SCALE")
-    if not raw:
-        return DEFAULT_REL_SCALE
-    try:
-        return float(raw)
-    except ValueError:
-        return DEFAULT_REL_SCALE
-
-
 # python-evdev's `UInput` defaults every device to vendor/product/version
 # 1/1/1 (USB) unless told otherwise. Two Boresight devices left at that
 # default present identical hardware identity to the OS -- distinct
@@ -78,10 +71,82 @@ class CursorBackendUnavailable(RuntimeError):
     unavailable)."""
 
 
+@dataclass(frozen=True)
+class Rect:
+    """A desktop rectangle: pixels on Windows, points on macOS."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+    def point(self, x: float, y: float) -> tuple[float, float]:
+        """Where normalized `(x, y)` falls inside this rectangle.
+
+        1.0 is the last pixel rather than one past it, matching the
+        uinput backend, where 1.0 is the top of the axis range.
+        """
+        return (
+            self.x + x * (self.width - 1),
+            self.y + y * (self.height - 1),
+        )
+
+
+# Confines the cursor to one monitor of a multi-monitor desktop, on the
+# backends that address the whole desktop (Windows, macOS). uinput has
+# no equivalent: there the compositor maps the tablet.
+CURSOR_RECT_ENV = "BORESIGHT_CURSOR_RECT"
+
+
+def cursor_rect_override(environ: dict[str, str] | None = None) -> Rect | None:
+    """`BORESIGHT_CURSOR_RECT` as a `Rect`, or None when it is unset.
+
+    Checked when the backend starts, so a typo fails the server there
+    rather than sending the cursor somewhere unexpected.
+    """
+    raw = (os.environ if environ is None else environ).get(CURSOR_RECT_ENV)
+    if not raw:
+        return None
+    try:
+        x, y, width, height = (float(part) for part in raw.split(","))
+    except ValueError:
+        x = y = width = height = 0.0
+    finite = all(math.isfinite(value) for value in (x, y, width, height))
+    if not finite or width < 1 or height < 1:
+        raise CursorBackendUnavailable(
+            f"{CURSOR_RECT_ENV}={raw!r} is not a display area. Expected "
+            "x,y,width,height in desktop coordinates, e.g. 1920,0,1280,1024."
+        )
+    return Rect(x, y, width, height)
+
+
+def default_cursor_backend(platform: str | None = None) -> CursorBackend:
+    """The cursor backend for the platform this runs on.
+
+    Each platform module is imported only here, so none of them -- nor
+    anything they load -- is needed to import the server elsewhere.
+    """
+    platform = sys.platform if platform is None else platform
+    if platform.startswith("linux"):
+        return UinputCursorBackend()
+    if platform == "win32":
+        from boresight.inject_win32 import Win32CursorBackend
+
+        return Win32CursorBackend()
+    if platform == "darwin":
+        from boresight.inject_darwin import QuartzCursorBackend
+
+        return QuartzCursorBackend()
+    raise CursorBackendUnavailable(
+        f"no cursor backend for {platform}: Boresight injects input on "
+        "Linux (uinput), Windows (SendInput) and macOS (Quartz events)."
+    )
+
+
 class UinputCursorBackend:
     """Moves the cursor via a virtual absolute pointer on Linux uinput."""
 
-    def __init__(self) -> None:
+    def __init__(self, rel_scale: float = DEFAULT_REL_SCALE) -> None:
         try:
             from evdev import AbsInfo, UInput, ecodes
         except ImportError as exc:  # pragma: no cover - platform guard
@@ -200,7 +265,7 @@ class UinputCursorBackend:
             ) from exc
 
         self._ecodes = ecodes
-        self._rel_scale = _rel_scale()
+        self._rel_scale = rel_scale
         # None until the first move_absolute call -- there is no prior
         # position to take a delta against yet, and emitting one against
         # an arbitrary starting point would be a spurious jump.
@@ -215,6 +280,17 @@ class UinputCursorBackend:
         self._device.write(ecodes.EV_KEY, ecodes.BTN_TOOL_PEN, 1)
         self._device.write(ecodes.EV_ABS, ecodes.ABS_PRESSURE, 0)
         self._device.syn()
+
+    @property
+    def rel_scale(self) -> float:
+        return self._rel_scale
+
+    @rel_scale.setter
+    def rel_scale(self, value: float) -> None:
+        # A live setting (`settings.py`): set from a request thread and
+        # read by whichever thread moves next. One float assignment, so
+        # a move sees the old scale or the new one, nothing in between.
+        self._rel_scale = value
 
     def move_absolute(self, x: float, y: float) -> None:
         abs_x = round(x * ABS_MAX)

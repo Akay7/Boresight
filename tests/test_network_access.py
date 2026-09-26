@@ -520,7 +520,7 @@ def test_importing_the_server_builds_no_app() -> None:
     assert not hasattr(server, "app")
 
 
-def test_the_overlay_margin_flag_reaches_create_app(monkeypatch) -> None:
+def test_the_overlay_margin_flag_reaches_create_app(monkeypatch, tmp_path) -> None:
     from boresight import server
 
     monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
@@ -531,12 +531,15 @@ def test_the_overlay_margin_flag_reaches_create_app(monkeypatch) -> None:
         lambda **kwargs: calls.append(kwargs) or object(),
     )
 
-    server.main(["--overlay-extra-margin-px", "40"])
+    server.main(
+        ["--overlay-extra-margin-px", "40", "--config", str(tmp_path / "c.toml")]
+    )
 
-    assert calls[0]["overlay_extra_margin_px"] == 40
+    view = calls[0]["settings"].startup.view
+    assert view.overlay_extra_margin_px == 40
 
 
-def test_the_overlay_margin_flag_defaults_to_zero(monkeypatch) -> None:
+def test_the_overlay_margin_flag_defaults_to_zero(monkeypatch, tmp_path) -> None:
     from boresight import server
 
     monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: None)
@@ -547,9 +550,9 @@ def test_the_overlay_margin_flag_defaults_to_zero(monkeypatch) -> None:
         lambda **kwargs: calls.append(kwargs) or object(),
     )
 
-    server.main([])
+    server.main(["--config", str(tmp_path / "c.toml")])
 
-    assert calls[0]["overlay_extra_margin_px"] == 0
+    assert calls[0]["settings"].startup.view.overlay_extra_margin_px == 0
 
 
 # --- Token comparison -------------------------------------------------

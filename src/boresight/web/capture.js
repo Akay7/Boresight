@@ -39,7 +39,7 @@ for (const id of [
   "stat-connection", "stat-camera", "stat-exposure", "stat-rtt",
   "stat-markers", "stat-aim", "stat-frames", "stat-lost", "stat-skipped",
   "stat-timing", "stat-shots", "stat-cursor", "stat-decoded", "stat-reprojection",
-  "stat-lag",
+  "stat-lag", "calibrate-start", "calibrate-cancel", "stat-lens",
 ]) {
   els[id] = document.getElementById(id);
 }
@@ -574,6 +574,23 @@ const CAMERA_TIMEOUT_MS = 30000;
 // the same machine over adb.
 const SOCKET_TIMEOUT_MS = 8000;
 
+// A random id kept on this phone, so the server finds this gun's zero
+// again after a reconnect or a restart (see zeroing.js). Null where
+// storage is unavailable: the server then falls back to the kind.
+function clientId() {
+  try {
+    let id = localStorage.getItem("boresight-client-id");
+    if (!id) {
+      const bytes = crypto.getRandomValues(new Uint8Array(8));
+      id = "phone-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      localStorage.setItem("boresight-client-id", id);
+    }
+    return id;
+  } catch {
+    return null;
+  }
+}
+
 // The server takes more than one kind of client now; without this its
 // logs and GET /sessions cannot say whether a session is this phone or
 // a camera inside a gun. Sends the size the camera granted, not the one
@@ -582,9 +599,14 @@ function helloMessage() {
   const track = state.stream && state.stream.getVideoTracks()[0];
   const settings = track ? track.getSettings() : {};
   const message = { type: "hello", client: "phone" };
+  const id = clientId();
+  if (id) message.id = id;
   if (Number.isInteger(settings.width) && Number.isInteger(settings.height)) {
     message.frame_size = [settings.width, settings.height];
   }
+  // Which camera: the lens calibration is kept per camera, and a phone
+  // may have several behind the same "environment" facing mode.
+  if (track && track.label) message.camera = track.label;
   return message;
 }
 
@@ -660,6 +682,8 @@ function onTelemetry(data) {
     return;
   }
   if (stats.type !== "stats") return;
+  // For the page's other scripts (zeroing.js), unthrottled.
+  document.dispatchEvent(new CustomEvent("boresight:stats", { detail: stats }));
 
   const now = performance.now();
 
@@ -703,7 +727,43 @@ function onTelemetry(data) {
   set("stat-timing", `${stats.decode_ms} / ${stats.solve_ms} ms`);
   set("stat-shots", String(stats.triggers));
   set("stat-cursor", CURSOR_OWNER[stats.cursor] || "—");
+  showLens(stats);
 }
+
+// --- Lens calibration ------------------------------------------------
+
+// The server collects the views from this session's own frames and
+// says how far it has got; the page only starts, cancels and reports.
+function showLens(stats) {
+  const calibration = stats.calibration;
+  const capturing = Boolean(calibration && calibration.state === "capturing");
+  els["calibrate-cancel"].disabled = !capturing;
+  if (capturing) {
+    set("stat-lens", `capturing ${calibration.views} / ${calibration.views_needed}`);
+  } else if (calibration && calibration.state === "failed") {
+    set("stat-lens", `failed: ${calibration.detail || "no fit"}`);
+  } else if (stats.lens) {
+    set("stat-lens", `calibrated, ${stats.lens.rms_px} px RMS`);
+  } else if (calibration && calibration.state === "done") {
+    set("stat-lens", `done, ${calibration.rms_px} px RMS`);
+  } else {
+    set("stat-lens", "not calibrated");
+  }
+}
+
+els["calibrate-start"].addEventListener("click", () => {
+  send(JSON.stringify({ type: "calibrate", action: "start" }));
+  show(
+    "info",
+    "Calibrating. Show the lens calibration board (link below) and move " +
+      "the camera so it appears in many places -- right up to every edge " +
+      "and corner of the frame, tilted, near and far. A view is taken " +
+      "only when the board has moved."
+  );
+});
+els["calibrate-cancel"].addEventListener("click", () => {
+  send(JSON.stringify({ type: "calibrate", action: "cancel" }));
+});
 
 function send(payload) {
   if (state.socket && state.socket.readyState === WebSocket.OPEN) {
@@ -873,6 +933,8 @@ function stop() {
   els.start.disabled = false;
   els.start.textContent = "Start streaming";
   els.trigger.disabled = true;
+  els["calibrate-start"].disabled = true;
+  els["calibrate-cancel"].disabled = true;
   els.record.disabled = true;
   // The camera is gone, so there is no longer an image for the reticle
   // to mark a point on. The debug toggle keeps its setting.
@@ -944,6 +1006,7 @@ els.start.addEventListener("click", async () => {
     els.start.disabled = false;
     els.start.textContent = "Stop streaming";
     els.trigger.disabled = false;
+    els["calibrate-start"].disabled = false;
     els.record.disabled = false;
     show("info", "Streaming. Aim at the display; the cursor follows the frame centre.");
   } catch (error) {
@@ -998,6 +1061,144 @@ document.addEventListener("visibilitychange", () => {
 });
 // A long press would otherwise open the browser's context menu.
 els.trigger.addEventListener("contextmenu", (event) => event.preventDefault());
+
+// --- Aim tuning --------------------------------------------------------
+
+// Sliders for the server's live tuning (settings.py). Each is built from
+// the range the server reports, so this page never hardcodes one, and
+// shows what the server says is in effect after a change rather than
+// what was asked for -- the same rule as the marker controls above. A
+// change is sent when the slider is let go, not on every step of the
+// drag: each one is applied to every streaming session at once.
+//
+// Self-contained: nothing above this section refers to it.
+
+const TUNING_CONTROLS = [
+  { key: "min_cutoff", label: "Smoothing (min cutoff)", step: 0.01, unit: " Hz", digits: 2 },
+  { key: "beta", label: "Fast-swing response (beta)", step: 0.05, unit: "", digits: 2 },
+  { key: "hold_s", label: "Dropout hold", step: 0.05, unit: " s", digits: 2 },
+  { key: "rel_scale", label: "Relative motion scale", step: 50, unit: "", digits: 0 },
+];
+
+const tuningEls = {
+  panel: document.getElementById("tuning"),
+  rows: document.getElementById("tuning-rows"),
+  save: document.getElementById("tuning-save"),
+};
+const tuningInputs = {};
+
+function formatTuning(control, value) {
+  return `${Number(value).toFixed(control.digits)}${control.unit}`;
+}
+
+function buildTuning(settings) {
+  tuningEls.rows.textContent = "";
+  for (const control of TUNING_CONTROLS) {
+    const limits = settings.limits[control.key];
+    const row = document.createElement("div");
+    row.className = "tune";
+    const label = document.createElement("label");
+    const name = document.createElement("span");
+    name.textContent = control.label;
+    const output = document.createElement("output");
+    label.append(name, output);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(limits.min);
+    input.max = String(limits.max);
+    input.step = String(control.step);
+    const pinned = document.createElement("div");
+    pinned.className = "pinned";
+    label.htmlFor = input.id = `tune-${control.key}`;
+    row.append(label, input, pinned);
+    tuningEls.rows.append(row);
+
+    input.addEventListener("input", () => {
+      output.textContent = formatTuning(control, input.value);
+    });
+    input.addEventListener("change", () =>
+      changeTuning({ [control.key]: Number(input.value) })
+    );
+    tuningInputs[control.key] = { control, input, output, pinned };
+  }
+}
+
+function showTuning(settings) {
+  if (!settings || !settings.tuning) return;
+  if (!Object.keys(tuningInputs).length) buildTuning(settings);
+  for (const [key, { control, input, output, pinned }] of Object.entries(tuningInputs)) {
+    const value = settings.tuning[key];
+    input.value = String(value);
+    output.textContent = formatTuning(control, value);
+    // Pinned values win over the file again on the next start, so a
+    // saved change to one would quietly not survive a restart.
+    const source = settings.pinned[`tuning.${key}`];
+    pinned.textContent = source ? `Set by ${source}; overrides the saved value.` : "";
+    if (key === "rel_scale" && !settings.rel_scale_supported) {
+      input.disabled = true;
+      pinned.textContent = "Not supported by this server's cursor backend.";
+    }
+  }
+}
+
+async function loadTuning() {
+  try {
+    const response = await fetch(sameOriginUrl("settings"));
+    if (response.ok) showTuning(await response.json());
+  } catch {
+    // As with the other controls: a real connection problem shows
+    // itself when streaming starts.
+  }
+}
+
+function tuningError(body, fallback) {
+  const detail = body && body.detail;
+  if (typeof detail === "string") return detail;
+  // FastAPI's validation errors are a list of {loc, msg}.
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).join("; ");
+  return fallback;
+}
+
+async function changeTuning(changes) {
+  try {
+    const response = await fetch(sameOriginUrl("settings/tuning"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    });
+    const body = await response.json();
+    if (response.ok) {
+      showTuning(body);
+    } else {
+      show("error", tuningError(body, "could not change the tuning"));
+      // Put the sliders back where the server actually is.
+      loadTuning();
+    }
+  } catch (error) {
+    show("error", `Could not change the tuning: ${error.message}`);
+    loadTuning();
+  }
+}
+
+tuningEls.save.addEventListener("click", async () => {
+  tuningEls.save.disabled = true;
+  try {
+    const response = await fetch(sameOriginUrl("settings/save"), { method: "POST" });
+    const body = await response.json();
+    if (response.ok) {
+      showTuning(body);
+      show("info", `Settings saved to ${body.path}.`);
+    } else {
+      show("error", tuningError(body, "could not save the settings"));
+    }
+  } catch (error) {
+    show("error", `Could not save the settings: ${error.message}`);
+  } finally {
+    tuningEls.save.disabled = false;
+  }
+});
+
+loadTuning();
 
 // --- Recording --------------------------------------------------------
 

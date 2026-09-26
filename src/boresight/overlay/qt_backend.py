@@ -20,7 +20,9 @@ own overlay.
 from __future__ import annotations
 
 import json
+import queue
 import sys
+import threading
 
 import numpy as np
 
@@ -30,7 +32,7 @@ from boresight.overlay.backend import (
     require_toolkit,
 )
 from boresight.overlay.layout import default_inset_px, default_tag_px
-from boresight.overlay.render import render_overlay
+from boresight.overlay.render import render_overlay, target_image
 
 # Written to stdout, one line, as soon as the geometry is known. A
 # parent process builds the solver's layout from exactly these numbers
@@ -62,6 +64,32 @@ def emit_geometry(
     )
 
 
+def parse_target_command(line: str) -> tuple[bool, tuple[int, int] | None]:
+    """One stdin command: `(understood, target)`.
+
+    `{"target": [x, y]}` shows the zeroing target at that full-screen
+    pixel, `{"target": null}` hides it. Anything else is not understood
+    and ignored -- the server is the only writer, but a bad line must
+    not take the overlay down with it.
+    """
+    try:
+        message = json.loads(line)
+    except ValueError:
+        return False, None
+    if not isinstance(message, dict) or "target" not in message:
+        return False, None
+    target = message["target"]
+    if target is None:
+        return True, None
+    if (
+        isinstance(target, list)
+        and len(target) == 2
+        and all(isinstance(v, int) and not isinstance(v, bool) for v in target)
+    ):
+        return True, (target[0], target[1])
+    return False, None
+
+
 def _to_qimage(canvas: np.ndarray, QtGui):
     """Greyscale array -> QImage, with the buffer kept alive.
 
@@ -82,6 +110,9 @@ def build_overlay_widget(
     """Construct the overlay widget for a display of `screen_px`."""
     canvas, rectangles = render_overlay(screen_px, tag_px, inset_px)
     image = _to_qimage(canvas, QtGui)
+    target = target_image(tag_px or default_tag_px(screen_px))
+    target_qimage = _to_qimage(target, QtGui)
+    target_half = target.shape[0] // 2
 
     class Overlay(QtWidgets.QWidget):
         def __init__(self) -> None:
@@ -102,6 +133,13 @@ def build_overlay_widget(
             self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
             self._image = image
             self._rectangles = rectangles
+            self._target: tuple[int, int] | None = None
+
+        def set_target(self, point: tuple[int, int] | None) -> None:
+            """Show the zeroing target centred on `point`, in this
+            widget's own pixels, or hide it with None."""
+            self._target = point
+            self.update()
 
         def paintEvent(self, event) -> None:  # noqa: N802 - Qt's name
             painter = QtGui.QPainter(self)
@@ -110,6 +148,12 @@ def build_overlay_widget(
             # picture rather than covering it.
             for x, y, width, height in self._rectangles:
                 painter.drawImage(x, y, self._image, x, y, width, height)
+            if self._target is not None:
+                painter.drawImage(
+                    self._target[0] - target_half,
+                    self._target[1] - target_half,
+                    target_qimage,
+                )
             painter.end()
 
     return Overlay()
@@ -141,6 +185,7 @@ def run(
     inset_px: int | None = None,
     report_only: bool = False,
     extra_margin_px: int = 0,
+    commands: bool = False,
 ) -> int:
     """Show the overlay and run the Qt event loop until interrupted.
 
@@ -160,6 +205,10 @@ def run(
     desktop rather than one per monitor -- confirmed, on a real
     multi-monitor setup, to report zero reservation for a monitor with
     a visibly occupied taskbar. Left at zero, this changes nothing.
+
+    `commands` reads target commands from stdin (see
+    `parse_target_command`); the server starts its overlay this way to
+    draw zeroing targets. Off, stdin is never touched.
     """
     check_supported()
     _force_xwayland_on_wayland()
@@ -207,6 +256,8 @@ def run(
     widget.setGeometry(available)
     widget.show()
     _install_interrupt_handler(app, widget, QtCore)
+    if commands:
+        _listen_for_commands(app, widget, area_px, QtCore)
 
     emit_geometry(screen_px, tag_px, inset_px, area_px)
     reserved = (screen_px[1] - area_px[3]) + (screen_px[0] - area_px[2])
@@ -218,6 +269,45 @@ def run(
         flush=True,
     )
     return app.exec()
+
+
+def _listen_for_commands(app, widget, area_px, QtCore) -> None:
+    """Apply stdin's target commands on the GUI thread.
+
+    Read on a daemon thread, since a blocking read would stall Qt, and
+    handed over through a queue a timer drains: widgets may only be
+    touched from the thread that owns them. EOF -- the server closing
+    the pipe while stopping us -- just ends the reader.
+    """
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read() -> None:
+        for line in sys.stdin:
+            lines.put(line)
+
+    threading.Thread(target=read, name="overlay-commands", daemon=True).start()
+
+    def apply() -> None:
+        while True:
+            try:
+                line = lines.get_nowait()
+            except queue.Empty:
+                return
+            understood, target = parse_target_command(line)
+            if not understood:
+                continue
+            # Full-screen pixels in, widget pixels out: the widget
+            # covers only the available area.
+            widget.set_target(
+                None
+                if target is None
+                else (target[0] - area_px[0], target[1] - area_px[1])
+            )
+
+    timer = QtCore.QTimer()
+    timer.timeout.connect(apply)
+    timer.start(50)
+    app._boresight_commands = timer
 
 
 def _force_xwayland_on_wayland() -> None:

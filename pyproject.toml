@@ -15,6 +15,9 @@ dependencies = [
     # openssl binary would avoid this dependency, but a library keeps
     # certificate generation testable and free of a system binary.
     "cryptography>=44.0",
+    # Encodes the phone URL as a QR code printed at startup. Pure Python
+    # with no dependencies of its own; only its module matrix is used.
+    "segno>=1.6.6",
 ]
 
 # The same entry points as `python -m boresight.server` and
