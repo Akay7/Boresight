@@ -95,9 +95,10 @@ def test_full_pipeline_recovers_aim_point_from_a_realistic_synthetic_photo():
     image_centre = [(image_size[0] / 2.0, image_size[1] / 2.0)]
     expected_aim_point = _apply_homography(true_inverse, image_centre)[0]
 
-    # Looser than stage 2's clean-render tolerance (1.5mm): exposure
-    # gradient, blur, and noise perturb detected corner positions beyond
-    # what a clean warpPerspective render introduces. Observed ~1.3mm
-    # against this fixture; 3mm leaves margin without masking a real
-    # regression.
-    assert result.aim_point_mm == pytest.approx(expected_aim_point, abs=3.0)
+    # Exposure gradient, blur, and noise perturb detected corner
+    # positions beyond what a clean warpPerspective render introduces,
+    # but sub-pixel refinement recovers most of it: observed ~0.8mm
+    # against this fixture (~1.3mm before refinement, which is why this
+    # was once 3mm). 1.5mm is 2x margin, the same bound as the clean
+    # render's.
+    assert result.aim_point_mm == pytest.approx(expected_aim_point, abs=1.5)

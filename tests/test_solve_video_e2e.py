@@ -67,18 +67,20 @@ class VideoFixture:
 
 
 FIXTURES = [
-    # Observed: per-frame error peaks at ~1.5mm and consecutive-frame
-    # deltas track ground truth to ~1.2mm. 4mm leaves roughly 3x margin
-    # without masking a real regression -- on this 1220mm panel it is
-    # 0.3% of screen width, a few pixels of cursor travel.
-    VideoFixture("synthetic_video", aim_tolerance_mm=4.0, delta_tolerance_mm=4.0),
-    # Observed at the firmware's default 1024x768: per-frame error peaks
-    # at ~2.9mm and deltas track ground truth to ~1.5mm, with 6-8 of the 8
-    # markers found per frame (~25px across). About 2x margin on the aim,
-    # as the lower resolution earns less than the phone's 3x: 6mm is 0.5%
-    # of this panel's width. At 800x600 the same sweep reached 276mm,
-    # which is why that is no longer the default.
-    VideoFixture("esp32cam_video", aim_tolerance_mm=6.0, delta_tolerance_mm=4.0),
+    # Observed with sub-pixel corner refinement: per-frame error peaks at
+    # ~1.5mm (1.9mm unrefined) and consecutive-frame deltas track ground
+    # truth to ~0.1mm (0.8mm unrefined). 3mm is 2x margin on the aim --
+    # 0.25% of this 1220mm panel's width. The delta bound is the one
+    # that notices refinement going away: 0.5mm is 5x what refined
+    # corners give and below what unrefined ones do.
+    VideoFixture("synthetic_video", aim_tolerance_mm=3.0, delta_tolerance_mm=0.5),
+    # Observed at the firmware's default 1024x768, refined: per-frame
+    # error peaks at ~2.4mm (2.9mm unrefined) and deltas track ground
+    # truth to ~0.4mm (1.5mm unrefined), with 6-8 of the 8 markers found
+    # per frame (~25px across). About 2x margin on both: 5mm is 0.4% of
+    # this panel's width. At 800x600 the same sweep reached 276mm, which
+    # is why that is no longer the default.
+    VideoFixture("esp32cam_video", aim_tolerance_mm=5.0, delta_tolerance_mm=1.0),
 ]
 
 # detect+solve runs ~2ms/frame here. 150ms/frame is a loose regression

@@ -179,6 +179,7 @@ def test_a_close_range_enclosing_frame_is_accurate(close_range_frames: list[dict
                 result.aim_point_mm[1] - frame["ground_truth"][1],
             )
         )
-        # Observed 1.24mm on the 3-marker frame; 5mm leaves margin.
+        # Observed 0.73mm on the 3-marker frame (0.59mm before sub-pixel
+        # refinement -- one frame, so within noise); 5mm leaves margin.
         assert error < 5.0, f"{frame['label']}: {error:.2f}mm"
     assert checked > 0
