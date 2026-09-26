@@ -42,6 +42,7 @@ import numpy as np
 
 from boresight.detect import Detector, MarkerTracker, detect_markers
 from boresight.inject import CursorBackend
+from boresight.lens import LensModel
 from boresight.marker_map import MarkerMap
 from boresight.solve import (
     Correspondence,
@@ -259,6 +260,7 @@ class AimPipeline:
         debug: bool = False,
         backend: CursorBackend | None = None,
         detector: Detector | None = None,
+        lens: LensModel | None = None,
     ) -> FrameResult:
         """Solve one frame and emit its position.
 
@@ -268,6 +270,12 @@ class AimPipeline:
         was captured hands over a backend already stamped with that time
         (see `inject.stamped`). `detector` likewise: a session's own,
         from `session_detector()`, used for this frame and not kept.
+
+        `lens`, when given, is the calibrated model of the camera that
+        took `frame`. Detected corners and the image centre are then
+        undistorted with it before solving (`lens.py`); the frame itself
+        never is. Per call for the same reason as `backend`: sessions
+        sharing this pipeline have different cameras.
         """
         height, width = frame.shape[:2]
         image_size_px = (int(width), int(height))
@@ -302,9 +310,12 @@ class AimPipeline:
                 # to see. Skip it; do not fail the frame over it.
                 continue
             mapped += 1
-            for screen_point, image_point in zip(
-                corners_mm, marker.corners, strict=True
-            ):
+            corners_px = (
+                marker.corners
+                if lens is None
+                else lens.undistort_points(marker.corners)
+            )
+            for screen_point, image_point in zip(corners_mm, corners_px, strict=True):
                 correspondences.append(
                     (screen_point, (float(image_point[0]), float(image_point[1])))
                 )
@@ -317,7 +328,13 @@ class AimPipeline:
         seen = FrameDebug(image_size_px, tuple(detections)) if debug else None
 
         try:
-            result = solve(correspondences, (float(width), float(height)))
+            # The point aimed through is the one imaged at the frame's
+            # centre, where the phone draws its reticle -- undistorted
+            # like the corners, not swapped for the principal point.
+            aim_px = (
+                None if lens is None else lens.undistort_point((width / 2, height / 2))
+            )
+            result = solve(correspondences, (float(width), float(height)), aim_px)
         except InsufficientCorrespondencesError:
             return FrameResult(
                 outcome=FrameOutcome.INSUFFICIENT_CORRESPONDENCES,
@@ -342,12 +359,20 @@ class AimPipeline:
             clamped=position != raw,
             aim_point_inside_hull=result.aim_point_inside_hull,
             aim_point_hull_distance_mm=result.aim_point_hull_distance_mm,
-            debug=None if seen is None else self._solved_debug(seen, result, position),
+            debug=(
+                None
+                if seen is None
+                else self._solved_debug(seen, result, position, lens)
+            ),
             **counts,
         )
 
     def _solved_debug(
-        self, seen: FrameDebug, result: SolveResult, position: Point
+        self,
+        seen: FrameDebug,
+        result: SolveResult,
+        position: Point,
+        lens: LensModel | None = None,
     ) -> FrameDebug:
         """The solve, placed back in the image it came from.
 
@@ -361,6 +386,10 @@ class AimPipeline:
         way exercises the whole output path, and any gap between it and
         the image centre is a real disagreement between what was solved
         and what was sent.
+
+        With a lens, the homography maps into undistorted pixels, so the
+        projected points are distorted back: the consumer draws them over
+        the picture the camera actually took.
         """
         screen_width_mm, screen_height_mm = self._map.screen_size_mm
         # Clockwise from top-left, matching `Marker.corners_mm`'s order
@@ -374,6 +403,11 @@ class AimPipeline:
         cursor_mm = (position[0] * screen_width_mm, position[1] * screen_height_mm)
 
         projected = _to_image_px(result.homography, [*screen_corners_mm, cursor_mm])
+        if lens is not None:
+            projected = [
+                (float(x), float(y))
+                for x, y in lens.distort_points(np.array(projected))
+            ]
         errors = result.reprojection_errors_px
 
         return FrameDebug(

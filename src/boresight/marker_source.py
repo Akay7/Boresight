@@ -63,6 +63,7 @@ from boresight.aim_hold import HoldingPipeline
 from boresight.detect import Detector
 from boresight.inject import CursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
+from boresight.lens import LensModel
 from boresight.marker_map import MarkerMap
 from boresight.one_euro import OneEuroFilter
 from boresight.overlay.layout import overlay_layout
@@ -206,7 +207,12 @@ class SessionPipeline:
         self._detector: Detector | None = None
 
     def process_frame(
-        self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
+        self,
+        frame: np.ndarray,
+        *,
+        debug: bool = False,
+        t: float | None = None,
+        lens: LensModel | None = None,
     ) -> FrameResult:
         tuning = self._controller.tuning()
         if tuning is not self._tuning:
@@ -222,7 +228,7 @@ class SessionPipeline:
             # to the source being left.
             self._detector = solver.session_detector()
         return self._holding.process_frame(
-            frame, debug=debug, t=t, detector=self._detector
+            frame, debug=debug, t=t, detector=self._detector, lens=lens
         )
 
 

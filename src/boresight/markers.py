@@ -20,6 +20,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 
+from boresight.calibration import board_svg
 from boresight.detect import DICTIONARY
 from boresight.marker_map import Marker, MarkerMap, load_marker_map
 from boresight.pipeline import DEFAULT_CONFIG_PATH
@@ -28,6 +29,10 @@ router = APIRouter()
 
 DEFAULT_IDS = list(range(8))
 DEFAULT_SIZE_MM = 80.0
+
+# The calibration board's default printed width: an A4 page in landscape
+# less its margins. Any size works; this one just fills the paper.
+CHARUCO_WIDTH_MM = 270.0
 
 # Sizes the sheet offers. Every one fits across an A4 page's printable
 # width with its one-cell quiet zone (up to ~142mm does); a larger one
@@ -125,6 +130,56 @@ def marker_svg(marker_id: int, size_mm: float) -> str:
         f'<rect x="0" y="0" width="{n}" height="{n}" fill="white"/>'
         f'<g fill="black">{black_cells}</g>'
         "</svg>"
+    )
+
+
+# Registered before the tag route: "/markers/{marker_id}.svg" would
+# otherwise claim "charuco.svg" and reject it as a non-integer id.
+@router.get("/markers/charuco.svg")
+def get_charuco_svg(width_mm: float = CHARUCO_WIDTH_MM) -> Response:
+    try:
+        svg = board_svg(width_mm)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@router.get("/markers/charuco", response_class=HTMLResponse)
+def get_charuco_page() -> str:
+    """The calibration board, to print or to show full-screen.
+
+    Inlined like the tag sheet, so it prints as one document and needs
+    no second authorised request. Scaled to the window on screen; its
+    physical size is irrelevant to calibration, so no print scale is
+    demanded -- only flatness.
+    """
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Boresight lens calibration board</title>"
+        "<style>"
+        "body { font-family: sans-serif; margin: 1em; }"
+        "ol { max-width: 46em; }"
+        ".board svg { display: block; width: 100%; height: auto;"
+        " max-height: 95vh; }"
+        "@media print { .noprint { display: none; } body { margin: 0; } }"
+        "</style></head><body>"
+        '<div class="noprint">'
+        "<p><b>Lens calibration board.</b> Its size does not matter: print it"
+        " at any scale, or show this page full-screen on a monitor.</p>"
+        "<ol>"
+        "<li>Keep it <b>flat</b>: tape a print to something rigid.</li>"
+        "<li>Start streaming, then press <b>Calibrate lens</b> on the phone"
+        " (a screenless camera: <code>POST /calibration</code>).</li>"
+        "<li>Move the camera so the board appears in many places:"
+        " <b>right up to every edge and corner of the frame</b>, tilted"
+        " different ways, near and far. A view is only taken when the board"
+        " has moved, so holding still does nothing. The fit is only good"
+        " where the board has been.</li>"
+        "<li>Hold each pose briefly: blur costs accuracy.</li>"
+        "</ol></div>"
+        f'<div class="board">{board_svg(CHARUCO_WIDTH_MM)}</div>'
+        "</body></html>"
     )
 
 
@@ -621,6 +676,8 @@ def get_marker_sheet(
         " with <code>--markers file:&lt;path&gt;</code> &mdash; the labels"
         " below will follow it.</li>"
         "</ol>"
+        '<p class="noprint">Aiming skewed near the frame edges? <a'
+        ' href="/markers/charuco">Calibrate the camera lens</a>.</p>'
         f"{diagram}"
         "</div>"
         f"{tags}"

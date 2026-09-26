@@ -161,6 +161,14 @@
         </span>
       </div>
       <div class="row">
+        <span>Lens</span>
+        <span class="choice">
+          <button type="button" id="calibrate-start" class="pick" disabled>Calibrate</button>
+          <button type="button" id="calibrate-cancel" class="pick" disabled>Cancel</button>
+        </span>
+      </div>
+      <div class="row"><span>Lens status</span><span id="stat-lens">—</span></div>
+      <div class="row">
         <span>Overlay</span>
         <span class="choice">
           <button type="button" id="debug-off" class="pick" aria-pressed="true">Off</button>
@@ -216,6 +224,7 @@
            request from this page. -->
       <a id="marker-sheet" href="markers">Printable marker sheet →</a>
       <p>Print at 100% scale — never "fit to page".</p>
+      <p><a href="markers/charuco">Lens calibration board →</a></p>
     </div>
 
     <!-- A plain src, no token: loading this page with the token in its

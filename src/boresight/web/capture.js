@@ -39,7 +39,7 @@ for (const id of [
   "stat-connection", "stat-camera", "stat-exposure", "stat-rtt",
   "stat-markers", "stat-aim", "stat-frames", "stat-lost", "stat-skipped",
   "stat-timing", "stat-shots", "stat-cursor", "stat-decoded", "stat-reprojection",
-  "stat-lag",
+  "stat-lag", "calibrate-start", "calibrate-cancel", "stat-lens",
 ]) {
   els[id] = document.getElementById(id);
 }
@@ -585,6 +585,9 @@ function helloMessage() {
   if (Number.isInteger(settings.width) && Number.isInteger(settings.height)) {
     message.frame_size = [settings.width, settings.height];
   }
+  // Which camera: the lens calibration is kept per camera, and a phone
+  // may have several behind the same "environment" facing mode.
+  if (track && track.label) message.camera = track.label;
   return message;
 }
 
@@ -699,7 +702,43 @@ function onTelemetry(data) {
   set("stat-timing", `${stats.decode_ms} / ${stats.solve_ms} ms`);
   set("stat-shots", String(stats.triggers));
   set("stat-cursor", CURSOR_OWNER[stats.cursor] || "—");
+  showLens(stats);
 }
+
+// --- Lens calibration ------------------------------------------------
+
+// The server collects the views from this session's own frames and
+// says how far it has got; the page only starts, cancels and reports.
+function showLens(stats) {
+  const calibration = stats.calibration;
+  const capturing = Boolean(calibration && calibration.state === "capturing");
+  els["calibrate-cancel"].disabled = !capturing;
+  if (capturing) {
+    set("stat-lens", `capturing ${calibration.views} / ${calibration.views_needed}`);
+  } else if (calibration && calibration.state === "failed") {
+    set("stat-lens", `failed: ${calibration.detail || "no fit"}`);
+  } else if (stats.lens) {
+    set("stat-lens", `calibrated, ${stats.lens.rms_px} px RMS`);
+  } else if (calibration && calibration.state === "done") {
+    set("stat-lens", `done, ${calibration.rms_px} px RMS`);
+  } else {
+    set("stat-lens", "not calibrated");
+  }
+}
+
+els["calibrate-start"].addEventListener("click", () => {
+  send(JSON.stringify({ type: "calibrate", action: "start" }));
+  show(
+    "info",
+    "Calibrating. Show the lens calibration board (link below) and move " +
+      "the camera so it appears in many places -- right up to every edge " +
+      "and corner of the frame, tilted, near and far. A view is taken " +
+      "only when the board has moved."
+  );
+});
+els["calibrate-cancel"].addEventListener("click", () => {
+  send(JSON.stringify({ type: "calibrate", action: "cancel" }));
+});
 
 function send(payload) {
   if (state.socket && state.socket.readyState === WebSocket.OPEN) {
@@ -869,6 +908,8 @@ function stop() {
   els.start.disabled = false;
   els.start.textContent = "Start streaming";
   els.trigger.disabled = true;
+  els["calibrate-start"].disabled = true;
+  els["calibrate-cancel"].disabled = true;
   // The camera is gone, so there is no longer an image for the reticle
   // to mark a point on. The debug toggle keeps its setting.
   drawOverlay();
@@ -939,6 +980,7 @@ els.start.addEventListener("click", async () => {
     els.start.disabled = false;
     els.start.textContent = "Stop streaming";
     els.trigger.disabled = false;
+    els["calibrate-start"].disabled = false;
     show("info", "Streaming. Aim at the display; the cursor follows the frame centre.");
   } catch (error) {
     // Cancelled mid-start: closing the half-open socket rejects the
