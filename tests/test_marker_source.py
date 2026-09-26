@@ -26,6 +26,7 @@ from boresight.marker_source import (
     _overlay_command,
 )
 from boresight.one_euro import OneEuroFilter
+from boresight.settings import Tuning
 
 PRINTED = resolve_layout("file")
 
@@ -365,43 +366,54 @@ def test_a_marker_source_switch_keeps_the_filter_and_drops_the_hold() -> None:
         controller.shutdown()
 
 
-def test_the_aim_filter_defaults_match_one_euro_filters_own_defaults(
-    monkeypatch,
-) -> None:
-    monkeypatch.delenv("BORESIGHT_AIM_MIN_CUTOFF", raising=False)
-    monkeypatch.delenv("BORESIGHT_AIM_BETA", raising=False)
+def test_the_aim_filter_defaults_match_one_euro_filters_own_defaults() -> None:
     controller = MarkerSourceController(
         FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
     )
 
     filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
 
-    assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
-    assert filter_._beta == OneEuroFilter()._beta  # noqa: SLF001
+    assert filter_.min_cutoff == OneEuroFilter().min_cutoff
+    assert filter_.beta == OneEuroFilter().beta
 
 
-def test_env_vars_override_the_aim_filters_defaults(monkeypatch) -> None:
-    monkeypatch.setenv("BORESIGHT_AIM_MIN_CUTOFF", "2.5")
-    monkeypatch.setenv("BORESIGHT_AIM_BETA", "0.3")
+def test_a_new_session_takes_the_tuning_in_effect() -> None:
     controller = MarkerSourceController(
-        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+        FakeCursorBackend(),
+        PRINTED,
+        launcher=_stub(REPORTS_1920),
+        tuning=lambda: Tuning(min_cutoff=2.5, beta=0.3),
     )
 
     filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
 
-    assert filter_._min_cutoff == 2.5  # noqa: SLF001
-    assert filter_._beta == 0.3  # noqa: SLF001
+    assert (filter_.min_cutoff, filter_.beta) == (2.5, 0.3)
 
 
-def test_an_invalid_aim_filter_env_var_falls_back_to_the_default(monkeypatch) -> None:
-    monkeypatch.setenv("BORESIGHT_AIM_MIN_CUTOFF", "not-a-number")
+def test_a_running_session_follows_a_tuning_change_on_its_next_frame() -> None:
+    """Same filter object, new parameters: the change reaches a session
+    already streaming without resetting its smoothing."""
+    current = [Tuning()]
     controller = MarkerSourceController(
-        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+        FakeCursorBackend(),
+        PRINTED,
+        launcher=_stub(REPORTS_1920),
+        tuning=lambda: current[0],
     )
+    session = controller.session_pipeline(FakeCursorBackend())
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    session.process_frame(frame)
+    filter_ = session._backend._filter  # noqa: SLF001
+    holding = session._holding  # noqa: SLF001
 
-    filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
+    current[0] = Tuning(min_cutoff=3.0, beta=0.2, hold_s=0.1)
+    assert filter_.min_cutoff == Tuning().min_cutoff  # not until a frame
+    session.process_frame(frame)
 
-    assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
+    assert session._backend._filter is filter_  # noqa: SLF001
+    assert session._holding is holding  # noqa: SLF001
+    assert (filter_.min_cutoff, filter_.beta) == (3.0, 0.2)
+    assert holding.hold_s == 0.1
 
 
 # --- Overlay margin, set at runtime --------------------------------------
