@@ -34,9 +34,10 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from boresight import server
+from boresight import marker_source, server
 from boresight.inject import FakeCursorBackend
 from boresight.marker_map import load_marker_map
+from boresight.one_euro import OneEuroFilter
 from boresight.pipeline import (
     DEFAULT_CONFIG_PATH,
     AimPipeline,
@@ -507,7 +508,7 @@ class _HeldPipeline:
         self.release = threading.Event()
         self.seen: list[int] = []
 
-    def process_frame(self, frame, *, debug: bool = False, t=None) -> FrameResult:
+    def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
         # A cheap fingerprint that differs per fixture frame, so the
         # test can assert *which* frames survived, not merely how many.
         self.seen.append(int(frame.sum()))
@@ -787,19 +788,18 @@ def test_a_dead_processor_closes_the_session_instead_of_hanging(
 
 
 def test_smoothing_is_timed_by_the_client_capture_timestamps(
-    client: TestClient,
+    client: TestClient, monkeypatch
 ) -> None:
     """Frames captured 50 ms apart, arriving at deliberately uneven
     intervals: the aim filter must see 50 ms each time."""
-    filter_ = client.app.state.markers._backend._filter  # noqa: SLF001
     seen: list[float] = []
-    apply = filter_.apply
 
-    def recording_apply(point, *, t=None):
-        seen.append(t)
-        return apply(point, t=t)
+    class _RecordingFilter(OneEuroFilter):
+        def apply(self, point, *, t=None):
+            seen.append(t)
+            return super().apply(point, t=t)
 
-    filter_.apply = recording_apply
+    monkeypatch.setattr(marker_source, "_aim_filter", _RecordingFilter)
     entry = _manifest(VIDEO_DIR)["frames"][0]
     payload = _frame_bytes(VIDEO_DIR, entry)
 
@@ -865,7 +865,7 @@ class _ScriptedPipeline:
         if not block:
             self.release.set()
 
-    def process_frame(self, frame, *, debug: bool = False, t=None) -> FrameResult:
+    def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
         self.entered.set()
         self.release.wait(timeout=5.0)
         if self.position is None:

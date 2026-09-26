@@ -579,10 +579,11 @@ wraps it around a `CursorBackend`: `move_absolute` runs its input
 through the filter before forwarding it, `click` passes straight
 through. It lives at that seam rather than inside `pipeline.py` on
 purpose — `AimPipeline` stays exactly as stateless as the section above
-describes, and one `SmoothingCursorBackend`, built once by
-`MarkerSourceController`, keeps the same filter state across a
-marker-source switch instead of resetting it every time the pipeline is
-rebuilt.
+describes. Each streaming session gets its own `SmoothingCursorBackend`
+(inside a `SessionPipeline`, from `MarkerSourceController`), so two
+cameras are never blended into one filter, and a session keeps the same
+filter state across a marker-source switch instead of resetting it every
+time the solver is rebuilt.
 
 The tradeoff is the point: a steady aim is smoothed heavily (frame-to-
 frame detection noise stops reading as visible dribble), while a fast,
@@ -617,7 +618,7 @@ aim-derived movement last left the filter.
 
 ### Tuning: less lag or less jitter
 
-`MarkerSourceController` builds the filter with `min_cutoff=0.5,
+Each session's filter is built with `min_cutoff=0.5,
 beta=1.0` — tuned by feel, not measurement, so what feels right depends
 on your own camera's noise floor and how fast you swing. Two env vars
 override either without a code change (read once, at server startup):
@@ -653,11 +654,34 @@ back. Re-sending an unchanged position through the one-euro filter
 converges to that same position regardless of elapsed time, so holding
 cannot itself introduce a jump — only fresh device traffic. Once the
 window lapses with no new solve, holding stops and the cursor is
-allowed to go idle. `MarkerSourceController` builds a fresh
-`HoldingPipeline` per marker source, so a switch does not carry a held
-position from the old source into the new one. The wire report and
+allowed to go idle. Each session has its own `HoldingPipeline`,
+rebuilt whenever the marker source changes, so a switch does not carry a
+held position from the old source into the new one. The wire report and
 debug overlay are unaffected either way — a held frame is still
 reported exactly as the unsolved frame it is.
+
+### One shooter at a time
+
+There is one cursor and there can be several cameras. One session owns
+the cursor at a time (`shooter.py`), and only its aim — solved frames,
+dropout holds and shots — moves it:
+
+- pulling the trigger takes the cursor, from anyone;
+- otherwise a free cursor goes to the first session whose frame solves,
+  so a player already aiming is not interrupted by someone walking into
+  view of the markers;
+- the owner keeps it for as long as its aim keeps arriving, and loses
+  it after 1 second without any (0.75 s of dropout hold plus 1 s, if it
+  lost the markers), or at once when it disconnects.
+
+Everyone else's frames are still solved, smoothed by their own filter
+and reported back as usual; their moves just stop at the gate, so a
+handover jumps to the new owner's own smoothed aim instead of blending
+two streams. Each stats message carries `"cursor": "yours" | "other" |
+"free"`, which the phone shows as its "Cursor" row and which `GET
+/sessions` lists for a device with no screen. The server logs `cursor
+now follows <client>` at every handover. The trigger button itself is
+still shared: holds from several sessions keep it down together.
 
 ## The phone client
 
@@ -1270,6 +1294,8 @@ a defect invisible to a test suite that always runs from a checkout.
           qt_backend.py       # the always-on-top, input-transparent window
         inject.py             # uinput backend (+ future SendInput); SmoothingCursorBackend
         one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
+        shot.py               # firing at the named frame's unsmoothed aim
+        shooter.py            # which session's aim drives the cursor
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/

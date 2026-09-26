@@ -19,7 +19,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
-from boresight.aim_hold import HoldingPipeline
 from boresight.inject import CursorBackend, TriggerHold, UinputCursorBackend
 from boresight.layout_source import (
     DEFAULT_SPEC,
@@ -31,6 +30,7 @@ from boresight.marker_source import (
     MarkerSource,
     MarkerSourceController,
     MarkerSourceError,
+    SessionPipeline,
 )
 from boresight.markers import router as markers_router
 from boresight.netaccess import (
@@ -45,6 +45,7 @@ from boresight.netaccess import (
     token_matches,
 )
 from boresight.pipeline import DEFAULT_CONFIG_PATH, FrameResult
+from boresight.shooter import CursorArbiter
 from boresight.shot import AimHistory, Point, TriggerAction, TriggerQueue
 from boresight.stream import (
     CaptureClock,
@@ -179,6 +180,7 @@ def create_app(
         app.state.settings = ViewSettings()
         app.state.sessions = SessionRegistry()
         app.state.trigger_hold = TriggerHold(app.state.cursor_backend)
+        app.state.arbiter = CursorArbiter(app.state.cursor_backend)
         try:
             yield
         finally:
@@ -313,6 +315,7 @@ def create_app(
             websocket.app.state.settings,
             websocket.app.state.sessions,
             websocket.app.state.trigger_hold,
+            websocket.app.state.arbiter,
         )
 
     if WEB_DIR.is_dir():
@@ -350,7 +353,7 @@ def _describe(websocket: WebSocket) -> str:
 
 
 def _decode_and_solve(
-    pipeline: HoldingPipeline,
+    pipeline: SessionPipeline,
     payload: bytes,
     debug: bool = False,
     t: float | None = None,
@@ -384,6 +387,7 @@ async def run_frame_session(
     settings: ViewSettings | None = None,
     sessions: SessionRegistry | None = None,
     hold: TriggerHold | None = None,
+    arbiter: CursorArbiter | None = None,
 ) -> None:
     """One connection: receive frames, solve the newest, report back.
 
@@ -407,6 +411,10 @@ async def run_frame_session(
     The session is listed in `sessions` for exactly as long as the
     connection lasts, so a client with no screen can be watched from
     another device, and a dead one is never shown as streaming.
+
+    Its aim is its own: the session smooths and holds through its own
+    `SessionPipeline`, and reaches the cursor only through `arbiter`,
+    which lets one session at a time -- the active shooter -- move it.
     """
     settings = settings or ViewSettings()
     slot = FrameSlot()
@@ -424,11 +432,22 @@ async def run_frame_session(
     seen_first_frame = False
     sessions = sessions if sessions is not None else SessionRegistry()
     hold = hold if hold is not None else TriggerHold(backend)
-    # The raw backend, not the smoothing one: a shot goes exactly where
-    # its frame aimed, and the filter never hears about it.
-    triggers = _SessionTriggers(stats, hold, backend, loop)
+    arbiter = arbiter if arbiter is not None else CursorArbiter(backend)
     last_heard = started
     session = sessions.register(address, stats, started)
+    # Every move this session makes goes through the arbiter, and only
+    # lands while this session is the active shooter.
+    cursor = arbiter.cursor_for(stats, session.label)
+    aim = markers.session_pipeline(cursor)
+    # The gated cursor, not the smoothing one: a shot goes exactly where
+    # its frame aimed, and the filter never hears about it.
+    triggers = _SessionTriggers(
+        stats, hold, cursor, loop, claim=lambda: arbiter.claim(stats, session.label)
+    )
+
+    async def report(client_ms: float | None) -> None:
+        stats.cursor = arbiter.status(stats)
+        await _report(websocket, stats, client_ms)
 
     async def receive_loop() -> None:
         nonlocal seen_first_frame, last_heard
@@ -458,7 +477,7 @@ async def run_frame_session(
                 client_ms, jpeg = unpack_frame(payload)
             except FrameDecodeError:
                 stats.failed += 1
-                await _report(websocket, stats, None)
+                await report(None)
                 continue
             slot.put(client_ms, jpeg)
 
@@ -480,7 +499,7 @@ async def run_frame_session(
                 result, decode_ms, solve_ms = await loop.run_in_executor(
                     None,
                     _decode_and_solve,
-                    markers.pipeline,
+                    aim,
                     jpeg,
                     stats.debug_enabled,
                     captured_at,
@@ -504,7 +523,7 @@ async def run_frame_session(
                 stats.position = None
                 stats.debug = None
                 triggers.frame_processed(client_ms, None)
-                await _report(websocket, stats, client_ms)
+                await report(client_ms)
                 continue
             triggers.processing = False
             stats.decode_ms = decode_ms
@@ -529,7 +548,7 @@ async def run_frame_session(
             # Before the report, so a shot this frame resolved is already
             # in the trigger count it carries.
             triggers.frame_processed(client_ms, stats.position)
-            await _report(websocket, stats, client_ms)
+            await report(client_ms)
 
             nonlocal last_logged
             now = time.monotonic()
@@ -607,6 +626,9 @@ async def run_frame_session(
         # Whatever ended the session, a button it was holding goes up
         # with it: nothing else would ever send the release.
         hold.release(stats)
+        # The cursor too: the next session to aim takes it at once
+        # rather than after the idle lapse.
+        arbiter.release(stats)
         sessions.unregister(session)
         elapsed = time.monotonic() - started
         if seen_first_frame:
@@ -747,11 +769,13 @@ class _SessionTriggers:
         hold: TriggerHold,
         cursor: CursorBackend,
         loop: asyncio.AbstractEventLoop,
+        claim: Callable[[], None] = lambda: None,
     ) -> None:
         self._stats = stats
         self._hold = hold
         self._cursor = cursor
         self._loop = loop
+        self._claim = claim
         self.history = AimHistory()
         self._queue = TriggerQueue()
         self.processing = False
@@ -797,6 +821,9 @@ class _SessionTriggers:
             return
         if action.state == "down" and self._hold.holds(self._stats):
             return
+        # A press makes this session the active shooter, before the
+        # shot moves the cursor through its gate.
+        self._claim()
         if action.frame_ms is not None and not self._hold.active:
             aim = self.history.aim_at(action.frame_ms)
             if aim is not None:

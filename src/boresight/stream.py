@@ -185,6 +185,10 @@ class SessionStats:
     client_version: str | None = None
     frame_size: tuple[int, int] | None = None
 
+    # Whether this session drives the cursor: "yours", "other" or
+    # "free" (see `shooter.CursorArbiter`). Set by the server per report.
+    cursor: str | None = None
+
     # Per connection, never per app or per pipeline: one phone turning
     # the debug view on must not change what another phone receives, and
     # the pipeline behind them is shared.
@@ -242,6 +246,7 @@ class SessionStats:
             "inside_hull": self.inside_hull,
             "outcome": self.outcome,
             "triggers": self.triggers,
+            "cursor": self.cursor,
         }
         if self.debug_enabled:
             message["debug"] = self.debug

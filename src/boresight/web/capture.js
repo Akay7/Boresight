@@ -38,7 +38,8 @@ for (const id of [
   "row-decoded", "row-reprojection", "row-lag",
   "stat-connection", "stat-camera", "stat-exposure", "stat-rtt",
   "stat-markers", "stat-aim", "stat-frames", "stat-lost", "stat-skipped",
-  "stat-timing", "stat-shots", "stat-decoded", "stat-reprojection", "stat-lag",
+  "stat-timing", "stat-shots", "stat-cursor", "stat-decoded", "stat-reprojection",
+  "stat-lag",
 ]) {
   els[id] = document.getElementById(id);
 }
@@ -638,6 +639,15 @@ let lastRender = 0;
 let lastRttReport = 0;
 let lastRoundTrip = null;
 
+// Whose aim the server's cursor is following. Only one device drives it
+// at a time: the last to pull the trigger, or the first to aim at a free
+// cursor. Without this, a phone whose aim moves nothing looks broken.
+const CURSOR_OWNER = {
+  yours: "this phone",
+  other: "another device",
+  free: "free",
+};
+
 function onTelemetry(data) {
   let stats;
   try {
@@ -688,6 +698,7 @@ function onTelemetry(data) {
   set("stat-lost", `${stats.dropped} / ${stats.failed}`);
   set("stat-timing", `${stats.decode_ms} / ${stats.solve_ms} ms`);
   set("stat-shots", String(stats.triggers));
+  set("stat-cursor", CURSOR_OWNER[stats.cursor] || "—");
 }
 
 function send(payload) {

@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from boresight.inject import FakeCursorBackend, SmoothingCursorBackend
@@ -96,7 +97,7 @@ def test_the_solved_layout_comes_from_what_the_overlay_reported() -> None:
     controller = _controller(REPORTS_1920)
     try:
         controller.select(MarkerSource.SCREEN)
-        layout = controller.pipeline._pipeline._map  # noqa: SLF001 - internals
+        layout = controller.pipeline._map  # noqa: SLF001 - internals
 
         assert layout.screen_size_mm == (1920.0, 1080.0)
         assert layout.markers[0].size_mm == 86.0
@@ -113,7 +114,7 @@ def test_switching_back_restores_the_printed_layout() -> None:
 
         assert state["source"] == "printed"
         assert state["overlay_running"] is False
-        assert controller.pipeline._pipeline._map == PRINTED  # noqa: SLF001
+        assert controller.pipeline._map == PRINTED  # noqa: SLF001
     finally:
         controller.shutdown()
 
@@ -317,31 +318,49 @@ def test_an_existing_pythonpath_is_kept(monkeypatch) -> None:
 # --- Aim smoothing wiring -----------------------------------------------
 
 
-def test_the_backend_is_wrapped_in_a_smoothing_backend() -> None:
+def test_a_session_pipeline_smooths_onto_its_own_cursor() -> None:
     raw = FakeCursorBackend()
     controller = MarkerSourceController(raw, PRINTED, launcher=_stub(REPORTS_1920))
+    cursor = FakeCursorBackend()
 
-    assert isinstance(controller.pipeline._backend, SmoothingCursorBackend)  # noqa: SLF001
-    assert controller.pipeline._backend._backend is raw  # noqa: SLF001
+    session = controller.session_pipeline(cursor)
+
+    assert isinstance(session._backend, SmoothingCursorBackend)  # noqa: SLF001
+    assert session._backend._backend is cursor  # noqa: SLF001
+    # The shared solver itself smooths nothing: that is per session.
+    assert controller.pipeline._backend is raw  # noqa: SLF001
 
 
-def test_a_marker_source_switch_shares_the_same_filter_state() -> None:
-    """The pipeline is rebuilt on every switch; the filter inside its
-    wrapped backend must not be, or a switch would silently reset
-    smoothing."""
+def test_sessions_do_not_share_a_filter() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+
+    first = controller.session_pipeline(FakeCursorBackend())
+    second = controller.session_pipeline(FakeCursorBackend())
+
+    assert first._backend._filter is not second._backend._filter  # noqa: SLF001
+
+
+def test_a_marker_source_switch_keeps_the_filter_and_drops_the_hold() -> None:
+    """The solver is rebuilt on every switch. A session's filter must not
+    be, or a switch would silently reset smoothing; its held position
+    must be, since it belongs to the source being left."""
     raw = FakeCursorBackend()
     controller = MarkerSourceController(raw, PRINTED, launcher=_stub(REPORTS_1920))
+    session = controller.session_pipeline(FakeCursorBackend())
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
     try:
-        before = controller.pipeline._backend  # noqa: SLF001
+        smoothing = session._backend  # noqa: SLF001
+        session.process_frame(frame)
+        holding = session._holding  # noqa: SLF001
 
         controller.select(MarkerSource.SCREEN)
-        after_switch = controller.pipeline._backend  # noqa: SLF001
+        session.process_frame(frame)
 
-        controller.select(MarkerSource.PRINTED)
-        after_switch_back = controller.pipeline._backend  # noqa: SLF001
-
-        assert before is after_switch
-        assert before is after_switch_back
+        assert session._backend is smoothing  # noqa: SLF001
+        assert session._holding is not holding  # noqa: SLF001
+        assert session._holding._pipeline is controller.pipeline  # noqa: SLF001
     finally:
         controller.shutdown()
 
@@ -355,7 +374,7 @@ def test_the_aim_filter_defaults_match_one_euro_filters_own_defaults(
         FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
     )
 
-    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+    filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
 
     assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
     assert filter_._beta == OneEuroFilter()._beta  # noqa: SLF001
@@ -368,7 +387,7 @@ def test_env_vars_override_the_aim_filters_defaults(monkeypatch) -> None:
         FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
     )
 
-    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+    filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
 
     assert filter_._min_cutoff == 2.5  # noqa: SLF001
     assert filter_._beta == 0.3  # noqa: SLF001
@@ -380,7 +399,7 @@ def test_an_invalid_aim_filter_env_var_falls_back_to_the_default(monkeypatch) ->
         FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
     )
 
-    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+    filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
 
     assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
 
