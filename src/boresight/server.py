@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -44,6 +45,7 @@ from boresight.netaccess import (
     token_matches,
 )
 from boresight.pipeline import DEFAULT_CONFIG_PATH, FrameResult
+from boresight.shot import AimHistory, Point, TriggerAction, TriggerQueue
 from boresight.stream import (
     CaptureClock,
     FrameDecodeError,
@@ -77,6 +79,12 @@ WS_INTERNAL_ERROR = 1011
 # caught yet), not a long hold: holding fire while streaming is fine.
 HOLD_IDLE_RELEASE_S = 2.0
 HOLD_CHECK_INTERVAL_S = 0.5
+
+# The longest a trigger naming a frame waits for that frame to be
+# processed before it fires anyway, where the cursor is. A real frame
+# resolves within one processing time (tens of milliseconds); this only
+# bounds a shot naming a frame that will never come.
+SHOT_WAIT_S = 0.25
 
 # How often a live session reports itself. Frequent enough to answer
 # "is the camera actually sending anything" at a glance, rare enough not
@@ -416,6 +424,9 @@ async def run_frame_session(
     seen_first_frame = False
     sessions = sessions if sessions is not None else SessionRegistry()
     hold = hold if hold is not None else TriggerHold(backend)
+    # The raw backend, not the smoothing one: a shot goes exactly where
+    # its frame aimed, and the filter never hears about it.
+    triggers = _SessionTriggers(stats, hold, backend, loop)
     last_heard = started
     session = sessions.register(address, stats, started)
 
@@ -430,7 +441,7 @@ async def run_frame_session(
             if payload is None:
                 # Text: control and telemetry, including the trigger.
                 known_kind = stats.client_kind
-                _handle_control(stats, hold, message.get("text"), settings)
+                _handle_control(stats, triggers, message.get("text"), settings)
                 if stats.client_kind != known_kind:
                     logger.info(
                         "client identified: %s (version %s, frames %s)",
@@ -460,6 +471,9 @@ async def run_frame_session(
             # Aim smoothing is timed by when the frame was captured, not
             # when it got here: the network's jitter is not the aim's.
             captured_at = capture_clock.stamp(client_ms)
+            # A shot must not move the cursor while this session's own
+            # smoothed move may be landing from a worker thread.
+            triggers.processing = True
             try:
                 # Read per frame rather than captured once: a debug toggle
                 # arriving mid-session takes effect on the next frame.
@@ -472,6 +486,7 @@ async def run_frame_session(
                     captured_at,
                 )
             except Exception:
+                triggers.processing = False
                 # Anything the pipeline does not already turn into an
                 # outcome -- an OpenCV error on a pathological frame, a
                 # cursor device write failing. One frame is lost, not the
@@ -488,8 +503,10 @@ async def run_frame_session(
                 stats.outcome = "error"
                 stats.position = None
                 stats.debug = None
+                triggers.frame_processed(client_ms, None)
                 await _report(websocket, stats, client_ms)
                 continue
+            triggers.processing = False
             stats.decode_ms = decode_ms
             stats.solve_ms = solve_ms
             if result is None:
@@ -509,6 +526,9 @@ async def run_frame_session(
                 stats.debug = (
                     None if result.debug is None else result.debug.as_message()
                 )
+            # Before the report, so a shot this frame resolved is already
+            # in the trigger count it carries.
+            triggers.frame_processed(client_ms, stats.position)
             await _report(websocket, stats, client_ms)
 
             nonlocal last_logged
@@ -581,6 +601,9 @@ async def run_frame_session(
         receiver.cancel()
         processor.cancel()
         watchdog.cancel()
+        # A shot still waiting for its frame never fired, so there is
+        # nothing to undo: it is simply dropped with the session.
+        triggers.close()
         # Whatever ended the session, a button it was holding goes up
         # with it: nothing else would ever send the release.
         hold.release(stats)
@@ -612,7 +635,7 @@ async def run_frame_session(
 
 def _handle_control(
     stats: SessionStats,
-    hold: TriggerHold,
+    triggers: _SessionTriggers,
     text: str | None,
     settings: ViewSettings,
 ) -> None:
@@ -623,12 +646,16 @@ def _handle_control(
     each frame's timestamp; the phone subtracts and reports back what it
     measured, so the server's telemetry carries the number too.
 
-    The trigger carries no position of its own -- it acts wherever the
-    last processed frame left the cursor. Without a `state` it is one
-    click, exactly as before holds existed. `down` holds the button for
-    this session and `up` lets go, so frames arriving in between drag;
-    an unreadable `state` is ignored rather than guessed at. The count
-    is of presses: a click or a `down` that started a hold.
+    Without a `state` the trigger is one click, exactly as before holds
+    existed. `down` holds the button for this session and `up` lets go,
+    so frames arriving in between drag; an unreadable `state` is ignored
+    rather than guessed at. A click or `down` may name, in `frame_ms`,
+    the frame it was aimed with, and then fires at that frame's
+    unsmoothed aim instead of wherever the smoothed cursor has got to;
+    without it (or with one that is not a finite number) it acts where
+    the cursor is. Either way it goes through the session's
+    `_SessionTriggers`, which keeps the order they were sent in. The
+    count is of presses: a click or a `down` that started a hold.
 
     `hello` names the kind of client on the other end. Like `rtt`, a
     field that cannot be read is ignored rather than guessed at: a
@@ -655,13 +682,11 @@ def _handle_control(
     elif message.get("type") == "trigger":
         state = message.get("state")
         if state is None:
-            hold.click()
-            stats.triggers += 1
+            triggers.submit(TriggerAction("click", _frame_ms(message)))
         elif state == "down":
-            if hold.acquire(stats):
-                stats.triggers += 1
+            triggers.submit(TriggerAction("down", _frame_ms(message)))
         elif state == "up":
-            hold.release(stats)
+            triggers.submit(TriggerAction("up"))
     elif message.get("type") == "hello":
         kind = message.get("client")
         if not isinstance(kind, str) or not kind.strip():
@@ -688,6 +713,99 @@ def _handle_control(
         # the way it was left. Only sessions opened after this see it --
         # one already running keeps its own flag.
         settings.debug = enabled
+
+
+def _frame_ms(message: dict) -> float | None:
+    """A trigger's `frame_ms`, if it is a usable timestamp."""
+    value = message.get("frame_ms")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+class _SessionTriggers:
+    """One session's trigger: its actions, the aim they fire at, and when.
+
+    A trigger naming a frame fires once that frame (or a newer one that
+    displaced it from the slot) has been processed, at the unsmoothed
+    aim of the solved frame nearest it (`shot.AimHistory`). Actions run
+    strictly in the order they arrived (`shot.TriggerQueue`), and only
+    while no frame of this session is in the executor, so a shot's move
+    and its press cannot have this session's smoothed move land between
+    them. A shot still waiting after `SHOT_WAIT_S` fires anyway, with
+    whatever the history has -- late, never lost.
+
+    The cursor is moved only for an action that will actually press:
+    with the button already down, a click or `down` presses nothing, and
+    moving would drag whatever is held.
+    """
+
+    def __init__(
+        self,
+        stats: SessionStats,
+        hold: TriggerHold,
+        cursor: CursorBackend,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._stats = stats
+        self._hold = hold
+        self._cursor = cursor
+        self._loop = loop
+        self.history = AimHistory()
+        self._queue = TriggerQueue()
+        self.processing = False
+        self._deadline: asyncio.TimerHandle | None = None
+        self._overdue = False
+
+    def submit(self, action: TriggerAction) -> None:
+        self._queue.push(action)
+        self.drain()
+
+    def frame_processed(self, client_ms: float, position: Point | None) -> None:
+        self.history.record(client_ms, position)
+        self.drain()
+
+    def drain(self) -> None:
+        if self.processing:
+            return
+        for action in self._queue.ready(self.history, force=self._overdue):
+            self._run(action)
+        if not self._queue:
+            self._overdue = False
+            if self._deadline is not None:
+                self._deadline.cancel()
+                self._deadline = None
+        elif self._deadline is None:
+            self._deadline = self._loop.call_later(SHOT_WAIT_S, self._expire)
+
+    def close(self) -> None:
+        if self._deadline is not None:
+            self._deadline.cancel()
+            self._deadline = None
+        self._queue.clear()
+
+    def _expire(self) -> None:
+        # If a frame is mid-process, its completion drains with force.
+        self._deadline = None
+        self._overdue = True
+        self.drain()
+
+    def _run(self, action: TriggerAction) -> None:
+        if action.state == "up":
+            self._hold.release(self._stats)
+            return
+        if action.state == "down" and self._hold.holds(self._stats):
+            return
+        if action.frame_ms is not None and not self._hold.active:
+            aim = self.history.aim_at(action.frame_ms)
+            if aim is not None:
+                self._cursor.move_absolute(*aim)
+        if action.state == "click":
+            self._hold.click()
+            self._stats.triggers += 1
+        elif self._hold.acquire(self._stats):
+            self._stats.triggers += 1
 
 
 def _frame_size(value: object) -> tuple[int, int] | None:

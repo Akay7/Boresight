@@ -812,3 +812,172 @@ def test_smoothing_is_timed_by_the_client_capture_timestamps(
     assert None not in seen
     intervals = [later - earlier for earlier, later in pairwise(seen)]
     assert intervals == pytest.approx([0.05, 0.05, 0.05])
+
+
+# --- A shot fires at the aim of the frame it names ----------------------
+
+
+class _EventBackend(FakeCursorBackend):
+    """A fake that also records the order of moves and button events."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple] = []
+
+    def move_absolute(self, x: float, y: float) -> None:
+        super().move_absolute(x, y)
+        self.events.append(("move", x, y))
+
+    def click(self) -> None:
+        super().click()
+        self.events.append(("click",))
+
+    def press(self) -> None:
+        super().press()
+        self.events.append(("press",))
+
+    def release(self) -> None:
+        super().release()
+        self.events.append(("release",))
+
+
+@pytest.fixture
+def events_backend() -> _EventBackend:
+    return _EventBackend()
+
+
+@pytest.fixture
+def events_client(events_backend: _EventBackend) -> TestClient:
+    app = create_app(backend_factory=lambda: events_backend)
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+class _ScriptedPipeline:
+    """Answers each frame with a fixed result and moves nothing, so the
+    only cursor movement a test sees is a shot's. Optionally blocks
+    inside the first frame, to hold a shot waiting for it."""
+
+    def __init__(self, position=(0.3, 0.7), block: bool = False) -> None:
+        self.position = position
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        if not block:
+            self.release.set()
+
+    def process_frame(self, frame, *, debug: bool = False, t=None) -> FrameResult:
+        self.entered.set()
+        self.release.wait(timeout=5.0)
+        if self.position is None:
+            return FrameResult(outcome=FrameOutcome.NO_MARKERS)
+        return FrameResult(outcome=FrameOutcome.SOLVED, position=self.position)
+
+
+def _first_frame() -> bytes:
+    return _frame_bytes(VIDEO_DIR, _manifest(VIDEO_DIR)["frames"][0])
+
+
+def test_a_named_shot_fires_at_the_frames_unsmoothed_aim(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    """A fast swing: the smoothed cursor trails, the shot does not."""
+    entries = _manifest(VIDEO_DIR)["frames"][:6]
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        for index, entry in enumerate(entries):
+            client_ms = 1000.0 + 50.0 * index
+            socket.send_bytes(pack_frame(client_ms, _frame_bytes(VIDEO_DIR, entry)))
+            report = socket.receive_json()
+        assert report["outcome"] == "solved"
+        smoothed = events_backend.calls[-1]
+        socket.send_text(json.dumps({**DOWN, "frame_ms": client_ms}))
+        socket.send_text(json.dumps(UP))
+        socket.send_bytes(pack_frame(client_ms + 50.0, _frame_bytes(VIDEO_DIR, entry)))
+        socket.receive_json()
+
+    press = events_backend.events.index(("press",))
+    kind, x, y = events_backend.events[press - 1]
+    assert kind == "move"
+    assert (x, y) == pytest.approx((report["x"], report["y"]), abs=1e-5)
+    # The point of it all: the cursor was somewhere else.
+    assert abs(smoothed[0] - x) > 0.01
+    assert events_backend.events[press + 1] == ("release",)
+
+
+def test_a_shot_waits_for_its_frame_and_keeps_its_release_behind_it(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    scripted = _ScriptedPipeline(position=(0.3, 0.7), block=True)
+    events_client.app.state.markers._pipeline = scripted
+
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(2000.0, _first_frame()))
+        assert scripted.entered.wait(timeout=5.0)
+        socket.send_text(json.dumps({**DOWN, "frame_ms": 2000.0}))
+        socket.send_text(json.dumps(UP))
+        time.sleep(0.1)
+        # Not before its frame: the frame is still being processed.
+        assert events_backend.events == []
+        scripted.release.set()
+        report = socket.receive_json()
+
+    assert events_backend.events == [("move", 0.3, 0.7), ("press",), ("release",)]
+    assert report["triggers"] == 1
+
+
+def test_a_shot_whose_frame_did_not_solve_fires_in_place(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    events_client.app.state.markers._pipeline = _ScriptedPipeline(position=None)
+
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(2000.0, _first_frame()))
+        socket.receive_json()
+        report = _send_and_sync(socket, {"type": "trigger", "frame_ms": 2000.0})
+
+    assert events_backend.events == [("click",)]
+    assert report["triggers"] == 1
+
+
+def test_a_shot_naming_a_frame_that_never_comes_still_fires(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({**DOWN, "frame_ms": 1e12}))
+        deadline = time.monotonic() + 2.0
+        while not events_backend.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert events_backend.events == [("press",)]
+
+
+@pytest.mark.parametrize("frame_ms", ["2000", None, True, [2000.0], float("nan")])
+def test_an_unusable_frame_ms_is_a_legacy_trigger(
+    events_client: TestClient, events_backend: _EventBackend, frame_ms
+) -> None:
+    events_client.app.state.markers._pipeline = _ScriptedPipeline()
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(2000.0, _first_frame()))
+        socket.receive_json()
+        # json.dumps writes NaN as a bare token, which the server's
+        # json.loads accepts; the server must still not use it.
+        report = _send_and_sync(socket, {"type": "trigger", "frame_ms": frame_ms})
+
+    assert events_backend.events == [("click",)]
+    assert report["triggers"] == 1
+
+
+def test_a_named_shot_does_not_move_a_button_someone_holds(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    events_client.app.state.markers._pipeline = _ScriptedPipeline()
+    with (
+        events_client.websocket_connect(FRAME_SOCKET_PATH) as first,
+        events_client.websocket_connect(FRAME_SOCKET_PATH) as second,
+    ):
+        _send_and_sync(first, DOWN)
+        second.send_bytes(pack_frame(2000.0, _first_frame()))
+        second.receive_json()
+        _send_and_sync(second, {**DOWN, "frame_ms": 2000.0})
+        _send_and_sync(first, UP)
+        _send_and_sync(second, UP)
+
+    assert events_backend.events == [("press",), ("release",)]

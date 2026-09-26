@@ -109,6 +109,20 @@ static void test_rtt_and_trigger_messages(void)
     CHECK(strcmp(BP_TRIGGER_UP_MESSAGE, "{\"type\":\"trigger\",\"state\":\"up\"}") == 0);
 }
 
+static void test_a_down_names_its_frame(void)
+{
+    char buffer[80];
+    char tiny[16];
+
+    /* The header's stamp, to the microsecond, as the server reads it. */
+    CHECK(bp_format_trigger_down(buffer, sizeof buffer, 86400000.125) > 0);
+    CHECK(strcmp(buffer, "{\"type\":\"trigger\",\"state\":\"down\","
+                         "\"frame_ms\":86400000.125}") == 0);
+    CHECK(bp_format_trigger_down(buffer, sizeof buffer, 0.0 / 0.0) == -1);
+    CHECK(bp_format_trigger_down(buffer, sizeof buffer, 1.0 / 0.0) == -1);
+    CHECK(bp_format_trigger_down(tiny, sizeof tiny, 1234.5) == -1);
+}
+
 /* --- Debouncer --------------------------------------------------------- */
 
 typedef struct {
@@ -369,6 +383,7 @@ int main(void)
     test_hello_without_a_known_size_omits_it();
     test_hello_refuses_what_it_cannot_encode();
     test_rtt_and_trigger_messages();
+    test_a_down_names_its_frame();
     test_a_clean_press_is_one_event();
     test_bounce_on_both_edges_is_one_event();
     test_a_long_hold_is_one_event();

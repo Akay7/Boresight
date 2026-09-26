@@ -55,6 +55,12 @@ extern const char BP_TRIGGER_MESSAGE[];
 extern const char BP_TRIGGER_DOWN_MESSAGE[];
 extern const char BP_TRIGGER_UP_MESSAGE[];
 
+/* A `down` naming the frame it was aimed with, by that frame's header
+ * timestamp, so the server fires at that frame's aim rather than at its
+ * smoothed cursor. A server that predates `frame_ms` ignores it, and a
+ * timestamp that is not finite is refused (-1): send the plain `down`. */
+int bp_format_trigger_down(char *out, size_t size, double frame_ms);
+
 int bp_format_hello(char *out, size_t size, const char *version, int width,
                     int height);
 int bp_format_rtt(char *out, size_t size, double ms);

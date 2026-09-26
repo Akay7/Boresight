@@ -38,6 +38,22 @@ static int finish(int written, size_t size)
     return (written < 0 || (size_t)written >= size) ? -1 : written;
 }
 
+int bp_format_trigger_down(char *out, size_t size, double frame_ms)
+{
+    /* Written so NaN fails the test: printf would spell it "nan", which is
+     * not JSON. The bound also keeps infinities out. */
+    if (!(frame_ms > -1e15 && frame_ms < 1e15)) {
+        return -1;
+    }
+    /* Three decimals: the header carries sub-millisecond precision, and
+     * the server matches this against it. */
+    return finish(snprintf(out, size,
+                           "{\"type\":\"trigger\",\"state\":\"down\","
+                           "\"frame_ms\":%.3f}",
+                           frame_ms),
+                  size);
+}
+
 int bp_format_hello(char *out, size_t size, const char *version, int width,
                     int height)
 {

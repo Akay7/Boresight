@@ -957,7 +957,11 @@ els.trigger.addEventListener("pointerdown", (event) => {
   els.trigger.setPointerCapture(event.pointerId);
   state.triggerHeld = true;
   els.trigger.classList.add("held");
-  send(JSON.stringify({ type: "trigger", state: "down" }));
+  // Names the latest frame sent, so the server fires at that frame's
+  // aim rather than at the smoothed cursor trailing behind it.
+  const message = { type: "trigger", state: "down" };
+  if (state.lastSentStamp !== null) message.frame_ms = state.lastSentStamp;
+  send(JSON.stringify(message));
 });
 
 // Every way a press can end sends the release: a stuck button would

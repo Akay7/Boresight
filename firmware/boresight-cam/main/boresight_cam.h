@@ -71,6 +71,9 @@ uint32_t link_session_id(void);
 esp_err_t link_send_frame(double client_ms, const uint8_t *jpeg, size_t length,
                           uint32_t timeout_ms);
 esp_err_t link_send_text(const char *text, uint32_t timeout_ms);
+/* The trigger's `down`, naming the last frame sent on this connection so
+ * the server fires at that frame's aim; the plain `down` before any. */
+esp_err_t link_send_trigger_down(uint32_t timeout_ms);
 /* Sends anything the receive side queued (the round-trip report). Called
  * from the capture task, never from the socket's own event handler. */
 void link_service(void);

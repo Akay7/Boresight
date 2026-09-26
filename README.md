@@ -287,6 +287,19 @@ never stay stuck down: the server lets go when the holding session ends,
 and when it sends nothing at all for 2 seconds. No separate USB HID
 device is needed for v1.
 
+The `down` also carries `frame_ms`: the timestamp of the latest frame the
+phone sent. The cursor on screen is the *smoothed* aim, which trails a
+fast swing, so a shot fired "where the cursor is" lands behind where the
+player was pointing. Instead the server keeps the last second of each
+session's unsmoothed aim points by frame timestamp (`shot.py`), waits
+until the named frame has been processed (tens of milliseconds, at most
+250 ms), moves the cursor to that frame's raw aim point, presses there,
+and lets smoothing carry on from the next frame. If that frame (and
+anything within 100 ms of it) did not solve, the shot fires where the
+cursor is, as does any trigger without `frame_ms` — older clients are
+unaffected. Trigger messages keep their order, so a quick tap whose
+`down` is still waiting for its frame is still a press, then a release.
+
 Two paths for the aim coordinate, selectable by config flag.
 
 **Direct injection.** Windows `SendInput` with
@@ -792,8 +805,10 @@ sends the header and the JPEG as two, to avoid copying the JPEG — and is
 reassembled before the server sees it; the bytes are identical.
 
 Text messages on the same socket carry JSON — telemetry from the server,
-control from the client. The trigger will land there without needing a
-second connection or any change to frame handling.
+control from the client. The trigger lands there without needing a
+second connection or any change to frame handling, and names the frame
+it was aimed with by that frame's header timestamp (`frame_ms`), which
+is why the timestamp has to be one the server has seen verbatim.
 
 JPEG rather than a video codec: `MediaRecorder` produces chunks whose
 boundaries do not align to frames, so the server would have to demux a
@@ -975,7 +990,9 @@ never retried. One that fails halfway through leaves half a message on
 the wire, which cannot be taken back, so the device reconnects.
 
 The trigger is debounced (10 ms) and sends one `trigger` `down` on press
-and one `up` on release, so holding it holds the button and drags. Contact
+and one `up` on release, so holding it holds the button and drags. The
+`down` names the last frame sent on the connection (`frame_ms`), so the
+server fires at that frame's aim rather than at the smoothed cursor. Contact
 bounce sends nothing extra. Each message waits at most for the frame send
 already in progress, so never longer than the send timeout. A press while
 disconnected is discarded rather than sent later, when the cursor would be
