@@ -22,4 +22,4 @@
 
 ## 5. Wrap-up
 
-- [ ] 5.1 Replace the env-var tuning docs in README.md with a short settings-file section (precedence, keys, ranges, API); run `uv run ruff check`, `uv run ruff format --check`, `uv run pytest -q`, `openspec validate --all --strict`
+- [x] 5.1 Replace the env-var tuning docs in README.md with a short settings-file section (precedence, keys, ranges, API); run `uv run ruff check`, `uv run ruff format --check`, `uv run pytest -q`, `openspec validate --all --strict`
