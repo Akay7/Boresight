@@ -283,3 +283,20 @@ def test_main_passes_resolved_settings_to_the_app(tmp_path: Path, monkeypatch) -
         "tuning.min_cutoff": "--aim-min-cutoff",
         "tuning.hold_s": "BORESIGHT_AIM_HOLD_S",
     }
+
+
+# --- The phone page ---------------------------------------------------------
+
+
+def test_the_page_carries_the_tuning_panel(tmp_path: Path) -> None:
+    with _client(tmp_path) as client:
+        page = client.get("/").text
+        script = client.get("/capture.js").text
+
+    assert 'id="tuning"' in page
+    assert 'id="tuning-save"' in page
+    # Every tuning value the server has gets a slider, by the same key.
+    for key in TUNING_RANGES:
+        assert f'key: "{key}"' in script
+    for path in ('"settings"', '"settings/tuning"', '"settings/save"'):
+        assert f"sameOriginUrl({path})" in script

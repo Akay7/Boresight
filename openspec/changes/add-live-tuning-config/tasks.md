@@ -18,7 +18,7 @@
 
 ## 4. Phone
 
-- [ ] 4.1 Add a tuning panel to `index.html` and a self-contained section to `capture.js`: sliders built from reported ranges, post on change, render the server's reply, pinned marks, rel-scale disabled when unsupported, Save button with outcome message; verify with `node --check src/boresight/web/capture.js` and a test that the served page contains the panel
+- [x] 4.1 Add a tuning panel to `index.html` and a self-contained section to `capture.js`: sliders built from reported ranges, post on change, render the server's reply, pinned marks, rel-scale disabled when unsupported, Save button with outcome message; verify with `node --check src/boresight/web/capture.js` and a test that the served page contains the panel
 
 ## 5. Wrap-up
 
