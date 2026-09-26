@@ -24,6 +24,7 @@ from collections.abc import Callable
 
 import numpy as np
 
+from boresight.detect import Detector
 from boresight.inject import CursorBackend, stamped
 from boresight.pipeline import AimPipeline, FrameOutcome, FrameResult
 
@@ -60,7 +61,12 @@ class HoldingPipeline:
         self._last_time: float | None = None
 
     def process_frame(
-        self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
+        self,
+        frame: np.ndarray,
+        *,
+        debug: bool = False,
+        t: float | None = None,
+        detector: Detector | None = None,
     ) -> FrameResult:
         """Solve `frame`, or hold the last solve through its dropout.
 
@@ -69,10 +75,12 @@ class HoldingPipeline:
         re-send are timed by it, so the filter sees one consistent
         timeline. The hold window itself stays on this object's own
         clock: it is about how long the server has gone without a solve,
-        not about the camera.
+        not about the camera. `detector` is handed to the pipeline as is.
         """
         backend = stamped(self._backend, t)
-        result = self._pipeline.process_frame(frame, debug=debug, backend=backend)
+        result = self._pipeline.process_frame(
+            frame, debug=debug, backend=backend, detector=detector
+        )
         now = self._clock()
 
         if result.outcome is FrameOutcome.SOLVED:

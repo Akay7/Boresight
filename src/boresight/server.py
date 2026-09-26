@@ -155,6 +155,7 @@ def create_app(
     config: ServerConfig | None = None,
     display: int | None = None,
     overlay_extra_margin_px: int = 0,
+    tracked_detection: bool = True,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -176,6 +177,7 @@ def create_app(
             app.state.marker_map,
             display=display,
             overlay_extra_margin_px=overlay_extra_margin_px,
+            tracked_detection=tracked_detection,
         )
         app.state.settings = ViewSettings()
         app.state.sessions = SessionRegistry()
@@ -365,9 +367,13 @@ def _decode_and_solve(
     because OpenCV releases the GIL during detection, and moving a
     1280x720 array across a process boundary would cost more than the
     few milliseconds of work being parallelised.
+
+    Decoded straight to greyscale: detection uses nothing else, and
+    skipping the colour conversion saves about a third of the decode
+    (numbers in the `speed-up-marker-detection` change's design.md).
     """
     started = time.perf_counter()
-    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    frame = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
     decoded_at = time.perf_counter()
     if frame is None:
         return None, (decoded_at - started) * 1000.0, 0.0
@@ -972,6 +978,14 @@ def main(argv: list[str] | None = None) -> int:
         "panel reservation isn't detected automatically (default: 0, "
         "no change; see `python -m boresight.overlay --help`)",
     )
+    parser.add_argument(
+        "--full-frame-detection",
+        action="store_true",
+        help="search every frame in full at full resolution, instead of "
+        "letting each session search a half-size frame while its markers "
+        "stay large and in view. Slower; for comparison, or if tracking "
+        "misbehaves with your camera",
+    )
     args = parser.parse_args(argv)
 
     # Uvicorn configures its own loggers and leaves the root alone, so
@@ -1031,6 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
             marker_map_factory=layout_factory,
             config=config,
             overlay_extra_margin_px=args.overlay_extra_margin_px,
+            tracked_detection=not args.full_frame_detection,
         ),
         host=config.host,
         port=config.port,

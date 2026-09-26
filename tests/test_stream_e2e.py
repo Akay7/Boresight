@@ -509,6 +509,9 @@ class _HeldPipeline:
         self.release = threading.Event()
         self.seen: list[int] = []
 
+    def session_detector(self):
+        return None
+
     def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
         # A cheap fingerprint that differs per fixture frame, so the
         # test can assert *which* frames survived, not merely how many.
@@ -544,7 +547,7 @@ def test_a_backlog_is_dropped_down_to_its_newest_frame(client: TestClient) -> No
         reports = [socket.receive_json(), socket.receive_json()]
 
     expected = [
-        int(cv2.imdecode(np.frombuffer(p, np.uint8), cv2.IMREAD_COLOR).sum())
+        int(cv2.imdecode(np.frombuffer(p, np.uint8), cv2.IMREAD_GRAYSCALE).sum())
         for p in (payloads[0], payloads[3])
     ]
     assert held.seen == expected, "the surviving frames were not the first and newest"
@@ -992,6 +995,9 @@ class _ScriptedPipeline:
         self.release = threading.Event()
         if not block:
             self.release.set()
+
+    def session_detector(self):
+        return None
 
     def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
         self.entered.set()

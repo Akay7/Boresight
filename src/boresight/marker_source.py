@@ -59,6 +59,7 @@ from pathlib import Path
 import numpy as np
 
 from boresight.aim_hold import HoldingPipeline
+from boresight.detect import Detector
 from boresight.inject import CursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
 from boresight.marker_map import MarkerMap
@@ -194,7 +195,7 @@ def _overlay_environment() -> dict[str, str]:
 
 
 class SessionPipeline:
-    """One session's aim: its own smoothing and its own dropout hold.
+    """One session's aim: its own smoothing, dropout hold and detector.
 
     The filter is this object's for its whole life, so a marker-source
     switch does not discontinue smoothing. The `HoldingPipeline` is
@@ -208,6 +209,7 @@ class SessionPipeline:
         self._backend = SmoothingCursorBackend(cursor, filter=_aim_filter())
         self._solver: AimPipeline | None = None
         self._holding: HoldingPipeline | None = None
+        self._detector: Detector | None = None
 
     def process_frame(
         self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
@@ -216,7 +218,12 @@ class SessionPipeline:
         if solver is not self._solver or self._holding is None:
             self._solver = solver
             self._holding = HoldingPipeline(solver, self._backend)
-        return self._holding.process_frame(frame, debug=debug, t=t)
+            # Renewed with the hold: the markers it was tracking belong
+            # to the source being left.
+            self._detector = solver.session_detector()
+        return self._holding.process_frame(
+            frame, debug=debug, t=t, detector=self._detector
+        )
 
 
 class MarkerSourceController:
@@ -229,6 +236,7 @@ class MarkerSourceController:
         display: int | None = None,
         launcher=subprocess.Popen,
         overlay_extra_margin_px: int = 0,
+        tracked_detection: bool = True,
     ) -> None:
         # Unwrapped: smoothing belongs to each session (see
         # `session_pipeline`). This is only the pipeline's default
@@ -238,10 +246,15 @@ class MarkerSourceController:
         self._display = display
         self._launcher = launcher
         self._overlay_extra_margin_px = overlay_extra_margin_px
+        # Whether sessions detect through a `MarkerTracker` (see
+        # `AimPipeline.session_detector`) or search every frame in full.
+        self._tracked_detection = tracked_detection
 
         self._source = MarkerSource.PRINTED
         self._layout = printed_layout
-        self._pipeline = AimPipeline(printed_layout, self._backend)
+        self._pipeline = AimPipeline(
+            printed_layout, self._backend, tracking=tracked_detection
+        )
         self._process: subprocess.Popen | None = None
         self._stdout: _PipeDrain | None = None
         self._stderr: _PipeDrain | None = None
@@ -430,7 +443,9 @@ class MarkerSourceController:
         # session's `SessionPipeline` notices the new object and drops
         # its held position, which belongs to the source being left.
         self._layout = layout
-        self._pipeline = AimPipeline(layout, self._backend)
+        self._pipeline = AimPipeline(
+            layout, self._backend, tracking=self._tracked_detection
+        )
         self._source = source
 
     # --- The child process --------------------------------------------
