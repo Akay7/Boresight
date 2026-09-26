@@ -149,3 +149,29 @@ def test_a_handover_is_logged_by_label(caplog) -> None:
         "cursor now follows phone 10.0.0.2:5000",
         "cursor now follows esp32-cam 10.0.0.3:6000",
     ]
+
+
+def test_a_closed_gate_frees_the_cursor_and_drops_later_moves() -> None:
+    """A frame still on an executor thread when its session ends must not
+    take the cursor back for a session that is gone."""
+    arbiter, backend, _ = _arbiter()
+    a, b = _Session("a"), _Session("b")
+    gate = arbiter.cursor_for(a, a.label)
+    gate.move_absolute(0.1, 0.1)
+
+    gate.close()
+    gate.move_absolute(0.5, 0.5)
+
+    assert arbiter.status(a) == "free"
+    arbiter.cursor_for(b, b.label).move_absolute(0.9, 0.9)
+    assert backend.calls == [(0.1, 0.1), (0.9, 0.9)]
+
+
+def test_closing_a_gate_leaves_another_owner_alone() -> None:
+    arbiter, _, _ = _arbiter()
+    a, b = _Session("a"), _Session("b")
+    arbiter.claim(a, a.label)
+
+    arbiter.cursor_for(b, b.label).close()
+
+    assert arbiter.status(a) == "yours"

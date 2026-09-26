@@ -482,9 +482,12 @@ async def run_frame_session(
             slot.put(client_ms, jpeg)
 
     frame_errors = 0
+    # The frame on an executor thread, if any. Cancelling the processor
+    # cannot stop a thread, so teardown waits for this instead.
+    in_flight: asyncio.Future | None = None
 
     async def process_loop() -> None:
-        nonlocal frame_errors
+        nonlocal frame_errors, in_flight
         while True:
             client_ms, jpeg = await slot.get()
             # Aim smoothing is timed by when the frame was captured, not
@@ -496,7 +499,7 @@ async def run_frame_session(
             try:
                 # Read per frame rather than captured once: a debug toggle
                 # arriving mid-session takes effect on the next frame.
-                result, decode_ms, solve_ms = await loop.run_in_executor(
+                in_flight = loop.run_in_executor(
                     None,
                     _decode_and_solve,
                     aim,
@@ -504,6 +507,12 @@ async def run_frame_session(
                     stats.debug_enabled,
                     captured_at,
                 )
+                # Retrieved here as well, for a job that fails after its
+                # session stopped awaiting it.
+                in_flight.add_done_callback(_retrieve)
+                # Shielded: cancelling the processor must not orphan the
+                # job's future, or teardown could not wait for it.
+                result, decode_ms, solve_ms = await asyncio.shield(in_flight)
             except Exception:
                 triggers.processing = False
                 # Anything the pipeline does not already turn into an
@@ -627,8 +636,10 @@ async def run_frame_session(
         # with it: nothing else would ever send the release.
         hold.release(stats)
         # The cursor too: the next session to aim takes it at once
-        # rather than after the idle lapse.
-        arbiter.release(stats)
+        # rather than after the idle lapse. Closing the gate, not just
+        # releasing, so a frame still on an executor thread cannot take
+        # it straight back when it lands.
+        cursor.close()
         sessions.unregister(session)
         elapsed = time.monotonic() - started
         if seen_first_frame:
@@ -652,7 +663,29 @@ async def run_frame_session(
                 elapsed,
             )
         # Last, so being cancelled here costs nothing that matters.
-        await asyncio.gather(receiver, processor, watchdog, return_exceptions=True)
+        # `wait`, not `gather`: cancelled mid-wait, `gather` raises one
+        # of the cancellations this block just sent its own tasks, which
+        # the canceller cannot recognise as its own -- anyio's scope,
+        # for one, then lets it escape as an error. `wait` re-raises
+        # the canceller's, and leaves the tasks' outcomes to be read
+        # below.
+        pending = {receiver, processor, watchdog}
+        if in_flight is not None:
+            pending.add(in_flight)
+        await asyncio.wait(pending)
+        for task in (receiver, processor, watchdog):
+            _retrieve(task)
+
+
+def _retrieve(future: asyncio.Future) -> None:
+    """Mark a finished future's outcome as seen, whatever it was.
+
+    What `gather(..., return_exceptions=True)` used to do for the
+    session's tasks: a task that died is already logged where it matters,
+    and asyncio would otherwise log it again as never retrieved.
+    """
+    if not future.cancelled():
+        future.exception()
 
 
 def _handle_control(

@@ -23,6 +23,7 @@ processor.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
@@ -782,6 +783,133 @@ def test_a_dead_processor_closes_the_session_instead_of_hanging(
     assert "frame processing" in caplog.text
     assert "simulated processor fault" in caplog.text
     assert len(app.state.sessions) == 0
+
+
+# --- Teardown with a frame still on an executor thread -----------------
+
+
+class _LateMover:
+    """A session pipeline whose frame is still solving when the client
+    leaves: it blocks until released, then moves the session's cursor
+    the way a real solve would."""
+
+    def __init__(self, cursor) -> None:
+        self.cursor = cursor
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.moved = threading.Event()
+
+    def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
+        self.entered.set()
+        self.release.wait(timeout=5.0)
+        self.cursor.move_absolute(0.5, 0.5)
+        self.moved.set()
+        return FrameResult(outcome=FrameOutcome.SOLVED, position=(0.5, 0.5))
+
+
+def test_a_frame_finishing_after_disconnect_does_not_take_the_cursor(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    """Cancelling the processor cannot stop the executor thread. Its move
+    lands after the session freed the cursor, and a free cursor goes to
+    whoever aims first -- which must not be a session that is gone."""
+    movers: list[_LateMover] = []
+
+    def session_pipeline(cursor):
+        movers.append(_LateMover(cursor))
+        return movers[-1]
+
+    client.app.state.markers.session_pipeline = session_pipeline
+    sessions = client.app.state.sessions
+
+    def release_once_the_session_is_gone() -> None:
+        deadline = time.monotonic() + 5.0
+        while len(sessions) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        movers[0].release.set()
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(CLIENT_MS, _first_frame()))
+        assert movers[0].entered.wait(timeout=5.0)
+        threading.Thread(target=release_once_the_session_is_gone).start()
+
+    assert movers[0].moved.wait(timeout=5.0)
+    assert backend.calls == []
+    assert client.app.state.arbiter.status(object()) == "free"
+
+
+class _FakeSocket:
+    """Just enough of a WebSocket for `run_frame_session`: a hold, one
+    frame, then nothing until the test says the client has gone."""
+
+    def __init__(self, frame: bytes) -> None:
+        self._messages = [
+            {"type": "websocket.receive", "text": '{"type":"trigger","state":"down"}'},
+            {"type": "websocket.receive", "bytes": pack_frame(CLIENT_MS, frame)},
+        ]
+        self.gone = asyncio.Event()
+
+    async def receive(self) -> dict:
+        if self._messages:
+            return self._messages.pop(0)
+        await self.gone.wait()
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send_json(self, data) -> None:
+        pass
+
+
+def test_a_teardown_cancelled_mid_wait_raises_the_cancellers_cancellation() -> None:
+    """A server (or test client) cancelling a session that is already
+    winding down must get back its own cancellation, which it knows to
+    absorb, rather than one the session sent its own tasks."""
+    backend = FakeCursorBackend()
+    markers = marker_source.MarkerSourceController(
+        backend, load_marker_map(DEFAULT_CONFIG_PATH)
+    )
+    movers: list[_LateMover] = []
+
+    def session_pipeline(cursor):
+        movers.append(_LateMover(cursor))
+        return movers[-1]
+
+    markers.session_pipeline = session_pipeline
+    sessions = server.SessionRegistry()
+    hold = server.TriggerHold(backend)
+    arbiter = server.CursorArbiter(backend)
+    socket = _FakeSocket(_first_frame())
+
+    async def scenario() -> BaseException | None:
+        session = asyncio.create_task(
+            server.run_frame_session(
+                socket, markers, backend, sessions=sessions, hold=hold, arbiter=arbiter
+            )
+        )
+        while not movers or not movers[0].entered.is_set():
+            await asyncio.sleep(0.005)
+        socket.gone.set()
+        # Teardown has begun once the session is unlisted; it is now
+        # waiting on the frame still in the executor.
+        while len(sessions):
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.02)
+        session.cancel("server shutting down")
+        try:
+            await session
+        except asyncio.CancelledError as error:
+            return error
+        finally:
+            movers[0].release.set()
+        return None
+
+    error = asyncio.run(scenario())
+
+    assert error is not None, "the cancelled teardown returned normally"
+    assert error.args == ("server shutting down",)
+    assert backend.presses == backend.releases == 1
+    assert arbiter.status(object()) == "free"
+    assert movers[0].moved.wait(timeout=5.0)
+    assert backend.calls == []
 
 
 # --- Aim smoothing is timed by capture, not arrival ---------------------

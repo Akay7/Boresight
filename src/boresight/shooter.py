@@ -65,10 +65,11 @@ class CursorArbiter:
         self._owner: object | None = None
         self._last_aim = 0.0
 
-    def cursor_for(self, owner: object, label: Callable[[], str]) -> CursorBackend:
+    def cursor_for(self, owner: object, label: Callable[[], str]) -> _GatedCursor:
         """The cursor as `owner` sees it: its moves land only while it
-        owns the cursor, or when taking a free one. `label` names the
-        session in the log line when ownership changes."""
+        owns the cursor, or when taking a free one, until the view is
+        closed. `label` names the session in the log line when ownership
+        changes."""
         return _GatedCursor(self, owner, label)
 
     def claim(self, owner: object, label: Callable[[], str]) -> None:
@@ -79,8 +80,7 @@ class CursorArbiter:
     def release(self, owner: object) -> None:
         """Free the cursor if `owner` has it. Nothing otherwise."""
         with self._lock:
-            if self._owner is owner:
-                self._owner = None
+            self._release_locked(owner)
 
     def status(self, owner: object) -> CursorStatus:
         with self._lock:
@@ -92,14 +92,23 @@ class CursorArbiter:
     def move(self, owner: object, label: Callable[[], str], x: float, y: float) -> bool:
         """Move for `owner` if it may; whether the move landed."""
         with self._lock:
-            current = self._current()
-            if current is not owner:
-                if current is not None:
-                    return False
-                self._take(owner, label)
-            self._last_aim = self._clock()
-            self._backend.move_absolute(x, y)
-            return True
+            return self._move_locked(owner, label, x, y)
+
+    def _move_locked(
+        self, owner: object, label: Callable[[], str], x: float, y: float
+    ) -> bool:
+        current = self._current()
+        if current is not owner:
+            if current is not None:
+                return False
+            self._take(owner, label)
+        self._last_aim = self._clock()
+        self._backend.move_absolute(x, y)
+        return True
+
+    def _release_locked(self, owner: object) -> None:
+        if self._owner is owner:
+            self._owner = None
 
     def _current(self) -> object | None:
         """The owner, unless it has lapsed. Called with the lock held."""
@@ -122,6 +131,10 @@ class _GatedCursor:
 
     Buttons pass straight through: holding the button is `TriggerHold`'s
     business, and it is shared by every session on purpose.
+
+    Closed when its session ends. A frame can still be on an executor
+    thread then, and its move would otherwise find the cursor just
+    freed and take it back for a session that is gone.
     """
 
     def __init__(
@@ -130,9 +143,21 @@ class _GatedCursor:
         self._arbiter = arbiter
         self._owner = owner
         self._label = label
+        self._closed = False
 
     def move_absolute(self, x: float, y: float) -> None:
-        self._arbiter.move(self._owner, self._label, x, y)
+        # The flag is read under the arbiter's lock, so a move is either
+        # wholly before `close()` -- which then frees the cursor it took
+        # -- or dropped.
+        with self._arbiter._lock:  # noqa: SLF001 - its own gate
+            if not self._closed:
+                self._arbiter._move_locked(self._owner, self._label, x, y)  # noqa: SLF001
+
+    def close(self) -> None:
+        """Drop every move from now on, and free the cursor if it is ours."""
+        with self._arbiter._lock:  # noqa: SLF001
+            self._closed = True
+            self._arbiter._release_locked(self._owner)  # noqa: SLF001
 
     def click(self) -> None:
         self._arbiter._backend.click()  # noqa: SLF001 - its own gate
