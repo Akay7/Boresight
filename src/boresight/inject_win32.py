@@ -19,9 +19,9 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from boresight.inject import (
+    DEFAULT_REL_SCALE,
     CursorBackendUnavailable,
     Rect,
-    _rel_scale,
     cursor_rect_override,
 )
 
@@ -179,7 +179,7 @@ class Win32CursorBackend:
         self,
         api: Win32Api | None = None,
         target: Rect | None = None,
-        rel_scale: float | None = None,
+        rel_scale: float = DEFAULT_REL_SCALE,
     ) -> None:
         self._api = api if api is not None else User32Api()
         # Before any metric is read: see `User32Api.make_dpi_aware`.
@@ -195,7 +195,7 @@ class Win32CursorBackend:
         if target is None:
             target = cursor_rect_override()
         self._target = target if target is not None else self._api.primary_screen()
-        self._rel_scale = _rel_scale() if rel_scale is None else rel_scale
+        self._rel_scale = rel_scale
         self._last_position: tuple[float, float] | None = None
         self._held = False
         self._warned_blocked = False
@@ -222,6 +222,15 @@ class Win32CursorBackend:
                 sent,
                 len(inputs),
             )
+
+    @property
+    def rel_scale(self) -> float:
+        return self._rel_scale
+
+    @rel_scale.setter
+    def rel_scale(self, value: float) -> None:
+        # A live setting, as on `UInputCursorBackend.rel_scale`.
+        self._rel_scale = value
 
     def move_absolute(self, x: float, y: float) -> None:
         inputs = []

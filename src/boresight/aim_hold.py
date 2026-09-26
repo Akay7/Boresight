@@ -54,7 +54,11 @@ class HoldingPipeline:
     ) -> None:
         self._pipeline = pipeline
         self._backend = backend
-        self._hold_s = hold_s
+        # Public and settable: the hold window is a live setting, and
+        # a session applies a change here between frames, on the
+        # thread that processes them. Measured from the last solve, so
+        # a shorter window takes effect on the very next frame.
+        self.hold_s = hold_s
         self._clock = clock
 
         self._last_position: tuple[float, float] | None = None
@@ -87,9 +91,10 @@ class HoldingPipeline:
             self._last_position = result.position
             self._last_time = now
         elif (
-            self._last_position is not None
+            self.hold_s > 0
+            and self._last_position is not None
             and self._last_time is not None
-            and (now - self._last_time) <= self._hold_s
+            and (now - self._last_time) <= self.hold_s
         ):
             # Re-sent verbatim: through a `SmoothingCursorBackend`, an
             # unchanged value is algebraically a no-op regardless of

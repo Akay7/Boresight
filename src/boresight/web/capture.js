@@ -992,3 +992,141 @@ document.addEventListener("visibilitychange", () => {
 });
 // A long press would otherwise open the browser's context menu.
 els.trigger.addEventListener("contextmenu", (event) => event.preventDefault());
+
+// --- Aim tuning --------------------------------------------------------
+
+// Sliders for the server's live tuning (settings.py). Each is built from
+// the range the server reports, so this page never hardcodes one, and
+// shows what the server says is in effect after a change rather than
+// what was asked for -- the same rule as the marker controls above. A
+// change is sent when the slider is let go, not on every step of the
+// drag: each one is applied to every streaming session at once.
+//
+// Self-contained: nothing above this section refers to it.
+
+const TUNING_CONTROLS = [
+  { key: "min_cutoff", label: "Smoothing (min cutoff)", step: 0.01, unit: " Hz", digits: 2 },
+  { key: "beta", label: "Fast-swing response (beta)", step: 0.05, unit: "", digits: 2 },
+  { key: "hold_s", label: "Dropout hold", step: 0.05, unit: " s", digits: 2 },
+  { key: "rel_scale", label: "Relative motion scale", step: 50, unit: "", digits: 0 },
+];
+
+const tuningEls = {
+  panel: document.getElementById("tuning"),
+  rows: document.getElementById("tuning-rows"),
+  save: document.getElementById("tuning-save"),
+};
+const tuningInputs = {};
+
+function formatTuning(control, value) {
+  return `${Number(value).toFixed(control.digits)}${control.unit}`;
+}
+
+function buildTuning(settings) {
+  tuningEls.rows.textContent = "";
+  for (const control of TUNING_CONTROLS) {
+    const limits = settings.limits[control.key];
+    const row = document.createElement("div");
+    row.className = "tune";
+    const label = document.createElement("label");
+    const name = document.createElement("span");
+    name.textContent = control.label;
+    const output = document.createElement("output");
+    label.append(name, output);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(limits.min);
+    input.max = String(limits.max);
+    input.step = String(control.step);
+    const pinned = document.createElement("div");
+    pinned.className = "pinned";
+    label.htmlFor = input.id = `tune-${control.key}`;
+    row.append(label, input, pinned);
+    tuningEls.rows.append(row);
+
+    input.addEventListener("input", () => {
+      output.textContent = formatTuning(control, input.value);
+    });
+    input.addEventListener("change", () =>
+      changeTuning({ [control.key]: Number(input.value) })
+    );
+    tuningInputs[control.key] = { control, input, output, pinned };
+  }
+}
+
+function showTuning(settings) {
+  if (!settings || !settings.tuning) return;
+  if (!Object.keys(tuningInputs).length) buildTuning(settings);
+  for (const [key, { control, input, output, pinned }] of Object.entries(tuningInputs)) {
+    const value = settings.tuning[key];
+    input.value = String(value);
+    output.textContent = formatTuning(control, value);
+    // Pinned values win over the file again on the next start, so a
+    // saved change to one would quietly not survive a restart.
+    const source = settings.pinned[`tuning.${key}`];
+    pinned.textContent = source ? `Set by ${source}; overrides the saved value.` : "";
+    if (key === "rel_scale" && !settings.rel_scale_supported) {
+      input.disabled = true;
+      pinned.textContent = "Not supported by this server's cursor backend.";
+    }
+  }
+}
+
+async function loadTuning() {
+  try {
+    const response = await fetch(sameOriginUrl("settings"));
+    if (response.ok) showTuning(await response.json());
+  } catch {
+    // As with the other controls: a real connection problem shows
+    // itself when streaming starts.
+  }
+}
+
+function tuningError(body, fallback) {
+  const detail = body && body.detail;
+  if (typeof detail === "string") return detail;
+  // FastAPI's validation errors are a list of {loc, msg}.
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).join("; ");
+  return fallback;
+}
+
+async function changeTuning(changes) {
+  try {
+    const response = await fetch(sameOriginUrl("settings/tuning"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    });
+    const body = await response.json();
+    if (response.ok) {
+      showTuning(body);
+    } else {
+      show("error", tuningError(body, "could not change the tuning"));
+      // Put the sliders back where the server actually is.
+      loadTuning();
+    }
+  } catch (error) {
+    show("error", `Could not change the tuning: ${error.message}`);
+    loadTuning();
+  }
+}
+
+tuningEls.save.addEventListener("click", async () => {
+  tuningEls.save.disabled = true;
+  try {
+    const response = await fetch(sameOriginUrl("settings/save"), { method: "POST" });
+    const body = await response.json();
+    if (response.ok) {
+      showTuning(body);
+      show("info", `Settings saved to ${body.path}.`);
+    } else {
+      show("error", tuningError(body, "could not save the settings"));
+    }
+  } catch (error) {
+    show("error", `Could not save the settings: ${error.message}`);
+  } finally {
+    tuningEls.save.disabled = false;
+  }
+});
+
+loadTuning();

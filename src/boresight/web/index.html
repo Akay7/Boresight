@@ -121,6 +121,15 @@
       .links p { color: var(--dim); margin: 0.25rem 0 0; }
       .row.debug-only { display: none; }
       .row.debug-only.show { display: flex; }
+      /* Aim tuning. Collapsed by default: set once, then left alone. */
+      #tuning > summary { cursor: pointer; color: var(--dim); }
+      .tune { padding: 0.35rem 0; }
+      .tune label { display: flex; justify-content: space-between; gap: 1rem; }
+      .tune label span:first-child { color: var(--dim); }
+      .tune output { font-variant-numeric: tabular-nums; }
+      .tune input[type="range"] { width: 100%; margin: 0.25rem 0 0; }
+      .tune .pinned { color: var(--warn); font-size: 0.8rem; }
+      #tuning-note { color: var(--dim); font-size: 0.8rem; margin: 0.25rem 0 0; }
     </style>
   </head>
   <body>
@@ -159,6 +168,18 @@
         </span>
       </div>
     </div>
+
+    <!-- Filled in by capture.js from GET /settings, which also gives
+         each slider its range. -->
+    <details class="panel" id="tuning">
+      <summary>Aim tuning</summary>
+      <div id="tuning-rows"></div>
+      <button type="button" id="tuning-save">Save settings</button>
+      <p id="tuning-note">
+        Changes apply at once. Save keeps them, with the marker, margin
+        and overlay choices above, across a server restart.
+      </p>
+    </details>
 
     <div class="panel">
       <div class="row"><span>Connection</span><span id="stat-connection">idle</span></div>

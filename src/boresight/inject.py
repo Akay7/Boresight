@@ -9,7 +9,7 @@ The uinput backend can *optionally* also drive a relative delta
 alongside its normal absolute placement, for a game that switches to
 raw/relative mouse capture for camera or reticle control in fullscreen
 instead of reading the OS cursor position. Off by default, and should
-stay off unless `BORESIGHT_REL_SCALE` is set deliberately -- see
+stay off unless `rel_scale` is set deliberately (see `settings.py`) -- see
 `DEFAULT_REL_SCALE`'s comment for why continuous relative deltas are a
 materially riskier feature than the absolute placement, not just an
 alternative shape of the same thing.
@@ -46,16 +46,6 @@ CLICK_PRESSURE = 512
 # scale only slows the drift, it does not remove it -- this is not
 # presently safe to enable outside a deliberate, supervised experiment.
 DEFAULT_REL_SCALE = 0.0
-
-
-def _rel_scale() -> float:
-    raw = os.environ.get("BORESIGHT_REL_SCALE")
-    if not raw:
-        return DEFAULT_REL_SCALE
-    try:
-        return float(raw)
-    except ValueError:
-        return DEFAULT_REL_SCALE
 
 
 # python-evdev's `UInput` defaults every device to vendor/product/version
@@ -156,7 +146,7 @@ def default_cursor_backend(platform: str | None = None) -> CursorBackend:
 class UinputCursorBackend:
     """Moves the cursor via a virtual absolute pointer on Linux uinput."""
 
-    def __init__(self) -> None:
+    def __init__(self, rel_scale: float = DEFAULT_REL_SCALE) -> None:
         try:
             from evdev import AbsInfo, UInput, ecodes
         except ImportError as exc:  # pragma: no cover - platform guard
@@ -275,7 +265,7 @@ class UinputCursorBackend:
             ) from exc
 
         self._ecodes = ecodes
-        self._rel_scale = _rel_scale()
+        self._rel_scale = rel_scale
         # None until the first move_absolute call -- there is no prior
         # position to take a delta against yet, and emitting one against
         # an arbitrary starting point would be a spurious jump.
@@ -290,6 +280,17 @@ class UinputCursorBackend:
         self._device.write(ecodes.EV_KEY, ecodes.BTN_TOOL_PEN, 1)
         self._device.write(ecodes.EV_ABS, ecodes.ABS_PRESSURE, 0)
         self._device.syn()
+
+    @property
+    def rel_scale(self) -> float:
+        return self._rel_scale
+
+    @rel_scale.setter
+    def rel_scale(self, value: float) -> None:
+        # A live setting (`settings.py`): set from a request thread and
+        # read by whichever thread moves next. One float assignment, so
+        # a move sees the old scale or the new one, nothing in between.
+        self._rel_scale = value
 
     def move_absolute(self, x: float, y: float) -> None:
         abs_x = round(x * ABS_MAX)

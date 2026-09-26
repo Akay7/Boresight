@@ -336,10 +336,10 @@ also emit a relative delta alongside its normal absolute placement —
 relative deltas computed from a noisy tracked position accumulate
 error with no correction the way absolute placement has, and drift
 into a screen corner given enough time; confirmed exactly that way in
-practice. `BORESIGHT_REL_SCALE` (device-motion units per full screen
-sweep) enables it if set to anything nonzero — treat this as a
-supervised experiment for one specific title, not a setting to leave
-on.
+practice. `rel_scale` (device-motion units per full screen sweep; see
+[Tuning](#tuning-less-lag-or-less-jitter)) enables it if set to
+anything nonzero — treat this as a supervised experiment for one
+specific title, not a setting to leave on.
 
 **Hardware round-trip (future).** PC computes the coordinate, sends it
 over serial to an ESP32-S3 (native USB), which emits the absolute HID
@@ -654,33 +654,44 @@ aim-derived movement last left the filter.
 
 ### Tuning: less lag or less jitter
 
-Each session's filter is built with `min_cutoff=0.5,
-beta=1.0` — tuned by feel, not measurement, so what feels right depends
-on your own camera's noise floor and how fast you swing. Two env vars
-override either without a code change (read once, at server startup):
+Tuned by feel, not measurement, so the phone's **Aim tuning** panel
+changes these live — every streaming session picks a change up on its
+next frame, no restart or reconnect — and **Save settings** writes them
+to `.boresight/config.toml` (another path with `--config`):
+
+- **`min_cutoff`** (default `0.5` Hz, 0.01–10) — how hard a *held* aim
+  is smoothed. Raise it if the cursor visibly creeps into position after
+  you stop instead of landing there; too high and a steady aim shakes
+  with raw detection noise.
+- **`beta`** (default `1.0`, 0–10) — how much a *fast* swing cuts
+  through the smoothing. Raise it if a quick swing still feels laggy
+  mid-motion.
+- **`hold_s`** (default `0.75`, 0–5; 0 is off) — see the next section.
+- **`rel_scale`** (default `0`, 0–10000) — see
+  [Cursor injection](#cursor-injection); leave it at 0.
+
+Each is resolved at startup as flag > environment variable > file >
+default: `--aim-min-cutoff` / `BORESIGHT_AIM_MIN_CUTOFF`, `--aim-beta` /
+`BORESIGHT_AIM_BETA`, `--aim-hold-s` / `BORESIGHT_AIM_HOLD_S`,
+`--rel-scale` / `BORESIGHT_REL_SCALE`. A value that is not a number in
+range stops the server with a message naming it. A value pinned by a
+flag or variable is marked on the phone, and saving without changing it
+leaves the file's own value alone.
 
     BORESIGHT_AIM_MIN_CUTOFF=5.0 uv run boresight
 
-- **`BORESIGHT_AIM_MIN_CUTOFF`** (default `0.5`) — how hard a *held*
-  aim is smoothed. This is the one to raise if the cursor visibly
-  creeps into position after you stop moving instead of landing there
-  immediately: at a low cutoff the filter only approaches the true
-  position a little more each frame rather than snapping to it. Too
-  high, and a steady aim starts visibly shaking with raw detection
-  noise instead.
-- **`BORESIGHT_AIM_BETA`** (default `1.0`) — how much a *fast* swing
-  cuts through the smoothing. Raise this if a quick swing to a new
-  target still feels smoothed/laggy mid-motion, as opposed to only
-  after arriving.
-
-Both are read by `_aim_filter()` in `marker_source.py`; an unset or
-non-numeric value falls back to `OneEuroFilter`'s own default for that
-parameter.
+The file also keeps the phone's `[view]` choices — marker source,
+overlay margin, debug overlay — which otherwise reset on a restart;
+saved on-screen markers are started again in the background at startup.
+It is machine-written (comments are not kept); tables the server does
+not know are left as they are. Over HTTP: `GET /settings`, `POST
+/settings/tuning` (any subset, range-checked, 422 otherwise) and `POST
+/settings/save`, all behind the token like everything else.
 
 ### Holding through a brief dropout
 
 `aim_hold.py`'s `HoldingPipeline` wraps an `AimPipeline`: on a frame
-that does not solve, if a solved frame landed within the last 0.75s, it
+that does not solve, if a solved frame landed within the last `hold_s` (0.75s by default), it
 re-sends that same position to the (smoothing-wrapped) cursor backend.
 This exists because of a real platform behaviour, not a solving
 concern — a Wayland compositor hides a pointer that produces no events
@@ -1211,7 +1222,7 @@ starting on-screen markers:
 
     uv run boresight --overlay-extra-margin-px 50
 
-The CLI flag only sets a starting value, though — judging whether a tag
+The CLI flag only sets a starting value (it overrides a saved one), though — judging whether a tag
 now clears a taskbar means looking at the display, which is where the
 phone is, not the machine running the server. The phone client's
 Markers row has a `−`/`+` stepper for it next to the source buttons:
@@ -1331,6 +1342,8 @@ a defect invisible to a test suite that always runs from a checkout.
         server.py             # HTTP + frame socket, serves web/ to the phone
         stream.py             # frame codec, drop slot, per-session counters, live sessions
         netaccess.py          # bind address, shared token, TLS certificate
+        settings.py           # settings file, precedence, live tuning store
+        settings_routes.py    # GET /settings, live changes, save
         detect.py             # ArUco detection + subpixel corner refinement
         marker_map.py         # markers.toml -> id to screen-plane corners
         markers.py            # printable marker SVG, served over HTTP

@@ -53,7 +53,6 @@ ABSOLUTE_MOVE = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDES
 @pytest.fixture(autouse=True)
 def no_environment_overrides(monkeypatch):
     monkeypatch.delenv("BORESIGHT_CURSOR_RECT", raising=False)
-    monkeypatch.delenv("BORESIGHT_REL_SCALE", raising=False)
 
 
 PRIMARY = Rect(0, 0, 1920, 1080)
@@ -450,10 +449,9 @@ def test_closing_a_mac_backend_releases_a_held_button() -> None:
     assert api.types == [kCGEventLeftMouseDown, kCGEventLeftMouseUp]
 
 
-def test_mac_relative_mode_carries_the_delta_on_the_move(monkeypatch) -> None:
-    monkeypatch.setenv("BORESIGHT_REL_SCALE", "1000")
+def test_mac_relative_mode_carries_the_delta_on_the_move() -> None:
     api = FakeQuartzApi()
-    backend = QuartzCursorBackend(api)
+    backend = QuartzCursorBackend(api, rel_scale=1000)
 
     backend.move_absolute(0.5, 0.5)
     backend.move_absolute(0.6, 0.45)

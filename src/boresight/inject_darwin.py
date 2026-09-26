@@ -18,9 +18,9 @@ import ctypes
 from typing import Protocol
 
 from boresight.inject import (
+    DEFAULT_REL_SCALE,
     CursorBackendUnavailable,
     Rect,
-    _rel_scale,
     cursor_rect_override,
 )
 
@@ -176,7 +176,7 @@ class QuartzCursorBackend:
         self,
         api: QuartzApi | None = None,
         target: Rect | None = None,
-        rel_scale: float | None = None,
+        rel_scale: float = DEFAULT_REL_SCALE,
     ) -> None:
         self._api = api if api is not None else CoreGraphicsApi()
         # At startup: without the permission, posting fails silently,
@@ -191,12 +191,21 @@ class QuartzCursorBackend:
         # top-left is the origin, and others sit at their arranged
         # offsets, negative ones included.
         self._target = target if target is not None else self._api.main_display_bounds()
-        self._rel_scale = _rel_scale() if rel_scale is None else rel_scale
+        self._rel_scale = rel_scale
         self._last_position: tuple[float, float] | None = None
         # Where the last event put the cursor, in global points; a
         # press or release is posted there.
         self._location: tuple[float, float] | None = None
         self._held = False
+
+    @property
+    def rel_scale(self) -> float:
+        return self._rel_scale
+
+    @rel_scale.setter
+    def rel_scale(self, value: float) -> None:
+        # A live setting, as on `UInputCursorBackend.rel_scale`.
+        self._rel_scale = value
 
     def move_absolute(self, x: float, y: float) -> None:
         fields: dict[int, int] = {}

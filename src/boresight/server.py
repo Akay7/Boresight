@@ -45,6 +45,12 @@ from boresight.netaccess import (
     token_matches,
 )
 from boresight.pipeline import DEFAULT_CONFIG_PATH, FrameResult
+from boresight.settings import LiveSettings, Settings, ViewPreferences
+from boresight.settings_routes import (
+    apply_rel_scale,
+    restore_marker_source,
+)
+from boresight.settings_routes import router as settings_router
 from boresight.shooter import CursorArbiter
 from boresight.shot import AimHistory, Point, TriggerAction, TriggerQueue
 from boresight.stream import (
@@ -156,6 +162,7 @@ def create_app(
     display: int | None = None,
     overlay_extra_margin_px: int = 0,
     tracked_detection: bool = True,
+    settings: LiveSettings | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -165,8 +172,16 @@ def create_app(
     startup rather than on first request, so a broken environment
     (no `/dev/uinput` permission, an unparseable layout) fails fast
     instead of failing on the first frame.
+
+    `settings` is what `main()` resolved from flags, environment and the
+    settings file; without it, defaults with `overlay_extra_margin_px`
+    and nowhere to save.
     """
     config = config or ServerConfig()
+    live_settings = settings or LiveSettings(
+        Settings(view=ViewPreferences(overlay_extra_margin_px=overlay_extra_margin_px))
+    )
+    saved_view = live_settings.startup.view
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -176,10 +191,14 @@ def create_app(
             app.state.cursor_backend,
             app.state.marker_map,
             display=display,
-            overlay_extra_margin_px=overlay_extra_margin_px,
+            overlay_extra_margin_px=saved_view.overlay_extra_margin_px,
             tracked_detection=tracked_detection,
+            tuning=lambda: live_settings.tuning,
         )
-        app.state.settings = ViewSettings()
+        app.state.settings = ViewSettings(debug=saved_view.debug)
+        app.state.live_settings = live_settings
+        apply_rel_scale(app.state.cursor_backend, live_settings.tuning)
+        restore_marker_source(app.state.markers, saved_view.marker_source)
         app.state.sessions = SessionRegistry()
         app.state.trigger_hold = TriggerHold(app.state.cursor_backend)
         app.state.arbiter = CursorArbiter(app.state.cursor_backend)
@@ -231,6 +250,7 @@ def create_app(
         return response
 
     app.include_router(markers_router)
+    app.include_router(settings_router)
 
     @app.post("/cursor/move", status_code=204)
     def move_cursor(
@@ -940,6 +960,11 @@ def main(argv: list[str] | None = None) -> int:
         is_loopback,
         resolve_certificate,
     )
+    from boresight.settings import (
+        DEFAULT_SETTINGS_PATH,
+        SettingsError,
+        resolve_settings,
+    )
 
     parser = argparse.ArgumentParser(prog="python -m boresight.server")
     parser.add_argument("--host", default=DEFAULT_HOST)
@@ -972,12 +997,51 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--overlay-extra-margin-px",
         type=int,
-        default=0,
+        default=None,
         help="shrink the on-screen overlay's auto-detected available "
         "area by this much on every side, on top of whatever the "
         "desktop's own panels already reserve. For a display whose "
-        "panel reservation isn't detected automatically (default: 0, "
-        "no change; see `python -m boresight.overlay --help`)",
+        "panel reservation isn't detected automatically (default: the "
+        "settings file's, else 0; see `python -m boresight.overlay --help`)",
+    )
+    # Settings: flag > BORESIGHT_* environment variable > settings file
+    # > default. See `settings.py`.
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_SETTINGS_PATH,
+        metavar="PATH",
+        help="settings file, read at startup and written when settings "
+        "are saved from the phone (default: %(default)s)",
+    )
+    tuning = parser.add_argument_group(
+        "aim tuning", "each overrides its BORESIGHT_* variable and the settings file"
+    )
+    tuning.add_argument(
+        "--aim-min-cutoff",
+        type=float,
+        default=None,
+        metavar="HZ",
+        help="one-euro min cutoff: raise if a held aim creeps into place",
+    )
+    tuning.add_argument(
+        "--aim-beta",
+        type=float,
+        default=None,
+        help="one-euro beta: raise if a fast swing still feels smoothed",
+    )
+    tuning.add_argument(
+        "--aim-hold-s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="how long a brief detection dropout holds the last aim (0: off)",
+    )
+    tuning.add_argument(
+        "--rel-scale",
+        type=float,
+        default=None,
+        help="relative-motion units per full-screen sweep (0: off, the default)",
     )
     parser.add_argument(
         "--no-qr",
@@ -1008,6 +1072,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         layout_factory = marker_map_factory(args.markers)
     except (LayoutSourceError, OSError, ValueError) as error:
+        parser.exit(2, f"{error}\n")
+
+    try:
+        settings = resolve_settings(
+            args.config,
+            cli={
+                "tuning.min_cutoff": args.aim_min_cutoff,
+                "tuning.beta": args.aim_beta,
+                "tuning.hold_s": args.aim_hold_s,
+                "tuning.rel_scale": args.rel_scale,
+                "view.overlay_extra_margin_px": args.overlay_extra_margin_px,
+            },
+        )
+    except SettingsError as error:
         parser.exit(2, f"{error}\n")
 
     config = ServerConfig(
@@ -1055,8 +1133,8 @@ def main(argv: list[str] | None = None) -> int:
         create_app(
             marker_map_factory=layout_factory,
             config=config,
-            overlay_extra_margin_px=args.overlay_extra_margin_px,
             tracked_detection=not args.full_frame_detection,
+            settings=settings,
         ),
         host=config.host,
         port=config.port,

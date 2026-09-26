@@ -930,7 +930,9 @@ def test_smoothing_is_timed_by_the_client_capture_timestamps(
             seen.append(t)
             return super().apply(point, t=t)
 
-    monkeypatch.setattr(marker_source, "_aim_filter", _RecordingFilter)
+    monkeypatch.setattr(
+        marker_source, "_aim_filter", lambda _tuning: _RecordingFilter()
+    )
     entry = _manifest(VIDEO_DIR)["frames"][0]
     payload = _frame_bytes(VIDEO_DIR, entry)
 

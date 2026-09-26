@@ -51,6 +51,7 @@ import subprocess
 import sys
 import threading
 from collections import deque
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
@@ -67,6 +68,7 @@ from boresight.one_euro import OneEuroFilter
 from boresight.overlay.layout import overlay_layout
 from boresight.overlay.qt_backend import GEOMETRY_EVENT
 from boresight.pipeline import AimPipeline, FrameResult
+from boresight.settings import Tuning
 
 # How long to wait for the overlay to report its geometry. Generous:
 # starting Qt and opening a display is not instant. Bounded because an
@@ -91,31 +93,15 @@ logger = logging.getLogger("boresight")
 overlay_logger = logging.getLogger("boresight.overlay")
 
 
-def _aim_filter() -> OneEuroFilter:
-    """`OneEuroFilter`'s defaults, overridable without a code change.
+def _aim_filter(tuning: Tuning) -> OneEuroFilter:
+    """A new session's filter, built from the tuning in effect.
 
     Both knobs are tuned by feel, not measurement (see one_euro.py's
-    module docstring), and "by feel" differs by camera, lighting and
-    what the aim is actually driving -- a phone's camera noise floor,
-    or a specific game's own sensitivity, are not something Boresight
-    can calibrate for ahead of time. Raise BORESIGHT_AIM_MIN_CUTOFF if
-    a held aim feels laggy (less smoothing of a slow-moving signal);
-    raise BORESIGHT_AIM_BETA if a fast swing still feels smoothed.
+    module docstring), which is why they are live settings
+    (`settings.py`) rather than constants: a session built here keeps
+    following them through `SessionPipeline`.
     """
-    min_cutoff = os.environ.get("BORESIGHT_AIM_MIN_CUTOFF")
-    beta = os.environ.get("BORESIGHT_AIM_BETA")
-    kwargs = {}
-    if min_cutoff:
-        try:
-            kwargs["min_cutoff"] = float(min_cutoff)
-        except ValueError:
-            pass
-    if beta:
-        try:
-            kwargs["beta"] = float(beta)
-        except ValueError:
-            pass
-    return OneEuroFilter(**kwargs)
+    return OneEuroFilter(min_cutoff=tuning.min_cutoff, beta=tuning.beta)
 
 
 class MarkerSource(Enum):
@@ -202,11 +188,19 @@ class SessionPipeline:
     rebuilt whenever the controller's current `AimPipeline` is replaced,
     so a position held from the old source never reaches the new one.
     Only this session's frames feed either.
+
+    Tuning is read once per frame, as one immutable snapshot, and
+    applied here -- on the thread processing this session's frame, the
+    only one that ever touches its filter and hold -- so a live change
+    needs no lock on the frame path and reaches a session already
+    streaming on its next frame, without resetting its smoothing.
     """
 
     def __init__(self, controller: MarkerSourceController, cursor: CursorBackend):
         self._controller = controller
-        self._backend = SmoothingCursorBackend(cursor, filter=_aim_filter())
+        self._tuning = controller.tuning()
+        self._filter = _aim_filter(self._tuning)
+        self._backend = SmoothingCursorBackend(cursor, filter=self._filter)
         self._solver: AimPipeline | None = None
         self._holding: HoldingPipeline | None = None
         self._detector: Detector | None = None
@@ -214,10 +208,16 @@ class SessionPipeline:
     def process_frame(
         self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
     ) -> FrameResult:
+        tuning = self._controller.tuning()
+        if tuning is not self._tuning:
+            self._tuning = tuning
+            self._filter.tune(tuning.min_cutoff, tuning.beta)
+            if self._holding is not None:
+                self._holding.hold_s = tuning.hold_s
         solver = self._controller.pipeline
         if solver is not self._solver or self._holding is None:
             self._solver = solver
-            self._holding = HoldingPipeline(solver, self._backend)
+            self._holding = HoldingPipeline(solver, self._backend, hold_s=tuning.hold_s)
             # Renewed with the hold: the markers it was tracking belong
             # to the source being left.
             self._detector = solver.session_detector()
@@ -237,6 +237,7 @@ class MarkerSourceController:
         launcher=subprocess.Popen,
         overlay_extra_margin_px: int = 0,
         tracked_detection: bool = True,
+        tuning: Callable[[], Tuning] | None = None,
     ) -> None:
         # Unwrapped: smoothing belongs to each session (see
         # `session_pipeline`). This is only the pipeline's default
@@ -249,6 +250,12 @@ class MarkerSourceController:
         # Whether sessions detect through a `MarkerTracker` (see
         # `AimPipeline.session_detector`) or search every frame in full.
         self._tracked_detection = tracked_detection
+        # The tuning in effect, read by every session per frame. A
+        # callable, so the live store can swap its snapshot underneath
+        # (`settings.LiveSettings`); without one, the defaults, as one
+        # object so a session never sees it as a change.
+        defaults = Tuning()
+        self.tuning = tuning if tuning is not None else lambda: defaults
 
         self._source = MarkerSource.PRINTED
         self._layout = printed_layout
@@ -290,6 +297,10 @@ class MarkerSourceController:
     @property
     def source(self) -> MarkerSource:
         return self._source
+
+    @property
+    def overlay_extra_margin_px(self) -> int:
+        return self._overlay_extra_margin_px
 
     def state(self) -> dict:
         """The current state, with the overlay's liveness checked now.

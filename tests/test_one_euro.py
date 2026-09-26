@@ -102,3 +102,30 @@ def test_a_large_gap_does_not_overshoot_or_sweep_through_the_middle() -> None:
     assert late_progress >= early_progress or math.isclose(
         late_progress, early_progress
     )
+
+
+# --- Tuning while running ------------------------------------------------
+
+
+def test_tuning_mid_stream_does_not_move_a_steady_output() -> None:
+    filt = OneEuroFilter(min_cutoff=0.5, beta=1.0)
+    for i in range(10):
+        steady = filt.apply((0.4, 0.6), t=i / 30.0)
+
+    filt.tune(min_cutoff=5.0, beta=0.0)
+    after = filt.apply((0.4, 0.6), t=10 / 30.0)
+
+    assert after == steady
+
+
+def test_tuning_changes_how_later_samples_are_smoothed() -> None:
+    def step_after(min_cutoff: float) -> float:
+        filt = OneEuroFilter(min_cutoff=0.5, beta=0.0)
+        filt.apply((0.0, 0.0), t=0.0)
+        filt.tune(min_cutoff=min_cutoff, beta=0.0)
+        return filt.apply((1.0, 0.0), t=1 / 30.0)[0]
+
+    # A higher cutoff smooths less, so the output moves further toward
+    # the new sample -- the new value is in use from the next sample.
+    assert step_after(5.0) > step_after(0.5)
+    assert OneEuroFilter(min_cutoff=0.5, beta=2.0).beta == 2.0
