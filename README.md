@@ -525,7 +525,14 @@ project dependency:
 refinement enabled (`CORNER_REFINE_SUBPIX`, window one marker module
 wide); undistortPoints is still a separate Pipeline step and future
 work. `uv run python tests/measure_detection.py` prints corner and aim
-error per fixture, with and without refinement. Per-frame behaviour over a synthetic frame sequence is covered
+error per fixture, with and without refinement. Each streaming session
+detects through its own `MarkerTracker`: while its markers stay in view
+and at least 36px across, it searches a half-size frame and refines
+corners at full resolution, falling back to the full search on any miss
+and at least every 10 frames (on one core: 1080p 27 → 5 ms, 720p phone
+3.3 → 2.1 ms; ESP32-CAM-sized markers always get the full search).
+`--full-frame-detection` turns it off; `uv run python
+tests/measure_detection_speed.py` measures it. Per-frame behaviour over a synthetic frame sequence is covered
 below; what's still missing is a real video source, 1-euro filtering,
 and any wiring into `server.py`.
 

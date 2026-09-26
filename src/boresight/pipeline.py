@@ -21,12 +21,18 @@ as a `FrameDebug`. That is opt-in per call rather than a property of
 the pipeline, because one `AimPipeline` is shared by every streaming
 session: a flag on the instance would let one client's debug view
 change what another client's frames compute.
+
+Detection state that does belong to a session -- the `MarkerTracker`
+that lets a session search a smaller image while its markers stay in
+view -- arrives the same way the session's backend does: as an argument
+per call, from `session_detector()`. The pipeline creates it and never
+keeps it.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -34,7 +40,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from boresight.detect import DetectedMarker, detect_markers
+from boresight.detect import Detector, MarkerTracker, detect_markers
 from boresight.inject import CursorBackend
 from boresight.marker_map import MarkerMap
 from boresight.solve import (
@@ -51,7 +57,6 @@ from boresight.solve import (
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config" / "markers.toml"
 
 Point = tuple[float, float]
-Detector = Callable[[np.ndarray], Sequence[DetectedMarker]]
 
 
 class FrameOutcome(Enum):
@@ -228,10 +233,24 @@ class AimPipeline:
         marker_map: MarkerMap,
         backend: CursorBackend,
         detector: Detector = detect_markers,
+        tracking: bool = True,
     ) -> None:
         self._map = marker_map
         self._backend = backend
         self._detect = detector
+        self._tracking = tracking
+
+    def session_detector(self) -> Detector:
+        """A new detector for one session to pass to `process_frame`.
+
+        A `MarkerTracker` over the real detector, unless tracking is off
+        or this pipeline was built around a substitute detector -- a
+        test's stub has no image to track, and the tracker would bypass
+        it on every frame its own search trusted.
+        """
+        if self._tracking and self._detect is detect_markers:
+            return MarkerTracker()
+        return self._detect
 
     def process_frame(
         self,
@@ -239,6 +258,7 @@ class AimPipeline:
         *,
         debug: bool = False,
         backend: CursorBackend | None = None,
+        detector: Detector | None = None,
     ) -> FrameResult:
         """Solve one frame and emit its position.
 
@@ -246,12 +266,14 @@ class AimPipeline:
         the pipeline's own. An argument, like `debug`, so the pipeline
         still holds nothing per call: a caller that knows when the frame
         was captured hands over a backend already stamped with that time
-        (see `inject.stamped`).
+        (see `inject.stamped`). `detector` likewise: a session's own,
+        from `session_detector()`, used for this frame and not kept.
         """
         height, width = frame.shape[:2]
         image_size_px = (int(width), int(height))
 
-        detected = self._detect(_as_grayscale(frame))
+        detect = self._detect if detector is None else detector
+        detected = detect(_as_grayscale(frame))
         if not detected:
             return FrameResult(
                 outcome=FrameOutcome.NO_MARKERS,
@@ -372,17 +394,23 @@ def replay(frames_dir: str | Path, pipeline: AimPipeline) -> list[FrameResult]:
     sequence's `manifest.json` for the frame order; everything else in
     the manifest (ground-truth aim points, render settings) is the
     tests' business, not this function's.
+
+    A sequence is one session's worth of frames, so it is detected
+    through one session detector and read straight to greyscale, as the
+    server decodes a stream -- replaying a stream's frames must give
+    what streaming them gave.
     """
     frames_dir = Path(frames_dir)
     manifest = json.loads((frames_dir / "manifest.json").read_text())
 
+    detector = pipeline.session_detector()
     results = []
     for entry in manifest["frames"]:
         path = frames_dir / entry["file"]
-        frame = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        frame = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if frame is None:
             raise FileNotFoundError(f"could not read frame {path}")
-        results.append(pipeline.process_frame(frame))
+        results.append(pipeline.process_frame(frame, detector=detector))
     return results
 
 

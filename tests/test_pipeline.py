@@ -15,7 +15,7 @@ import json
 import numpy as np
 import pytest
 
-from boresight.detect import DetectedMarker
+from boresight.detect import DetectedMarker, MarkerTracker, detect_markers
 from boresight.inject import FakeCursorBackend
 from boresight.marker_map import MarkerMap, load_marker_map
 from boresight.pipeline import (
@@ -441,3 +441,41 @@ def test_the_debug_message_rounds_and_names_every_field(marker_map, backend) -> 
     )
     # Serializable as-is: it rides the existing telemetry message.
     assert json.loads(json.dumps(message)) == message
+
+
+# --- Per-session detector ---------------------------------------------
+
+
+def test_a_per_call_detector_is_used_and_not_kept(marker_map, backend) -> None:
+    pipeline = _pipeline(marker_map, backend, [])
+    session = _detections(marker_map, [0, 1, 2, 3])
+
+    with_session = pipeline.process_frame(_frame(), detector=lambda _frame: session)
+    without = pipeline.process_frame(_frame())
+
+    assert with_session.outcome is FrameOutcome.SOLVED
+    assert without.outcome is FrameOutcome.NO_MARKERS
+
+
+def test_a_substitute_detector_is_not_bypassed_by_tracking(marker_map, backend) -> None:
+    def stub(_frame):
+        return []
+
+    pipeline = AimPipeline(marker_map, backend, detector=stub)
+
+    assert pipeline.session_detector() is stub
+
+
+def test_the_real_detector_gets_a_tracker_per_session(marker_map, backend) -> None:
+    pipeline = AimPipeline(marker_map, backend)
+
+    first, second = pipeline.session_detector(), pipeline.session_detector()
+
+    assert isinstance(first, MarkerTracker)
+    assert first is not second
+
+
+def test_tracking_off_detects_every_frame_in_full(marker_map, backend) -> None:
+    pipeline = AimPipeline(marker_map, backend, tracking=False)
+
+    assert pipeline.session_detector() is detect_markers

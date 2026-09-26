@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from boresight.detect import MarkerTracker, detect_markers
 from boresight.inject import FakeCursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
 from boresight.marker_source import (
@@ -363,6 +364,52 @@ def test_a_marker_source_switch_keeps_the_filter_and_drops_the_hold() -> None:
         assert session._holding._pipeline is controller.pipeline  # noqa: SLF001
     finally:
         controller.shutdown()
+
+
+def test_each_session_tracks_markers_with_its_own_detector() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    first = controller.session_pipeline(FakeCursorBackend())
+    second = controller.session_pipeline(FakeCursorBackend())
+    first.process_frame(frame)
+    second.process_frame(frame)
+
+    assert isinstance(first._detector, MarkerTracker)  # noqa: SLF001
+    assert first._detector is not second._detector  # noqa: SLF001
+
+
+def test_a_marker_source_switch_starts_a_fresh_tracker() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+    session = controller.session_pipeline(FakeCursorBackend())
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    try:
+        session.process_frame(frame)
+        tracker = session._detector  # noqa: SLF001
+
+        controller.select(MarkerSource.SCREEN)
+        session.process_frame(frame)
+
+        assert isinstance(session._detector, MarkerTracker)  # noqa: SLF001
+        assert session._detector is not tracker  # noqa: SLF001
+    finally:
+        controller.shutdown()
+
+
+def test_tracked_detection_can_be_turned_off() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(),
+        PRINTED,
+        launcher=_stub(REPORTS_1920),
+        tracked_detection=False,
+    )
+    session = controller.session_pipeline(FakeCursorBackend())
+    session.process_frame(np.zeros((72, 128, 3), dtype=np.uint8))
+
+    assert session._detector is detect_markers  # noqa: SLF001
 
 
 def test_the_aim_filter_defaults_match_one_euro_filters_own_defaults(
