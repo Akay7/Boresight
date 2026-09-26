@@ -2,9 +2,9 @@
 
 ## Purpose
 
-TBD - defines the automated code quality gate (linting, formatting, and
-deprecation-warning enforcement) applied to the codebase, both at commit
-time and on demand.
+Defines the automated code quality gate (linting, formatting, tests and
+deprecation-warning enforcement) applied to the codebase at commit time,
+on demand, and in continuous integration.
 
 ## Requirements
 

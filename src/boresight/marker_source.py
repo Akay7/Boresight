@@ -600,7 +600,7 @@ class _PipeDrain:
             while stream is not None:
                 try:
                     line = stream.readline(OUTPUT_LINE_CHARS)
-                except ValueError, OSError:  # pragma: no cover - closed pipe
+                except (ValueError, OSError):  # pragma: no cover - closed pipe
                     break
                 if not line:
                     break

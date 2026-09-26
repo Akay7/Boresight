@@ -342,7 +342,7 @@ def _read_certificate(certfile: Path) -> _PersistedCertificate | None:
         names = certificate.extensions.get_extension_for_class(
             x509.SubjectAlternativeName
         ).value
-    except OSError, ValueError, x509.ExtensionNotFound:
+    except (OSError, ValueError, x509.ExtensionNotFound):
         return None
 
     # In the order written, which is most recent first: the host being

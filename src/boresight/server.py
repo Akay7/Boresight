@@ -613,7 +613,7 @@ async def run_frame_session(
             await asyncio.gather(receiver, return_exceptions=True)
             try:
                 await websocket.close(code=WS_INTERNAL_ERROR)
-            except RuntimeError, ConnectionError:
+            except (RuntimeError, ConnectionError):
                 pass
     finally:
         # Everything that must happen comes before the first await. This
@@ -732,7 +732,7 @@ def _handle_control(
     if message.get("type") == "rtt":
         try:
             stats.round_trip_ms = float(message["ms"])
-        except KeyError, TypeError, ValueError:
+        except (KeyError, TypeError, ValueError):
             return
     elif message.get("type") == "trigger":
         state = message.get("state")
@@ -885,7 +885,7 @@ async def _report(
 ) -> None:
     try:
         await websocket.send_json(stats.as_message(client_ms))
-    except RuntimeError, ConnectionError:
+    except (RuntimeError, ConnectionError):
         # The socket closed under us mid-report. The receive loop is
         # about to notice; nothing here needs to escalate.
         return

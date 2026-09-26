@@ -397,7 +397,7 @@ def _sheet_layout(request: Request) -> MarkerMap | None:
         return layout
     try:
         return load_marker_map(DEFAULT_CONFIG_PATH)
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
 
 

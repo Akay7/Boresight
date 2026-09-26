@@ -136,7 +136,7 @@ Release GPIO0 and reset the board to run the firmware.
 With **Connect over TLS** enabled, the build needs the server's certificate
 at `main/server_cert.pem` (gitignored) and fails without it:
 
-    cp ../../.boresight/cert.pem main/server_cert.pem
+    cp ../../.boresight/server.crt main/server_cert.pem
 
 The device trusts that certificate and nothing else. At boot it logs the
 certificate's SHA-256; the server prints the same figure under `sha256` at

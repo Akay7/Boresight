@@ -1,0 +1,92 @@
+# Lint, format and tests for the server; build and tests for the two C
+# components. The ESP-IDF/QEMU emulator tests are deliberately absent:
+# they need Docker and a firmware build, and stay opt-in
+# (BORESIGHT_EMULATOR_TESTS=1, see tests/test_firmware_emulator.py).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest supported (requires-python) and the one developed on
+        # (.python-version).
+        python-version: ["3.12", "3.14"]
+    env:
+      # Overrides .python-version, which pins 3.14 for local work.
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The test fixtures (JPEG, PNG, .blend) are in Git LFS.
+          lfs: true
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run python --version
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run pytest -q
+
+  vulkan-overlay:
+    name: Vulkan layer (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: build + tests
+            build-dir: build/ci
+            sanitize: ""
+          - name: ASan + UBSan
+            build-dir: build/asan
+            sanitize: address,undefined
+    defaults:
+      run:
+        working-directory: native/vulkan_overlay
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Vulkan headers and loader
+        # Without them CMakeLists.txt fetches Vulkan-Headers instead;
+        # installing keeps the build off the network.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvulkan-dev
+      - name: Configure
+        run: >
+          cmake -S . -B ${{ matrix.build-dir }}
+          -DCMAKE_BUILD_TYPE=Debug
+          -DBORESIGHT_OVERLAY_BUILD_TESTS=ON
+          -DBORESIGHT_OVERLAY_SANITIZE=${{ matrix.sanitize }}
+      - run: cmake --build ${{ matrix.build-dir }} --parallel
+      - run: ctest --test-dir ${{ matrix.build-dir }} --output-on-failure
+
+  firmware-host:
+    name: ESP32-CAM firmware host tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware/boresight-cam
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # test_proto reads a fixture frame from tests/fixtures (LFS).
+          lfs: true
+      - run: cmake -S test_host -B build-host
+      - run: cmake --build build-host --parallel
+      - run: ctest --test-dir build-host --output-on-failure

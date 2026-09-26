@@ -148,13 +148,14 @@ All markers sit on the bezel, outside the active panel. That has a
 consequence worth knowing before building the mount: **there is a
 minimum working distance**, and below it the system cannot work at all.
 Rendering the reference scene (1220x686mm panel, 80mm tags, 45 deg FOV,
-1280x720) from a range of distances while aiming at screen centre:
+1280x720, the fixtures' blur, noise and JPEG) from a range of distances
+while aiming at screen centre, with sub-pixel corner refinement:
 
 | Camera distance | Markers detected | Aim error |
 | --- | --- | --- |
 | 700 / 1000 / 1400 mm | 0 | nothing to solve from |
 | 1800 mm | 2 | 0.8 mm |
-| 2200 mm and beyond | 8 | 1.0-1.6 mm |
+| 2200 / 2600 / 3000 mm | 8 | 1.0 / 1.2 / 1.3 mm |
 
 Close in, the frustum is narrower than the panel, so every bezel marker
 falls outside it. No solver change fixes this — it is the case README's
@@ -162,19 +163,24 @@ falls outside it. No solver change fixes this — it is the case README's
 
 When only *some* markers are visible, accuracy is governed by their
 geometry relative to the aim point, not by their count. Sweeping every
-marker subset across every frame of the rendered fixture (4844
-combinations):
+marker subset across every frame of the rendered video fixture (20
+frames, all 8 markers in each: 5100 combinations):
 
 | Correspondences used | Aim error |
 | --- | --- |
-| all 7-8 markers | 1.4 mm median |
-| 4 corners (half the layout) | 1.5 mm median, 2.0 mm max |
-| 2 markers, opposite sides | 0.8 mm |
-| 2 markers, same edge | 17.6 mm median, 39.5 mm max |
-| 1 marker | 153 mm median, up to 2037 mm |
+| all 8 markers | 1.4 mm median, 1.5 mm max |
+| 4 corners (half the layout) | 1.4 mm median, 1.5 mm max |
+| 2 markers, opposite sides | 2.3 mm median, 6.1 mm max |
+| 2 markers, same edge | 7.9 mm median, 24.2 mm max |
+| 1 marker | 13.5 mm median, up to 132 mm |
 
-Two markers on opposite sides beat two markers sharing an edge by ~20x.
-The reason is extrapolation: the homography is fitted from the marker
+Two markers on opposite sides beat two markers sharing an edge by ~3-4x,
+and one marker alone is worse again by an order of magnitude at its
+worst. (Before sub-pixel corner refinement, the same sweep gave 17.5 mm
+median and 488 mm max for a shared edge, and up to 1017 mm for one
+marker: refinement shrinks the corner error that extrapolation
+amplifies, but cannot remove the amplification.) The reason is
+extrapolation: the homography is fitted from the marker
 corners, and pushing the image centre through it is interpolation only
 while the aim point lies inside those corners. Outside them, sub-pixel
 corner error is amplified without bound — and one 80mm marker spans
@@ -182,9 +188,9 @@ corner error is amplified without bound — and one 80mm marker spans
 
 So `solve.py` reports the conditioning of each solve: whether the aim
 point falls inside the convex hull of the correspondences, how far
-outside it is in mm, and their extent. Across all 4844 combinations,
-every solve whose aim point was *inside* the hull landed within 18.3mm,
-while flagged solves ranged up to 2037mm. Being flagged does not mean
+outside it is in mm, and their extent. Across all 5100 combinations,
+every solve whose aim point was *inside* the hull landed within 3.0mm,
+while flagged solves ranged up to 132mm. Being flagged does not mean
 the answer is wrong — close-range frames with one visible marker still
 land within a few mm, because a nearer marker occupies more pixels and
 localises better — it means the answer is unguaranteed.
@@ -257,7 +263,7 @@ if jitter is unacceptable.
 | Layer | Choice |
 | --- | --- |
 | Detection | OpenCV 4.7+, `objdetect` module (ArUco moved out of contrib in 4.7) |
-| Prototype language | Python 3.14 + numpy |
+| Prototype language | Python 3.12+ (developed on 3.14) + numpy |
 | Production language | C++20, CMake, vcpkg |
 | Package manager | `uv` |
 | Web server | FastAPI (Python); serves the phone client and the video/trigger RPC endpoint |
@@ -269,7 +275,7 @@ if jitter is unacceptable.
 | Firmware | None required for the phone path. The ESP32-CAM client, a Wi-Fi camera mirroring the phone architecture, is `firmware/boresight-cam/` (ESP-IDF v5.x, C). Still future and independently optional: a wired native-USB HID trigger needs an ESP32-S3 (TinyUSB) — the plain ESP32 in ESP32-CAM has no native USB. A camera-equipped ESP32-S3 board (e.g. XIAO ESP32S3 Sense) does both on one chip |
 | Config | TOML |
 | Testing | `pytest` |
-| Code quality | `ruff` (lint + format) + `pre-commit`, enforced at commit time |
+| Code quality | `ruff` (lint + format), `pytest` and `pre-commit`, enforced at commit time and in GitHub Actions CI |
 
 Detection runs ~3-6 ms at 640x480 in C++. Python adds 1-2 ms of overhead,
 which is acceptable for v1. Network hop time is on top of that and is the
@@ -307,10 +313,11 @@ unaffected. Trigger messages keep their order, so a quick tap whose
 
 Two paths for the aim coordinate, selectable by config flag.
 
-**Direct injection.** Windows `SendInput` with
-`MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE`, or a uinput virtual absolute
-pointer on Linux. Zero added latency, trivial to implement, works with
-emulators. Some fullscreen-exclusive titles ignore synthetic events —
+**Direct injection.** A uinput virtual absolute pointer on Linux, the
+only backend that exists. (A Windows backend over `SendInput` with
+`MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE` is planned, not implemented:
+the server does not run on Windows today.) Zero added latency, works
+with emulators. Some fullscreen-exclusive titles ignore synthetic events —
 confirmed on one real title (Blue Estate) that switches its own input
 handling to raw/relative mouse capture specifically in fullscreen,
 ignoring the OS cursor entirely; its own "Light Gun Mode" setting
@@ -354,11 +361,17 @@ trigger is not wired yet — see Milestones.
     uv run pre-commit install
 
 The second command is one-time per clone: it wires up `ruff` (lint +
-format) and a few hygiene checks as a git commit hook, so violations are
-caught before they land instead of drifting in silently. Run the same
-checks on demand (e.g. in CI) with:
+format), a few hygiene checks and the test suite (`uv run pytest -q`,
+about 12 seconds, only when a Python file is staged) as a git commit
+hook, so violations are caught before they land instead of drifting in
+silently. Run the same checks on demand with:
 
     uv run pre-commit run --all-files
+
+CI (`.github/workflows/ci.yml`) runs lint, format and the suite on
+Python 3.12 and 3.14, builds and tests the Vulkan layer natively and
+under ASan+UBSan, and runs the ESP32-CAM firmware's host tests. The
+QEMU emulator tests stay opt-in and are not run there.
 
 **`/dev/uinput` permission.** The server needs read/write access to
 `/dev/uinput`, which is root-only by default on most distros. Grant it
@@ -373,9 +386,12 @@ then re-login) and reload udev rules
 
 **Run**
 
-    uv run python -m boresight.server
+    uv run boresight
 
-Binds to `127.0.0.1:7331` only — fine for now since the only client is
+`boresight` is the console script `uv sync` installs; `uv run python -m
+boresight.server` is the same program and takes the same flags, as
+`boresight-overlay` and `python -m boresight.overlay` are for the
+on-screen markers. Binds to `127.0.0.1:7331` only — fine for now since the only client is
 `curl` on the same machine. This will need to change once the phone is
 actually in the loop: a phone on Wi-Fi is a separate device and can't
 reach loopback at all. Serving one means binding an address the LAN can
@@ -629,7 +645,7 @@ beta=1.0` — tuned by feel, not measurement, so what feels right depends
 on your own camera's noise floor and how fast you swing. Two env vars
 override either without a code change (read once, at server startup):
 
-    BORESIGHT_AIM_MIN_CUTOFF=5.0 uv run python -m boresight.server
+    BORESIGHT_AIM_MIN_CUTOFF=5.0 uv run boresight
 
 - **`BORESIGHT_AIM_MIN_CUTOFF`** (default `0.5`) — how hard a *held*
   aim is smoothed. This is the one to raise if the cursor visibly
@@ -712,7 +728,7 @@ There are two ways through:
 with. Plug the phone in and forward the port:
 
     adb reverse tcp:7331 tcp:7331
-    uv run python -m boresight.server
+    uv run boresight
 
 Then open `http://localhost:7331` on the phone. `localhost` is a secure
 context, so there is no certificate, no interstitial, and no Wi-Fi hop
@@ -720,7 +736,7 @@ in the latency you are trying to measure.
 
 **2. TLS over Wi-Fi** — how it is actually meant to be played:
 
-    uv run python -m boresight.server --host 0.0.0.0 --token-auto --tls
+    uv run boresight --host 0.0.0.0 --token-auto --tls
 
 which prints the exact URL to open, token included:
 
@@ -782,11 +798,6 @@ Once the phone connects, keep it:
 port to everything:
 
     sudo ufw allow from 192.168.1.0/24 to any port 7331 proto tcp
-
-**Windows** (the future `SendInput` path), in an elevated PowerShell:
-
-    New-NetFirewallRule -DisplayName "Boresight" -Direction Inbound `
-      -LocalPort 7331 -Protocol TCP -Action Allow -Profile Private
 
 Use whatever port you passed to `--port`; 7331 is only the default.
 
@@ -944,7 +955,7 @@ next to it.
 Start the server bound to the network, as for the phone. It prints the
 device's settings below the phone URL:
 
-    uv run python -m boresight.server --host 0.0.0.0 --token-auto
+    uv run boresight --host 0.0.0.0 --token-auto
 
     Open this on the phone:  http://192.168.1.20:7331/?token=xK3f...
 
@@ -1112,7 +1123,7 @@ zero detected markers below 1400mm. On-screen tags sit inside the
 panel, so a close camera keeps seeing them.
 
     uv sync --extra overlay
-    uv run python -m boresight.server
+    uv run boresight
 
 Then tap **On-screen** in the Markers row on the phone. The server
 starts the overlay, learns the display size from it, and switches the
@@ -1130,8 +1141,8 @@ that cannot will say so on the phone rather than failing quietly.
 You can also run the overlay yourself and select the layout at startup,
 which is what a scripted or headless deployment wants:
 
-    uv run python -m boresight.overlay          # one terminal
-    uv run python -m boresight.server --markers screen:1920x1080
+    uv run boresight-overlay                   # one terminal
+    uv run boresight --markers screen:1920x1080
 
 `--markers` takes `file` (the shipped printed layout, the default),
 `file:<path>` for one of your own, or `screen:<W>x<H>`. Printed and
@@ -1174,12 +1185,12 @@ reserved there.
 every side, on top of whatever was already found — zero by default, no
 effect unless set:
 
-    uv run python -m boresight.overlay --extra-margin-px 50
+    uv run boresight-overlay --extra-margin-px 50
 
 Threaded through the server too, for the normal (phone-driven) way of
 starting on-screen markers:
 
-    uv run python -m boresight.server --overlay-extra-margin-px 50
+    uv run boresight --overlay-extra-margin-px 50
 
 The CLI flag only sets a starting value, though — judging whether a tag
 now clears a taskbar means looking at the display, which is where the
@@ -1203,7 +1214,7 @@ own overlay.
 | Platform | Status |
 | --- | --- |
 | X11 | Supported |
-| Windows | Supported in code, **never yet run by anyone** |
+| Windows | **Not supported.** Boresight has no Windows cursor backend, so the server does not run there (planned, not implemented) |
 | Wayland — KDE, sway, Hyprland | Supported (layer-shell) |
 | Wayland — GNOME | **Not possible.** Mutter does not implement `wlr-layer-shell`, so no client can place a surface above other windows |
 | macOS | No backend |
@@ -1312,7 +1323,7 @@ a defect invisible to a test suite that always runs from a checkout.
           render.py           # painting them
           backend.py          # can this platform host an overlay?
           qt_backend.py       # the always-on-top, input-transparent window
-        inject.py             # uinput backend (+ future SendInput); SmoothingCursorBackend
+        inject.py             # uinput backend (Linux only); SmoothingCursorBackend
         one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
         shot.py               # firing at the named frame's unsmoothed aim
         shooter.py            # which session's aim drives the cursor
@@ -1412,7 +1423,7 @@ in, so the two sequences pair positionally.
       over the live display, always on top and transparent to mouse and
       keyboard, with the solver and the renderer sharing one layout
       function so they cannot disagree (see "On-screen markers") — X11
-      verified offscreen, never yet run against a camera or on Windows
+      verified offscreen, never yet run against a camera
 - [ ] Debug overlay with per-frame reprojection error
 - [x] 1-euro filter tuning: a `CursorBackend` decorator (`inject.py`'s
       `SmoothingCursorBackend`, over `one_euro.py`) smooths aim-derived
@@ -1422,7 +1433,7 @@ in, so the two sequences pair positionally.
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
       directly (uinput, Linux) — built ahead of the pipeline above as a
       standalone proof; not yet wired to real aim data or Mesen
-- [ ] SendInput injection (Windows), test in Mesen
+- [ ] (Planned, not implemented) Windows cursor injection via `SendInput`, test in Mesen
 - [ ] On-screen trigger button wired to click injection — the frame
       socket already reserves text messages for it, so it needs no
       second connection

@@ -21,3 +21,7 @@ firmware/*/dependencies.lock
 firmware/*/sdkconfig
 firmware/*/sdkconfig.old
 firmware/*/main/server_cert.pem
+
+# Git worktrees made by Claude Code for parallel agents. Each is a full
+# checkout of its own branch; none of it belongs in this one.
+.claude/worktrees/
