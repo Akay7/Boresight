@@ -45,6 +45,38 @@ jobs:
       - run: uv run ruff format --check
       - run: uv run pytest -q
 
+  python-cross-platform:
+    name: Python on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      # Only the platform-independent tests, not the whole suite: the
+      # video fixtures, the overlay's subprocess tests and the evdev
+      # tests assume Linux, and a job red for those reasons would hide
+      # a real regression here. This set covers the cursor backends
+      # (including the real Win32/Quartz layers, which only load on
+      # their own OS) and the server importing without Linux modules.
+      - run: >
+          uv run pytest -q
+          tests/test_inject_platforms.py
+          tests/test_platform_imports.py
+          tests/test_inject.py
+          tests/test_cursor_move.py
+          tests/test_shooter.py
+          tests/test_shot.py
+          tests/test_one_euro.py
+          tests/test_aim_hold.py
+          tests/test_packaging.py
+          tests/test_stream_codec.py
+
   vulkan-overlay:
     name: Vulkan layer (${{ matrix.name }})
     runs-on: ubuntu-latest

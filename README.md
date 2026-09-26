@@ -313,17 +313,24 @@ unaffected. Trigger messages keep their order, so a quick tap whose
 
 Two paths for the aim coordinate, selectable by config flag.
 
-**Direct injection.** A uinput virtual absolute pointer on Linux, the
-only backend that exists. (A Windows backend over `SendInput` with
-`MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE` is planned, not implemented:
-the server does not run on Windows today.) Zero added latency, works
-with emulators. Some fullscreen-exclusive titles ignore synthetic events —
+**Direct injection.** Chosen by platform: a uinput virtual absolute
+pointer on Linux, `SendInput` with `MOUSEEVENTF_ABSOLUTE |
+MOUSEEVENTF_VIRTUALDESK` on Windows (`inject_win32.py`), and Quartz
+`CGEvent`s on macOS (`inject_darwin.py`), both over plain `ctypes`.
+The Windows and macOS backends are unit-tested against fakes but not
+yet run on real hardware. On those two the cursor maps onto the primary
+display; on a multi-monitor desktop set `BORESIGHT_CURSOR_RECT=x,y,w,h`
+(pixels on Windows, points on macOS, in desktop coordinates) to the
+monitor the markers surround. macOS needs the Accessibility permission
+for the terminal (or Python) that starts the server; without it the
+server refuses to start and says where to grant it. Zero added latency,
+works with emulators. Some fullscreen-exclusive titles ignore synthetic events —
 confirmed on one real title (Blue Estate) that switches its own input
 handling to raw/relative mouse capture specifically in fullscreen,
 ignoring the OS cursor entirely; its own "Light Gun Mode" setting
 turned out to be the actual fix, not anything on Boresight's side.
 
-For a title where no such in-game setting exists, the Linux backend can
+For a title where no such in-game setting exists, every backend can
 also emit a relative delta alongside its normal absolute placement —
 **off by default, and not safe to enable casually.** Continuous
 relative deltas computed from a noisy tracked position accumulate
@@ -1214,10 +1221,10 @@ own overlay.
 | Platform | Status |
 | --- | --- |
 | X11 | Supported |
-| Windows | **Not supported.** Boresight has no Windows cursor backend, so the server does not run there (planned, not implemented) |
+| Windows | Untested. Qt's `WS_EX_TRANSPARENT` path should work, but has never been run; the cursor backend exists (see "Cursor injection") |
 | Wayland — KDE, sway, Hyprland | Supported (layer-shell) |
 | Wayland — GNOME | **Not possible.** Mutter does not implement `wlr-layer-shell`, so no client can place a surface above other windows |
-| macOS | No backend |
+| macOS | No overlay backend; it refuses to start. Use printed markers (the cursor backend works regardless) |
 
 Where it cannot work the overlay refuses to start and says why, rather
 than showing a window that renders but sits in the normal stacking
@@ -1323,7 +1330,9 @@ a defect invisible to a test suite that always runs from a checkout.
           render.py           # painting them
           backend.py          # can this platform host an overlay?
           qt_backend.py       # the always-on-top, input-transparent window
-        inject.py             # uinput backend (Linux only); SmoothingCursorBackend
+        inject.py             # backend by platform, uinput (Linux); SmoothingCursorBackend
+        inject_win32.py       # SendInput backend (Windows)
+        inject_darwin.py      # Quartz event backend (macOS)
         one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
         shot.py               # firing at the named frame's unsmoothed aim
         shooter.py            # which session's aim drives the cursor
@@ -1433,7 +1442,9 @@ in, so the two sequences pair positionally.
 - [x] Cursor injection scaffolding: FastAPI endpoint moves the OS cursor
       directly (uinput, Linux) — built ahead of the pipeline above as a
       standalone proof; not yet wired to real aim data or Mesen
-- [ ] (Planned, not implemented) Windows cursor injection via `SendInput`, test in Mesen
+- [x] Windows (`SendInput`) and macOS (Quartz) cursor injection, tested
+      against fakes of the OS calls on Linux
+- [ ] Run the Windows and macOS backends on real hardware, test in Mesen
 - [ ] On-screen trigger button wired to click injection — the frame
       socket already reserves text messages for it, so it needs no
       second connection
