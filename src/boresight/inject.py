@@ -137,8 +137,8 @@ class UinputCursorBackend:
             raise CursorBackendUnavailable(
                 "Could not open /dev/uinput. Check that the uinput kernel "
                 "module is loaded and this process has read/write access "
-                "to the device (see the change's setup notes for the "
-                "udev rule)."
+                'to the device (see "/dev/uinput permission" under '
+                '"Running the server" in README.md for the udev rule).'
             ) from exc
 
         try:

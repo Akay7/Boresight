@@ -115,6 +115,24 @@ int bsov_load(const char *path, bsov_canvas_t *out) {
     return 0;
 }
 
+int bsov_fits_extent(const bsov_canvas_t *canvas, uint32_t width, uint32_t height) {
+    if (!canvas || !canvas->pixels) {
+        return 0;
+    }
+    if (canvas->width != width || canvas->height != height) {
+        return 0;
+    }
+    if (canvas->rect_count > 0 && !canvas->rects) {
+        return 0;
+    }
+    for (uint32_t i = 0; i < canvas->rect_count; i++) {
+        if (!rect_is_valid(&canvas->rects[i], width, height)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 void bsov_free(bsov_canvas_t *canvas) {
     if (!canvas) {
         return;

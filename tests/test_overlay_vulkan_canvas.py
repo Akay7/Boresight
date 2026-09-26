@@ -89,6 +89,35 @@ def test_write_file_round_trips_through_disk(tmp_path) -> None:
     assert restored_rects == rectangles
 
 
+@pytest.mark.parametrize(
+    "rect",
+    [
+        (4, 0, 2, 1),  # past the right edge
+        (0, 4, 1, 2),  # past the bottom edge
+        (0, 0, 0, 1),  # empty
+        (0, 0, 1, 0),  # empty
+        (-1, 0, 2, 2),  # negative origin, which the u32 field cannot hold
+    ],
+)
+def test_write_file_refuses_a_rectangle_the_layer_would_reject(tmp_path, rect) -> None:
+    canvas = np.zeros((5, 5), dtype=np.uint8)
+    path = tmp_path / "canvas.bsov"
+
+    with pytest.raises(ValueError, match="rectangle"):
+        canvas_format.write_file(path, canvas, [(0, 0, 5, 5), rect])
+
+    assert not path.exists()
+
+
+def test_write_file_accepts_a_rectangle_touching_the_far_edges(tmp_path) -> None:
+    canvas = np.zeros((5, 5), dtype=np.uint8)
+    path = tmp_path / "canvas.bsov"
+
+    canvas_format.write_file(path, canvas, [(3, 4, 2, 1)])
+
+    assert canvas_format.unpack(path.read_bytes())[1] == [(3, 4, 2, 1)]
+
+
 # --- Rejects what it should ------------------------------------------
 
 

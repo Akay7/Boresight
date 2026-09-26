@@ -204,6 +204,67 @@ static void run_cases(void) {
     CHECK(load(case_path("does_not_exist")) != 0, "missing file rejected");
 }
 
+/* bsov_fits_extent: the check the layer applies against the swapchain
+ * extent before turning rects into vkCmdCopyImage regions. The canvases
+ * here are built by hand rather than through bsov_load, so the extent
+ * check is exercised on its own and cannot pass merely because the
+ * reader already rejected the bad input. */
+static void run_extent_cases(void) {
+    uint8_t pixels[64 * 32] = {0};
+    bsov_rect_t rects[] = {{0, 0, 8, 8}, {56, 24, 8, 8}, {0, 0, 64, 32}};
+    bsov_canvas_t c = {64, 32, 3, rects, pixels};
+
+    CHECK(bsov_fits_extent(&c, 64, 32), "canvas matching the extent fits (edge-touching rects)");
+    CHECK(!bsov_fits_extent(&c, 63, 32), "canvas wider than the swapchain rejected");
+    CHECK(!bsov_fits_extent(&c, 64, 31), "canvas taller than the swapchain rejected");
+    CHECK(!bsov_fits_extent(&c, 65, 32), "canvas narrower than the swapchain rejected");
+    CHECK(!bsov_fits_extent(&c, 64, 33), "canvas shorter than the swapchain rejected");
+    CHECK(!bsov_fits_extent(&c, 32, 64), "transposed extent rejected");
+
+    bsov_canvas_t no_rects = {64, 32, 0, NULL, pixels};
+    CHECK(bsov_fits_extent(&no_rects, 64, 32), "canvas with no rects fits");
+
+    bsov_rect_t past_right[] = {{57, 0, 8, 8}};
+    bsov_canvas_t c_right = {64, 32, 1, past_right, pixels};
+    CHECK(!bsov_fits_extent(&c_right, 64, 32), "rect past the extent's right edge rejected");
+
+    bsov_rect_t past_bottom[] = {{0, 25, 8, 8}};
+    bsov_canvas_t c_bottom = {64, 32, 1, past_bottom, pixels};
+    CHECK(!bsov_fits_extent(&c_bottom, 64, 32), "rect past the extent's bottom edge rejected");
+
+    bsov_rect_t wraps[] = {{0xFFFFFFF8u, 0, 16, 8}};
+    bsov_canvas_t c_wrap = {64, 32, 1, wraps, pixels};
+    CHECK(!bsov_fits_extent(&c_wrap, 64, 32), "rect whose x + w wraps rejected");
+
+    bsov_rect_t empty[] = {{0, 0, 0, 8}};
+    bsov_canvas_t c_empty = {64, 32, 1, empty, pixels};
+    CHECK(!bsov_fits_extent(&c_empty, 64, 32), "empty rect rejected");
+
+    bsov_rect_t one_bad[] = {{0, 0, 8, 8}, {60, 0, 8, 8}};
+    bsov_canvas_t c_mixed = {64, 32, 2, one_bad, pixels};
+    CHECK(!bsov_fits_extent(&c_mixed, 64, 32), "one out-of-extent rect rejects the canvas");
+
+    bsov_canvas_t c_no_pixels = {64, 32, 3, rects, NULL};
+    CHECK(!bsov_fits_extent(&c_no_pixels, 64, 32), "canvas without pixels rejected");
+
+    bsov_canvas_t c_no_rect_array = {64, 32, 3, NULL, pixels};
+    CHECK(!bsov_fits_extent(&c_no_rect_array, 64, 32), "rect_count without rects rejected");
+
+    CHECK(!bsov_fits_extent(NULL, 64, 32), "NULL canvas rejected");
+
+    /* And the path the layer actually takes: a file bsov_load accepts
+     * fits an extent of its own size, and nothing else. */
+    const char *p = case_path("valid");
+    bsov_canvas_t loaded = {0};
+    if (bsov_load(p, &loaded) == 0) {
+        CHECK(bsov_fits_extent(&loaded, 64, 32), "loaded canvas fits its own size");
+        CHECK(!bsov_fits_extent(&loaded, 1920, 1080), "loaded canvas rejected for another size");
+        bsov_free(&loaded);
+    } else {
+        CHECK(0, "valid canvas reloads for the extent check");
+    }
+}
+
 static void remove_cases(void) {
     static const char *names[] = {
         "valid", "no_rects", "trailing", "past_right", "past_bottom", "origin_out",
@@ -237,6 +298,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     run_cases();
+    run_extent_cases();
     remove_cases();
 
     if (g_failures) {

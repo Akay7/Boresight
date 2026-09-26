@@ -47,6 +47,18 @@ MAX_DIMENSION = 16384
 MAX_RECTS = 4096
 
 
+def _check_rectangle(rect: tuple[int, int, int, int], width: int, height: int) -> None:
+    """Raise unless `rect` is non-empty and wholly inside the canvas --
+    the same rule `bsov_load` and `bsov_fits_extent` apply in C."""
+    x, y, w, h = rect
+    # Python ints don't overflow, so `x + w` here is exactly the
+    # overflow-free comparison the C side does by subtraction.
+    if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > width or y + h > height:
+        raise ValueError(
+            f"invalid .bsov rectangle {tuple(rect)} for a {width}x{height} canvas"
+        )
+
+
 def pack(canvas: np.ndarray, rectangles: list[tuple[int, int, int, int]]) -> bytes:
     """Serialize a rendered canvas + rectangles to the `.bsov` wire format."""
     height, width = canvas.shape
@@ -85,14 +97,9 @@ def unpack(data: bytes) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
         raise ValueError("truncated .bsov data: fewer rectangles than rect_count")
     rectangles: list[tuple[int, int, int, int]] = []
     for _ in range(rect_count):
-        x, y, w, h = _RECT.unpack_from(data, offset)
-        # Python ints don't overflow, so `x + w` here is exactly the
-        # overflow-free comparison the C side does by subtraction.
-        if w == 0 or h == 0 or x + w > width or y + h > height:
-            raise ValueError(
-                f"invalid .bsov rectangle {(x, y, w, h)} for a {width}x{height} canvas"
-            )
-        rectangles.append((x, y, w, h))
+        rect = _RECT.unpack_from(data, offset)
+        _check_rectangle(rect, width, height)
+        rectangles.append(rect)
         offset += _RECT.size
 
     pixel_count = width * height
@@ -106,5 +113,13 @@ def unpack(data: bytes) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
 def write_file(
     path: Path, canvas: np.ndarray, rectangles: list[tuple[int, int, int, int]]
 ) -> None:
-    """Write `canvas`/`rectangles` to `path` in the `.bsov` format."""
+    """Write `canvas`/`rectangles` to `path` in the `.bsov` format.
+
+    Unlike `pack`, refuses a rectangle the layer would reject, so a bad
+    layout fails here, loudly, instead of as a line in the game's log
+    and a frame with no markers.
+    """
+    height, width = canvas.shape
+    for rect in rectangles:
+        _check_rectangle(rect, width, height)
     path.write_bytes(pack(canvas, rectangles))
