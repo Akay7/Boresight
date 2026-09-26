@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -106,6 +108,53 @@ def test_the_sheet_explains_cutting_outside_the_quiet_zone(
 
     assert "dashed line" in response
     assert "quiet zone" in response
+
+
+def test_each_tag_has_exactly_one_cell_of_white_with_labels_outside_it(
+    client: TestClient,
+) -> None:
+    """The quiet box holds the tag and nothing else; every label sits in
+    the cut-out around it."""
+    response = client.get("/markers").text
+
+    quiet = re.findall(
+        r'<div class="quiet" style="padding: ([0-9.]+)mm">(.*?)</div>', response
+    )
+    assert len(quiet) == 8
+    for padding, inside in quiet:
+        assert float(padding) == pytest.approx(80 / 6, abs=1e-3)
+        assert inside.startswith("<svg") and inside.endswith("</svg>")
+        assert "TOP" not in inside and "id " not in inside
+
+
+def _pages(html: str) -> list[str]:
+    return html.split('<div class="page">')[1:]
+
+
+def test_the_default_sheet_prints_two_tags_to_a_page(client: TestClient) -> None:
+    """Eight 80mm tags: an instructions page, then four pages of two."""
+    response = client.get("/markers").text
+
+    pages = _pages(response)
+    assert len(pages) == 4
+    assert [page.count("<svg") for page in pages] == [2, 2, 2, 2]
+    assert "break-before: page" in response
+    assert "@page { margin: 10mm; }" in response
+
+
+def test_a_tag_too_big_to_pair_prints_alone(client: TestClient) -> None:
+    response = client.get("/markers", params={"ids": "0,1,2", "size_mm": "120"})
+
+    assert [page.count("<svg") for page in _pages(response.text)] == [1, 1, 1]
+
+
+def test_the_steps_and_diagram_print_on_the_first_page(client: TestClient) -> None:
+    response = client.get("/markers").text
+
+    first_page = response.split('<div class="page">')[0]
+    assert '<div class="steps">' in first_page
+    assert 'class="diagram"' in first_page
+    assert "Two tags print to a page" in first_page
 
 
 def test_the_sheet_diagrams_the_layout(client: TestClient) -> None:

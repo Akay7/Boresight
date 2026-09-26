@@ -2,7 +2,7 @@
 
 Renders tags from the same dictionary `detect.py` decodes against, so
 anything served here is guaranteed detectable. Markers are built as
-vector SVG -- one <rect> per dictionary bit cell, including the quiet
+vector SVG -- one <rect> per dictionary bit cell, including the black
 border -- rather than a rasterized image, so print scale carries through
 the SVG's own millimeter-unit dimensions instead of depending on any
 DPI this code would otherwise have to choose.
@@ -29,19 +29,26 @@ router = APIRouter()
 DEFAULT_IDS = list(range(8))
 DEFAULT_SIZE_MM = 80.0
 
-# White paper around the tag, as a fraction of its edge. The detector
-# needs a quiet zone of about one bit cell (a sixth of the tag for
-# DICT_4X4_50); this is comfortably more, and matches the 120mm
-# cardstock the rendered fixtures put around their 80mm tags. Labels go
-# outside it, never inside.
-MARGIN_FRACTION = 0.25
-
-# Sizes the sheet offers. 120mm is the largest whose cut-out -- the tag
-# plus MARGIN_FRACTION of white on each side -- still fits across an A4
-# page's printable width; a larger one can still be asked for with
-# `size_mm` directly, and the picker says it will not fit.
+# Sizes the sheet offers. Every one fits across an A4 page's printable
+# width with its one-cell quiet zone (up to ~142mm does); a larger one
+# can still be asked for with `size_mm` directly, and the picker says it
+# will not fit.
 SIZE_PRESETS_MM = (40.0, 50.0, 60.0, 80.0, 100.0, 120.0)
-A4_PRINTABLE_WIDTH_MM = 190.0
+
+# A4 less the 10mm print margins the sheet asks for on every side.
+PRINT_MARGIN_MM = 10.0
+A4_PRINTABLE_WIDTH_MM = 210.0 - 2 * PRINT_MARGIN_MM
+A4_PRINTABLE_HEIGHT_MM = 297.0 - 2 * PRINT_MARGIN_MM
+
+# A cut-out, top to bottom: padding, the TOP mark, the white quiet zone
+# with the tag in it, the id line, the position line, padding. The text
+# bands are fixed in mm so a cut-out's height is known here, not left to
+# how a browser wraps text -- that is what lets the sheet pair them.
+CUTOUT_PADDING_MM = 1.0
+UP_BAND_MM = 6.0
+LABEL_BAND_MM = 5.0
+TAGS_PER_PAGE = 2
+PAGE_GAP_MM = 6.0
 
 # The range estimate shown next to each size. README's decode floor is
 # about 3px per cell, ~20px across a 6-cell tag; the camera is a typical
@@ -71,16 +78,31 @@ def _dictionary() -> cv2.aruco.Dictionary:
 def marker_grid(marker_id: int) -> np.ndarray:
     """The dictionary's bit grid for `marker_id`, one pixel per cell.
 
-    Includes the 1-cell quiet border on each side (e.g. 6x6 for
-    DICT_4X4_50's 4x4 payload), matching README's "Sizing" section.
+    Includes the 1-cell black border on each side (e.g. 6x6 for
+    DICT_4X4_50's 4x4 payload), matching README's "Sizing" section. The
+    white quiet zone the detector needs goes outside this grid.
     """
     dictionary = _dictionary()
     max_id = dictionary.bytesList.shape[0] - 1
     if not 0 <= marker_id <= max_id:
         raise ValueError(f"marker id must be between 0 and {max_id}")
 
-    side = dictionary.markerSize + 2
-    return cv2.aruco.generateImageMarker(dictionary, marker_id, side)
+    return cv2.aruco.generateImageMarker(dictionary, marker_id, _grid_cells())
+
+
+def _grid_cells() -> int:
+    """Cells across a tag: payload bits plus the black border."""
+    return _dictionary().markerSize + 2
+
+
+def quiet_zone_mm(size_mm: float) -> float:
+    """The white margin a tag needs: exactly one cell of its own grid.
+
+    One cell of white is what ArUco needs to find the black border's
+    outer edge; the sheet prints exactly that and puts every label
+    outside it.
+    """
+    return size_mm / _grid_cells()
 
 
 def marker_svg(marker_id: int, size_mm: float) -> str:
@@ -142,7 +164,42 @@ def estimated_range_m(size_mm: float) -> float:
 
 def fits_a4(size_mm: float) -> bool:
     """Whether one cut-out fits across an A4 page at 100% scale."""
-    return size_mm * (1 + 2 * MARGIN_FRACTION) <= A4_PRINTABLE_WIDTH_MM
+    return size_mm + 2 * quiet_zone_mm(size_mm) <= A4_PRINTABLE_WIDTH_MM
+
+
+def cutout_height_mm(size_mm: float) -> float:
+    """How tall one cut-out prints, labels and dashed box included."""
+    return (
+        size_mm
+        + 2 * quiet_zone_mm(size_mm)
+        + UP_BAND_MM
+        + 2 * LABEL_BAND_MM
+        + 2 * CUTOUT_PADDING_MM
+    )
+
+
+def paginate(sizes_mm: list[float]) -> list[list[int]]:
+    """Group cut-outs, by index into `sizes_mm`, onto printed A4 pages.
+
+    In order, at most TAGS_PER_PAGE to a page, stacked; a cut-out joins
+    the page before it only if the whole stack still fits the printable
+    height. So a tag too big to pair gets a page of its own.
+    """
+    pages: list[list[int]] = []
+    used = 0.0
+    for index, size in enumerate(sizes_mm):
+        height = cutout_height_mm(size)
+        if (
+            pages
+            and len(pages[-1]) < TAGS_PER_PAGE
+            and used + PAGE_GAP_MM + height <= A4_PRINTABLE_HEIGHT_MM
+        ):
+            pages[-1].append(index)
+            used += PAGE_GAP_MM + height
+        else:
+            pages.append([index])
+            used = height
+    return pages
 
 
 def resized_layout(layout: MarkerMap, size_mm: float) -> MarkerMap:
@@ -375,19 +432,37 @@ def _layout_diagram(layout: MarkerMap, marker_ids: list[int]) -> str:
 def _tag(marker_id: int, size_mm: float, label: str | None) -> str:
     """One cut-out: orientation mark, tag, and what it is.
 
-    The labels sit outside the tag's white margin, and the sheet tells
-    you to cut on the dashed line, so nothing printed here can encroach
-    on the quiet zone the detector needs.
+    The tag sits alone in a white box one grid cell wider on every side
+    -- the quiet zone -- and the TOP mark and labels go above and below
+    that box, never in it. The sheet tells you to cut on the dashed
+    line, outside the labels, so a cut can't reach the quiet zone either.
+    The box is given its computed height, border included, so the page
+    it was paired onto is the page it prints on.
     """
-    margin = size_mm * MARGIN_FRACTION
+    quiet = quiet_zone_mm(size_mm)
     detail = f'<div class="where">{label}</div>' if label else ""
     return (
-        f'<div class="marker" style="padding: {margin}mm">'
+        f'<div class="marker" style="height: {cutout_height_mm(size_mm):.3f}mm">'
         '<div class="up">&#9650; TOP</div>'
+        f'<div class="quiet" style="padding: {quiet:.3f}mm">'
         f"{marker_svg(marker_id, size_mm)}"
+        "</div>"
         f'<div class="label">id {marker_id} &middot; {size_mm:g}mm</div>'
         f"{detail}"
         "</div>"
+    )
+
+
+def _pages(cutouts: list[str], sizes_mm: list[float]) -> str:
+    """The cut-outs, TAGS_PER_PAGE to a printed page where they fit.
+
+    Each page starts with an explicit break, so page 1 stays the
+    instructions and every pair prints together, whatever the browser
+    would otherwise have split.
+    """
+    return "".join(
+        '<div class="page">' + "".join(cutouts[i] for i in page) + "</div>"
+        for page in paginate(sizes_mm)
     )
 
 
@@ -450,7 +525,7 @@ def get_marker_sheet(
         # a token-guarded server when the browser holds no session
         # cookie (cookies off, a saved page): an <img src> would then
         # carry no credential and every tag would come back 401.
-        tags = "".join(
+        cutouts = [
             _tag(
                 marker_id,
                 tag_size(marker_id),
@@ -459,7 +534,8 @@ def get_marker_sheet(
                 else position_label(layout.markers[marker_id], layout.screen_size_mm),
             )
             for marker_id in marker_ids
-        )
+        ]
+        tags = _pages(cutouts, [tag_size(marker_id) for marker_id in marker_ids])
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -476,6 +552,7 @@ def get_marker_sheet(
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<title>Boresight markers</title>"
         "<style>"
+        f"@page {{ margin: {PRINT_MARGIN_MM:g}mm; }}"
         "body { font-family: sans-serif; margin: 1.5em; }"
         ".instructions { font-weight: bold; }"
         "ol { max-width: 46em; }"
@@ -485,26 +562,42 @@ def get_marker_sheet(
         " text-align: center; font-weight: bold; }"
         ".diagram td.screen { background: #eee; font-weight: normal;"
         " color: #555; }"
-        ".marker { display: inline-block; margin: 0.5em; text-align: center;"
+        # Every vertical size in a cut-out is fixed in mm and matches
+        # cutout_height_mm, so the pairing decided in Python holds on paper.
+        ".page { break-before: page; page-break-before: always; }"
+        ".marker { display: block; width: fit-content; margin: 0 auto;"
+        f" box-sizing: border-box; padding: calc({CUTOUT_PADDING_MM:g}mm - 1px)"
+        f" {CUTOUT_PADDING_MM:g}mm; text-align: center;"
         " border: 1px dashed #bbb; page-break-inside: avoid;"
         " break-inside: avoid; }"
-        ".up { font-size: 9pt; letter-spacing: 0.15em; color: #444;"
-        " margin-bottom: 0.4em; }"
-        ".label { font-weight: bold; margin-top: 0.4em; }"
-        ".where { font-size: 9pt; color: #444; }"
+        f".marker + .marker {{ margin-top: {PAGE_GAP_MM:g}mm; }}"
+        f".up {{ height: {UP_BAND_MM:g}mm; line-height: {UP_BAND_MM:g}mm;"
+        " font-size: 9pt; letter-spacing: 0.15em; color: #444;"
+        " white-space: nowrap; }"
+        ".quiet { background: white; width: fit-content; margin: 0 auto;"
+        " line-height: 0; }"
+        ".quiet svg { display: block; }"
+        f".label {{ height: {LABEL_BAND_MM:g}mm; line-height: {LABEL_BAND_MM:g}mm;"
+        " font-size: 11pt; font-weight: bold; white-space: nowrap; }"
+        f".where {{ height: {LABEL_BAND_MM:g}mm; line-height: {LABEL_BAND_MM:g}mm;"
+        " font-size: 9pt; color: #444; white-space: nowrap; }"
+        "@media screen { .page { border-top: 1px solid #ddd;"
+        " margin-top: 1.5em; padding-top: 1.5em; } }"
         ".picker { margin: 1em 0; }"
         ".picker select, .picker button { font-size: 1em; }"
         ".hint { font-size: 9pt; color: #555; margin: 0.4em 0 0; }"
         ".mismatch { border: 2px solid #c60; background: #fff4e5;"
         " padding: 0.2em 1em; max-width: 46em; }"
-        "@media print { .noprint { display: none; } }"
+        "@media print { body { margin: 0; } .noprint { display: none; } }"
         "</style></head><body>"
         '<p class="instructions">Print at 100% / actual size'
-        " &mdash; never &quot;fit to page&quot;. Measure one tag against a"
+        " &mdash; never &quot;fit to page&quot; &mdash; with the default"
+        f" {PRINT_MARGIN_MM:g}mm margins. Two tags print to a page, after"
+        " this page of instructions. Measure one tag against a"
         f" ruler before cutting: {expected}.</p>"
         f"{picker}"
         f"{mismatch}"
-        '<div class="noprint">'
+        '<div class="steps">'
         "<ol>"
         "<li><b>Attach each tag upright</b>, with &#9650; TOP pointing up."
         " The detector reads a tag's rotation from its own bit pattern, so a"
@@ -516,9 +609,10 @@ def get_marker_sheet(
         " not decoration. Swap two and the solver still fits a homography"
         " perfectly well &mdash; it just aims somewhere else, with no"
         " error to warn you.</li>"
-        "<li><b>Cut on the dashed line</b>, not around the tag. The white"
-        " margin is the quiet zone the detector needs to find the tag's"
-        " edge.</li>"
+        "<li><b>Cut on the dashed line</b>, outside the labels, not around"
+        " the tag. The white border round the tag is exactly one cell of"
+        " its grid wide: that is the quiet zone the detector needs to find"
+        " the tag's edge, so keep it white and don't let tape cover it.</li>"
         "<li>Matte paper only. Gloss catches screen glare and blows out a"
         " corner of the tag.</li>"
         "<li>These positions and sizes come from the layout this server is"
