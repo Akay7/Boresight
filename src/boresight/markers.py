@@ -22,7 +22,6 @@ from fastapi.responses import HTMLResponse, Response
 
 from boresight.detect import DICTIONARY
 from boresight.marker_map import Marker, MarkerMap, load_marker_map
-from boresight.netaccess import TOKEN_QUERY_PARAM
 from boresight.pipeline import DEFAULT_CONFIG_PATH
 
 router = APIRouter()
@@ -224,17 +223,19 @@ def _parse_size(size_mm: str | None) -> float | None:
     return value
 
 
-def _with_token(request: Request, path: str, **params: object) -> str:
-    """A same-server link that still works on a token-guarded server."""
-    token = request.query_params.get(TOKEN_QUERY_PARAM)
-    if token:
-        params[TOKEN_QUERY_PARAM] = token
+def _link(path: str, **params: object) -> str:
+    """A same-server link.
+
+    Carries no token even on a guarded server: the request that
+    rendered this page either arrived with the session cookie or, with
+    the token in its URL, was answered by setting it. Copying the token
+    into links would only put it back into URLs and the access log.
+    """
     query = urlencode({k: v for k, v in params.items() if v is not None})
     return f"{path}?{query}" if query else path
 
 
 def _size_picker(
-    request: Request,
     layout: MarkerMap | None,
     chosen_mm: float | None,
     ids: str | None,
@@ -267,12 +268,6 @@ def _size_picker(
         )
 
     hidden = ""
-    token = request.query_params.get(TOKEN_QUERY_PARAM)
-    if token:
-        hidden += (
-            f'<input type="hidden" name="{TOKEN_QUERY_PARAM}" '
-            f'value="{html.escape(token, quote=True)}">'
-        )
     if ids is not None:
         hidden += (
             f'<input type="hidden" name="ids" value="{html.escape(ids, quote=True)}">'
@@ -293,7 +288,7 @@ def _size_picker(
 
 
 def _size_mismatch(
-    request: Request, layout: MarkerMap | None, chosen_mm: float | None, ids: list[int]
+    layout: MarkerMap | None, chosen_mm: float | None, ids: list[int]
 ) -> str:
     """Warn when the printed size is not the size the solver assumes."""
     if layout is None or chosen_mm is None:
@@ -310,7 +305,7 @@ def _size_mismatch(
         return ""
     layout_says = " / ".join(f"{size:g}mm" for size in differing)
     download = html.escape(
-        _with_token(request, "/markers/layout.toml", size_mm=f"{chosen_mm:g}"),
+        _link("/markers/layout.toml", size_mm=f"{chosen_mm:g}"),
         quote=True,
     )
     return (
@@ -451,9 +446,10 @@ def get_marker_sheet(
 
     try:
         # The SVG is inlined rather than fetched through <img>, so the
-        # page prints as one document. It also has to be: when the
-        # server is token-guarded, a browser requesting the src would
-        # send no token and every tag would come back 401.
+        # page prints as one document. It also keeps the sheet whole on
+        # a token-guarded server when the browser holds no session
+        # cookie (cookies off, a saved page): an <img src> would then
+        # carry no credential and every tag would come back 401.
         tags = "".join(
             _tag(
                 marker_id,
@@ -468,8 +464,8 @@ def get_marker_sheet(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     diagram = "" if layout is None else _layout_diagram(layout, marker_ids)
-    picker = _size_picker(request, layout, size_mm, raw_ids)
-    mismatch = _size_mismatch(request, layout, size_mm, marker_ids)
+    picker = _size_picker(layout, size_mm, raw_ids)
+    mismatch = _size_mismatch(layout, size_mm, marker_ids)
     sizes = sorted({tag_size(marker_id) for marker_id in marker_ids})
     expected = (
         f"it should be exactly {sizes[0]:g}mm on a side"

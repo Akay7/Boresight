@@ -194,6 +194,55 @@ def test_click_is_a_pen_tap_not_a_mouse_button(fake_uinput) -> None:
     assert pen.events.count(("SYN",)) == 2
 
 
+def _tip(fake: FakeUInput) -> list[tuple[int, int]]:
+    """Tip and position writes, in order, as (code, value)."""
+    codes = {
+        evdev.ecodes.BTN_TOUCH,
+        evdev.ecodes.ABS_X,
+    }
+    return [(c, value) for _, c, value in _writes(fake) if c in codes]
+
+
+def test_press_move_release_is_a_drag(fake_uinput) -> None:
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    pen.events.clear()
+
+    backend.press()
+    backend.move_absolute(1.0, 0.0)
+    backend.release()
+
+    touch, abs_x = evdev.ecodes.BTN_TOUCH, evdev.ecodes.ABS_X
+    # Down, moved with it down, then up: not a tap followed by a move.
+    assert _tip(pen) == [(touch, 1), (abs_x, 32767), (touch, 0)]
+
+
+def test_close_lifts_a_held_tip(fake_uinput) -> None:
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    backend.press()
+    pen.events.clear()
+
+    backend.close()
+
+    touches = [
+        value
+        for etype, c, value in _writes(pen)
+        if etype == evdev.ecodes.EV_KEY and c == evdev.ecodes.BTN_TOUCH
+    ]
+    assert touches == [0]
+
+
+def test_close_without_a_hold_does_not_touch_the_tip(fake_uinput) -> None:
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    pen.events.clear()
+
+    backend.close()
+
+    assert all(c != evdev.ecodes.BTN_TOUCH for _, c, _ in _writes(pen))
+
+
 def test_close_closes_both_devices(fake_uinput) -> None:
     backend = UinputCursorBackend()
 

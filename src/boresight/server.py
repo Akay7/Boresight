@@ -16,8 +16,9 @@ from fastapi import Depends, FastAPI, Request, WebSocket
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.requests import HTTPConnection
 
-from boresight.inject import CursorBackend, UinputCursorBackend
+from boresight.inject import CursorBackend, TriggerHold, UinputCursorBackend
 from boresight.layout_source import (
     DEFAULT_SPEC,
     LayoutSourceError,
@@ -31,9 +32,13 @@ from boresight.marker_source import (
 )
 from boresight.markers import router as markers_router
 from boresight.netaccess import (
+    TOKEN_COOKIE_MAX_AGE_S,
+    TOKEN_COOKIE_NAME,
     TOKEN_QUERY_PARAM,
     ServerConfig,
     certificate_fingerprint,
+    install_log_redaction,
+    origin_matches_host,
     presented_token,
     token_matches,
 )
@@ -62,6 +67,14 @@ WS_POLICY_VIOLATION = 1008
 # frame processing itself has stopped, so the client reconnects rather
 # than streaming into a session that will never answer.
 WS_INTERNAL_ERROR = 1011
+
+# A held trigger is let go once its session has sent nothing at all --
+# no frame, no message -- for this long. Both clients stream frames many
+# times a second while they are alive, so this is a stalled client (a
+# backgrounded tab, a hung board, a half-open socket pings have not
+# caught yet), not a long hold: holding fire while streaming is fine.
+HOLD_IDLE_RELEASE_S = 2.0
+HOLD_CHECK_INTERVAL_S = 0.5
 
 # How often a live session reports itself. Frequent enough to answer
 # "is the camera actually sending anything" at a glance, rare enough not
@@ -155,6 +168,7 @@ def create_app(
         )
         app.state.settings = ViewSettings()
         app.state.sessions = SessionRegistry()
+        app.state.trigger_hold = TriggerHold(app.state.cursor_backend)
         try:
             yield
         finally:
@@ -177,13 +191,30 @@ def create_app(
     async def require_token(request: Request, call_next):
         if not config.token:
             return await call_next(request)
-        token = presented_token(
-            request.query_params.get(TOKEN_QUERY_PARAM),
-            request.headers.get("authorization"),
-        )
-        if not token_matches(config.token, token):
+        if not _authorized(config.token, request):
             return JSONResponse({"detail": "invalid or missing token"}, status_code=401)
-        return await call_next(request)
+        response = await call_next(request)
+        # A valid token in the URL is traded for a cookie, so the page
+        # never has to put it in a URL again -- and so it stops landing
+        # in the access log with every fetch. Only for the query
+        # parameter: a bearer caller chose headers precisely to avoid
+        # cookies. `_authorized` passing with a query token present
+        # means that token is the valid one, since it takes precedence.
+        query_token = request.query_params.get(TOKEN_QUERY_PARAM)
+        if query_token and request.cookies.get(TOKEN_COOKIE_NAME) != query_token:
+            response.set_cookie(
+                TOKEN_COOKIE_NAME,
+                query_token,
+                max_age=TOKEN_COOKIE_MAX_AGE_S,
+                path="/",
+                # Only under TLS: plain HTTP is a supported path (`adb
+                # reverse` to localhost), and a Secure cookie would
+                # silently never be stored there.
+                secure=config.tls,
+                httponly=True,
+                samesite="strict",
+            )
+        return response
 
     app.include_router(markers_router)
 
@@ -246,16 +277,18 @@ def create_app(
 
     @app.websocket(FRAME_SOCKET_PATH)
     async def stream_frames(websocket: WebSocket) -> None:
-        # A browser cannot set headers on a WebSocket handshake, so the
-        # query parameter is not a convenience here -- it is the only
-        # mechanism the phone has.
-        token = websocket.query_params.get(TOKEN_QUERY_PARAM)
+        # A browser cannot set headers on a WebSocket handshake, but it
+        # sends the cookie the page's first request was issued. A device
+        # holds no cookies, so the query parameter stays for it.
         client = _describe(websocket)
-        if not token_matches(config.token, token):
+        if config.token and not _authorized(config.token, websocket):
             # Logged rather than silent: from the phone this looks like
             # the connection simply not working, and the cause is a URL
-            # missing its token.
-            logger.warning("frame socket refused: bad or missing token (%s)", client)
+            # missing its token or a cookie from a previous run.
+            logger.warning(
+                "frame socket refused: bad or missing token, or foreign origin (%s)",
+                client,
+            )
             await websocket.close(code=WS_POLICY_VIOLATION)
             return
         await websocket.accept()
@@ -269,6 +302,7 @@ def create_app(
             client,
             websocket.app.state.settings,
             websocket.app.state.sessions,
+            websocket.app.state.trigger_hold,
         )
 
     if WEB_DIR.is_dir():
@@ -277,6 +311,27 @@ def create_app(
         app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
 
     return app
+
+
+def _authorized(configured: str, connection: HTTPConnection) -> bool:
+    """Whether an HTTP request or socket handshake carries the token.
+
+    The origin check applies to the cookie alone: it is the one
+    credential a browser attaches on another page's behalf. A token in
+    the URL or a header was put there deliberately by whoever sent it.
+    """
+    query_token = connection.query_params.get(TOKEN_QUERY_PARAM)
+    authorization = connection.headers.get("authorization")
+    token = presented_token(
+        query_token, authorization, connection.cookies.get(TOKEN_COOKIE_NAME)
+    )
+    if not token_matches(configured, token):
+        return False
+    if presented_token(query_token, authorization) is not None:
+        return True
+    return origin_matches_host(
+        connection.headers.get("origin"), connection.headers.get("host")
+    )
 
 
 def _describe(websocket: WebSocket) -> str:
@@ -315,6 +370,7 @@ async def run_frame_session(
     address: str = "unknown address",
     settings: ViewSettings | None = None,
     sessions: SessionRegistry | None = None,
+    hold: TriggerHold | None = None,
 ) -> None:
     """One connection: receive frames, solve the newest, report back.
 
@@ -351,19 +407,22 @@ async def run_frame_session(
     last_logged = started
     seen_first_frame = False
     sessions = sessions if sessions is not None else SessionRegistry()
+    hold = hold if hold is not None else TriggerHold(backend)
+    last_heard = started
     session = sessions.register(address, stats, started)
 
     async def receive_loop() -> None:
-        nonlocal seen_first_frame
+        nonlocal seen_first_frame, last_heard
         while True:
             message = await websocket.receive()
+            last_heard = time.monotonic()
             if message["type"] == "websocket.disconnect":
                 return
             payload = message.get("bytes")
             if payload is None:
                 # Text: control and telemetry, including the trigger.
                 known_kind = stats.client_kind
-                _handle_control(stats, backend, message.get("text"), settings)
+                _handle_control(stats, hold, message.get("text"), settings)
                 if stats.client_kind != known_kind:
                     logger.info(
                         "client identified: %s (version %s, frames %s)",
@@ -464,6 +523,19 @@ async def run_frame_session(
 
     receiver = asyncio.create_task(receive_loop())
     processor = asyncio.create_task(process_loop())
+
+    async def hold_watchdog() -> None:
+        while True:
+            await asyncio.sleep(HOLD_CHECK_INTERVAL_S)
+            silent_for = time.monotonic() - last_heard
+            if silent_for > HOLD_IDLE_RELEASE_S and hold.release(stats):
+                logger.warning(
+                    "%s held the trigger but went silent for %.1fs; released it",
+                    session.label(),
+                    silent_for,
+                )
+
+    watchdog = asyncio.create_task(hold_watchdog())
     try:
         # Both, not just the receiver: a processor that dies while the
         # receiver carries on would leave a session that accepts frames
@@ -484,13 +556,22 @@ async def run_frame_session(
             except RuntimeError, ConnectionError:
                 pass
     finally:
-        receiver.cancel()
-        await asyncio.gather(receiver, return_exceptions=True)
+        # Everything that must happen comes before the first await. This
+        # handler can itself be cancelled while it cleans up -- a server
+        # shutting down cancels it, and Starlette's test client cancels
+        # right after sending the disconnect -- and a cancelled await
+        # would skip whatever follows it: a trigger left held down, a
+        # dead session still listed.
+        #
         # The client is gone: stop solving its frames and emit nothing
-        # further on its behalf. Both tasks and the slot go with the
+        # further on its behalf. The tasks and the slot go with the
         # connection, so the next one starts from zero.
+        receiver.cancel()
         processor.cancel()
-        await asyncio.gather(processor, return_exceptions=True)
+        watchdog.cancel()
+        # Whatever ended the session, a button it was holding goes up
+        # with it: nothing else would ever send the release.
+        hold.release(stats)
         sessions.unregister(session)
         elapsed = time.monotonic() - started
         if seen_first_frame:
@@ -513,11 +594,13 @@ async def run_frame_session(
                 session.label(),
                 elapsed,
             )
+        # Last, so being cancelled here costs nothing that matters.
+        await asyncio.gather(receiver, processor, watchdog, return_exceptions=True)
 
 
 def _handle_control(
     stats: SessionStats,
-    backend: CursorBackend,
+    hold: TriggerHold,
     text: str | None,
     settings: ViewSettings,
 ) -> None:
@@ -528,9 +611,12 @@ def _handle_control(
     each frame's timestamp; the phone subtracts and reports back what it
     measured, so the server's telemetry carries the number too.
 
-    The trigger carries no position of its own -- it fires wherever the
-    last processed frame left the cursor -- so there is nothing to
-    validate beyond the message's type.
+    The trigger carries no position of its own -- it acts wherever the
+    last processed frame left the cursor. Without a `state` it is one
+    click, exactly as before holds existed. `down` holds the button for
+    this session and `up` lets go, so frames arriving in between drag;
+    an unreadable `state` is ignored rather than guessed at. The count
+    is of presses: a click or a `down` that started a hold.
 
     `hello` names the kind of client on the other end. Like `rtt`, a
     field that cannot be read is ignored rather than guessed at: a
@@ -555,8 +641,15 @@ def _handle_control(
         except KeyError, TypeError, ValueError:
             return
     elif message.get("type") == "trigger":
-        backend.click()
-        stats.triggers += 1
+        state = message.get("state")
+        if state is None:
+            hold.click()
+            stats.triggers += 1
+        elif state == "down":
+            if hold.acquire(stats):
+                stats.triggers += 1
+        elif state == "up":
+            hold.release(stats)
     elif message.get("type") == "hello":
         kind = message.get("client")
         if not isinstance(kind, str) or not kind.strip():
@@ -737,6 +830,9 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
 
+    # Before `uvicorn.run`, whose logging setup keeps logger filters.
+    # The banner above is the one place the token is meant to appear.
+    install_log_redaction()
     uvicorn.run(
         create_app(
             marker_map_factory=layout_factory,

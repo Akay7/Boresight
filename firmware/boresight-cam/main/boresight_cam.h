@@ -38,6 +38,10 @@ esp_err_t buttons_start(void);
 
 esp_err_t link_start(const char *version, int width, int height);
 bool link_is_streaming(void);
+/* Changes every time a connection starts streaming, and is 0 before the
+ * first. Lets a caller tell whether something it sent went out on the
+ * connection that is open now. */
+uint32_t link_session_id(void);
 /* One binary message: 8-byte header, then the JPEG. ESP_ERR_TIMEOUT means
  * the frame was skipped without anything reaching the wire. */
 esp_err_t link_send_frame(double client_ms, const uint8_t *jpeg, size_t length,

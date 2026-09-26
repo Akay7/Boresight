@@ -4,7 +4,8 @@
  * An edge interrupt wakes a high-priority task, which samples the pin
  * every millisecond until the debouncer settles, then sleeps until the
  * next edge. The trigger's latency is therefore the debounce time plus at
- * most one frame send, never a frame period.
+ * most one frame send, never a frame period. The trigger sends `down` on
+ * press and `up` on release, so holding it holds the button.
  */
 #include <stddef.h>
 
@@ -26,6 +27,10 @@ typedef struct {
     int gpio;
     button_action_t action;
     bp_debouncer_t debouncer;
+    /* The link session a `down` went out on, 0 if none is outstanding.
+     * An `up` is sent only on that same session: after a reconnect the
+     * server has already let go, and the new session never held. */
+    uint32_t down_session;
 } button_t;
 
 /* One entry per wired button. Only the trigger has an action: any other
@@ -52,21 +57,47 @@ static bool is_pressed(const button_t *button)
     return gpio_get_level(button->gpio) == 0; /* active-low */
 }
 
-static void perform(const button_t *button)
+static void press(button_t *button)
 {
     switch (button->action) {
     case BUTTON_ACTION_TRIGGER:
-        /* Not queued for later: a click delivered after a reconnect lands
+        /* Not queued for later: a press delivered after a reconnect lands
          * wherever the cursor happens to be by then. */
         if (!link_is_streaming()) {
             ESP_LOGW(TAG, "%s pressed while disconnected: discarded", button->name);
             return;
         }
-        if (link_send_text(BP_TRIGGER_MESSAGE, CONFIG_BORESIGHT_SEND_TIMEOUT_MS + 50) !=
-            ESP_OK) {
+        /* Recorded even if the send fails: a failed send may still have
+         * reached the server, and an `up` it did not need is ignored,
+         * while a missing one would leave the button down. */
+        button->down_session = link_session_id();
+        if (link_send_text(BP_TRIGGER_DOWN_MESSAGE,
+                           CONFIG_BORESIGHT_SEND_TIMEOUT_MS + 50) != ESP_OK) {
             ESP_LOGW(TAG, "%s press was not delivered", button->name);
         }
         break;
+    }
+}
+
+static void release(button_t *button)
+{
+    switch (button->action) {
+    case BUTTON_ACTION_TRIGGER: {
+        uint32_t session = button->down_session;
+        button->down_session = 0;
+        if (session == 0 || session != link_session_id() || !link_is_streaming()) {
+            /* Never pressed on this connection, or the connection it was
+             * pressed on is gone and took the hold with it. */
+            return;
+        }
+        if (link_send_text(BP_TRIGGER_UP_MESSAGE,
+                           CONFIG_BORESIGHT_SEND_TIMEOUT_MS + 50) != ESP_OK) {
+            /* The server lets go on its own once this session ends or
+             * goes quiet; nothing better to do from here. */
+            ESP_LOGW(TAG, "%s release was not delivered", button->name);
+        }
+        break;
+    }
     }
 }
 
@@ -89,9 +120,15 @@ static void button_task(void *arg)
         now = boresight_now_ms();
         for (size_t i = 0; i < BUTTON_COUNT; i++) {
             button_t *button = &s_buttons[i];
-            if (bp_debounce_update(&button->debouncer, is_pressed(button), now) ==
-                BP_BUTTON_PRESSED) {
-                perform(button);
+            switch (bp_debounce_update(&button->debouncer, is_pressed(button), now)) {
+            case BP_BUTTON_PRESSED:
+                press(button);
+                break;
+            case BP_BUTTON_RELEASED:
+                release(button);
+                break;
+            case BP_BUTTON_NONE:
+                break;
             }
         }
     }

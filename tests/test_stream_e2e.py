@@ -33,6 +33,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from boresight import server
 from boresight.inject import FakeCursorBackend
 from boresight.marker_map import load_marker_map
 from boresight.pipeline import (
@@ -328,6 +329,124 @@ def test_repeated_trigger_messages_invoke_click_repeatedly(
         socket.receive_json()
 
     assert backend.clicks == 3
+
+
+# --- Trigger hold -------------------------------------------------------
+
+
+def _send_and_sync(socket, *messages: dict) -> dict:
+    """Send control messages, then a frame, and wait for its report.
+
+    Control messages are handled in arrival order ahead of the frame, so
+    the report proves they have all been acted on.
+    """
+    for message in messages:
+        socket.send_text(json.dumps(message))
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+    socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+    return socket.receive_json()
+
+
+DOWN = {"type": "trigger", "state": "down"}
+UP = {"type": "trigger", "state": "up"}
+
+
+def test_down_holds_and_up_releases(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        report = _send_and_sync(socket, DOWN)
+        assert backend.held
+        moves_while_held = len(backend.calls)
+        report = _send_and_sync(socket, UP)
+
+    assert moves_while_held > 0  # the frame moved the cursor with it held
+    assert (backend.presses, backend.releases, backend.clicks) == (1, 1, 0)
+    assert report["triggers"] == 1
+
+
+def test_repeated_down_and_stray_up_are_ignored(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, UP)
+        assert backend.releases == 0
+        report = _send_and_sync(socket, DOWN, DOWN)
+        assert backend.presses == 1
+        assert report["triggers"] == 1
+        _send_and_sync(socket, UP, UP)
+
+    assert backend.releases == 1
+
+
+def test_unknown_trigger_state_does_nothing(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        report = _send_and_sync(socket, {"type": "trigger", "state": "sideways"})
+
+    assert (backend.presses, backend.releases, backend.clicks) == (0, 0, 0)
+    assert report["triggers"] == 0
+
+
+def test_disconnecting_while_held_releases(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, DOWN)
+        assert backend.held
+
+    # The session's teardown runs as the socket closes; give it a moment.
+    deadline = time.monotonic() + 2.0
+    while backend.held and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not backend.held
+    assert backend.releases == 1
+
+
+def test_one_sessions_release_does_not_end_anothers_hold(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as first:
+        with client.websocket_connect(FRAME_SOCKET_PATH) as second:
+            _send_and_sync(first, DOWN)
+            _send_and_sync(second, DOWN)
+            _send_and_sync(first, UP)
+            assert backend.held
+            assert backend.presses == 1
+            _send_and_sync(second, UP)
+            assert not backend.held
+
+
+def test_a_silent_holding_session_is_released(
+    client: TestClient, backend: FakeCursorBackend, monkeypatch
+) -> None:
+    monkeypatch.setattr(server, "HOLD_IDLE_RELEASE_S", 0.2)
+    monkeypatch.setattr(server, "HOLD_CHECK_INTERVAL_S", 0.02)
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, DOWN)
+        deadline = time.monotonic() + 2.0
+        while backend.held and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # Released while the socket is still open, not by the close.
+        assert not backend.held
+
+
+def test_a_streaming_session_can_hold_past_the_idle_window(
+    client: TestClient, backend: FakeCursorBackend, monkeypatch
+) -> None:
+    monkeypatch.setattr(server, "HOLD_IDLE_RELEASE_S", 0.2)
+    monkeypatch.setattr(server, "HOLD_CHECK_INTERVAL_S", 0.02)
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, DOWN)
+        until = time.monotonic() + 0.6
+        while time.monotonic() < until:
+            _send_and_sync(socket)
+            time.sleep(0.05)
+        assert backend.held
+        assert backend.releases == 0
 
 
 def test_trigger_interleaved_with_frames_does_not_disturb_frame_handling(

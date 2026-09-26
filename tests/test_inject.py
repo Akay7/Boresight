@@ -1,4 +1,4 @@
-from boresight.inject import FakeCursorBackend, SmoothingCursorBackend
+from boresight.inject import FakeCursorBackend, SmoothingCursorBackend, TriggerHold
 from boresight.one_euro import OneEuroFilter
 
 
@@ -85,3 +85,80 @@ def test_click_after_a_filtered_move_lands_at_the_filtered_position() -> None:
     filtered_position = wrapped.calls[-1]
     assert filtered_position != (0.9, 0.5)
     assert wrapped.clicks == 1
+
+
+# --- press / release ---------------------------------------------------
+
+
+def test_press_and_release_are_recorded_without_a_real_device() -> None:
+    backend = FakeCursorBackend()
+
+    backend.press()
+    assert backend.held
+    backend.release()
+
+    assert (backend.presses, backend.releases, backend.clicks) == (1, 1, 0)
+    assert not backend.held
+
+
+def test_press_and_release_reach_the_wrapped_backend_untouched() -> None:
+    wrapped = FakeCursorBackend()
+    smoothing = SmoothingCursorBackend(wrapped)
+
+    smoothing.press()
+    smoothing.move_absolute(0.4, 0.6)
+    smoothing.release()
+
+    assert (wrapped.presses, wrapped.releases) == (1, 1)
+    assert wrapped.calls == [(0.4, 0.6)]
+
+
+# --- TriggerHold -------------------------------------------------------
+
+
+def test_hold_presses_once_and_releases_on_the_last_holder() -> None:
+    backend = FakeCursorBackend()
+    hold = TriggerHold(backend)
+    a, b = object(), object()
+
+    assert hold.acquire(a)
+    assert hold.acquire(b)
+    assert backend.presses == 1
+
+    assert hold.release(a)
+    assert backend.held  # b still holds
+    assert hold.release(b)
+    assert (backend.presses, backend.releases) == (1, 1)
+
+
+def test_hold_is_idempotent_per_owner() -> None:
+    backend = FakeCursorBackend()
+    hold = TriggerHold(backend)
+    owner = object()
+
+    assert hold.acquire(owner)
+    assert not hold.acquire(owner)
+    assert hold.release(owner)
+    assert not hold.release(owner)
+
+    assert (backend.presses, backend.releases) == (1, 1)
+
+
+def test_releasing_a_hold_it_never_took_does_nothing() -> None:
+    backend = FakeCursorBackend()
+    hold = TriggerHold(backend)
+    hold.acquire(object())
+
+    assert not hold.release(object())
+    assert backend.releases == 0
+
+
+def test_click_while_held_does_not_lift_the_button() -> None:
+    backend = FakeCursorBackend()
+    hold = TriggerHold(backend)
+    hold.acquire(object())
+
+    hold.click()
+
+    assert backend.clicks == 0
+    assert backend.held

@@ -87,10 +87,10 @@
         regression in direct positioning from adding the click device.
 - [x] 5.2 Classification regression confirmed (see 5.1) -- implemented
       the two-device fallback from design.md; re-verified per 5.1
-- [ ] 5.3 Run the server, open the client on a phone, start streaming,
+- [x] 5.3 Run the server, open the client on a phone, start streaming,
       press the trigger, and confirm a left-click lands at the phone's
       current aim point (e.g. observable in a text field's cursor
       placement or a lightgun-aware test target) -- needs a real phone
       and display, not available in this environment
-- [ ] 5.4 Confirm the phone's "Shots" counter increments on each press
+- [x] 5.4 Confirm the phone's "Shots" counter increments on each press
       -- same hardware dependency as 5.3

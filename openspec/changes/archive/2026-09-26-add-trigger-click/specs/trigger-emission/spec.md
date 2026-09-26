@@ -1,10 +1,16 @@
+## Purpose
+
+Turns a trigger pull reported by a client into a click at the current
+aim point, over the connection the client already streams frames on.
+
 ## ADDED Requirements
 
 ### Requirement: A trigger control message fires a click
 The server SHALL treat a `{"type": "trigger"}` JSON text message on the
 frame WebSocket as a request to click at the cursor's current position,
 and SHALL invoke the cursor backend's click operation exactly once per
-such message received. The click carries no position of its own — it
+such message received, except while the primary button is already held
+down (see trigger-hold), when there is nothing further to press. The click carries no position of its own — it
 fires wherever the most recently processed frame last placed the
 cursor — since the trigger and the aim point travel as independent
 events on the same connection.

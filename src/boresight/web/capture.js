@@ -55,6 +55,9 @@ const state = {
   // What the camera actually granted, kept so the server's decoded
   // frame size can be compared against it rather than assumed equal.
   cameraSize: null,
+  // Whether this page has told the server the trigger is down. Guards
+  // against a second `down` and against an `up` for nothing.
+  triggerHeld: false,
 };
 
 function show(kind, text) {
@@ -116,18 +119,29 @@ if (!cameraApiAvailable()) {
 
 // --- Connection ------------------------------------------------------
 
+// The token arrives once, in the URL the server printed. The response
+// to that request set it as an HttpOnly cookie, which the browser now
+// sends on every fetch and on the socket handshake -- so take it out of
+// the address bar (and with it, history, screenshots and a shared tab)
+// before anything else happens. Everything else in the address stays.
+(function forgetTokenInAddress() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("token")) return;
+  params.delete("token");
+  const query = params.toString();
+  history.replaceState(
+    history.state,
+    "",
+    location.pathname + (query ? `?${query}` : "") + location.hash,
+  );
+})();
+
 // Every link and socket on this page is built from where the page was
 // loaded, not hardcoded: the address the phone opened is by definition
-// one it can reach, and the token rides along on the same URL.
-function currentToken() {
-  return new URLSearchParams(location.search).get("token");
-}
-
+// one it can reach. No token on any of them -- the cookie carries it,
+// and a token in a URL is a token in the server's access log.
 function sameOriginUrl(path) {
-  const url = new URL(path, location.href);
-  const token = currentToken();
-  if (token) url.searchParams.set("token", token);
-  return url;
+  return new URL(path, location.href);
 }
 
 function socketUrl() {
@@ -136,8 +150,7 @@ function socketUrl() {
   return url.toString();
 }
 
-// Carrying the token matters: without it the link 401s, and it is
-// guarded exactly when the server is reachable from this phone.
+// Built the same way as every other URL on the page.
 els["marker-sheet"].href = sameOriginUrl("markers").toString();
 
 // --- Marker source ---------------------------------------------------
@@ -585,7 +598,11 @@ function connect() {
       set("stat-connection", `closed (${event.code})`);
       stop();
       if (event.code === 1008) {
-        show("error", "Rejected: missing or invalid token. Reopen the exact URL the server printed.");
+        show(
+          "error",
+          "Rejected: missing or invalid token. Reopen the exact URL the server " +
+            "printed -- if it restarted, its token may have changed.",
+        );
       } else if (event.code === 1011) {
         show("error", "The server stopped processing frames (see its log). Press Start to reconnect.");
       } else if (event.code !== 1000) {
@@ -765,6 +782,9 @@ async function captureAndSend() {
 }
 
 function stop() {
+  // While the socket is still open, so the server hears it. The server
+  // would release on the close anyway; this makes it explicit.
+  releaseTrigger();
   if (state.timer) clearInterval(state.timer);
   state.timer = null;
   if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
@@ -860,12 +880,39 @@ els.start.addEventListener("click", async () => {
   }
 });
 
+// Down on press, up on release, so holding the trigger holds the
+// button and aim movement in between drags; a quick tap is a click.
+//
 // pointerdown rather than click: click waits for pointerup and, on
 // touch, the browser's tap-recognition delay -- a trigger should fire
 // the instant it's pressed. preventDefault plus touch-action: none (in
 // CSS) stops the browser from treating the press as the start of a
-// scroll/zoom gesture instead of a tap on the button.
+// scroll/zoom gesture instead of a tap on the button. Pointer capture
+// keeps the release coming to this button even if the finger slides
+// off it.
 els.trigger.addEventListener("pointerdown", (event) => {
   event.preventDefault();
-  send(JSON.stringify({ type: "trigger" }));
+  if (state.triggerHeld) return;
+  els.trigger.setPointerCapture(event.pointerId);
+  state.triggerHeld = true;
+  els.trigger.classList.add("held");
+  send(JSON.stringify({ type: "trigger", state: "down" }));
 });
+
+// Every way a press can end sends the release: a stuck button would
+// turn all further aiming into a drag.
+function releaseTrigger() {
+  if (!state.triggerHeld) return;
+  state.triggerHeld = false;
+  els.trigger.classList.remove("held");
+  send(JSON.stringify({ type: "trigger", state: "up" }));
+}
+
+for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  els.trigger.addEventListener(type, releaseTrigger);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseTrigger();
+});
+// A long press would otherwise open the browser's context menu.
+els.trigger.addEventListener("contextmenu", (event) => event.preventDefault());

@@ -36,7 +36,12 @@ void bp_pack_header(double client_ms, uint8_t out[BP_HEADER_SIZE]);
  */
 #define BP_CLIENT_KIND "esp32-cam"
 
+/* A plain trigger is one click. Down and up hold the button between them,
+ * which is what this firmware sends; the plain form is kept for the
+ * wire-format test and older servers' documentation. */
 extern const char BP_TRIGGER_MESSAGE[];
+extern const char BP_TRIGGER_DOWN_MESSAGE[];
+extern const char BP_TRIGGER_UP_MESSAGE[];
 
 int bp_format_hello(char *out, size_t size, const char *version, int width,
                     int height);
@@ -45,12 +50,13 @@ int bp_format_rtt(char *out, size_t size, double ms);
 /* --- Button debouncing --------------------------------------------------
  *
  * Integrating debouncer: the input must read the same level for
- * `debounce_ms` before it is believed. Only a debounced released->pressed
- * transition is an event; release, hold and bounce are not.
+ * `debounce_ms` before it is believed. Each debounced transition is one
+ * event -- pressed or released; hold and bounce are not events.
  */
 typedef enum {
     BP_BUTTON_NONE = 0,
     BP_BUTTON_PRESSED,
+    BP_BUTTON_RELEASED,
 } bp_button_event_t;
 
 typedef struct {
@@ -61,7 +67,8 @@ typedef struct {
 } bp_debouncer_t;
 
 /* `pressed_now` seeds the stable state, so a button held at boot does not
- * fire until it has been released and pressed again. */
+ * fire until it has been released and pressed again. Its release is still
+ * reported; the caller ignores a release it never saw pressed. */
 void bp_debounce_init(bp_debouncer_t *debouncer, uint32_t debounce_ms,
                       bool pressed_now, uint32_t now_ms);
 

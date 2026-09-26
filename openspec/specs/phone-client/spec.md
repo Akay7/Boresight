@@ -247,3 +247,103 @@ and never substitutes for whether the aim point lay within the markers.
 - **THEN** the client displays the reprojection error, and continues to
   display whether the aim point was extrapolated beyond the visible
   markers
+
+### Requirement: The client keeps the token out of its URLs
+Once loaded, the client SHALL remove the token from the address shown
+in the browser, and SHALL NOT put the token on the URL of any request
+it makes — page resources, control requests, the marker-sheet link, or
+the frame socket — relying on the session cookie the server issued
+instead. A URL is copied into browser history, server logs and
+screenshots; a cookie is not. Where the server refuses the frame
+socket for want of a valid credential, the client SHALL say so and
+direct the person to reopen the URL the server printed, since a stale
+cookie from an earlier server run looks exactly like a missing one.
+
+#### Scenario: The address bar is cleaned after load
+- **WHEN** the client page is opened from a URL carrying the token
+- **THEN** the address shown in the browser no longer carries the token,
+  and every other part of the address is preserved
+
+#### Scenario: Requests carry no token in their URLs
+- **WHEN** the client fetches its script, reads or changes a setting, or
+  opens the frame socket
+- **THEN** none of those request URLs carries the token, and each is
+  authorized by the session cookie
+
+#### Scenario: A refused socket explains how to recover
+- **WHEN** the server closes the frame socket with a policy-violation
+  status
+- **THEN** the page states that the credential was missing or invalid
+  and to reopen the exact URL the server printed
+
+### Requirement: The on-screen trigger is held while it is pressed
+The client SHALL send a trigger `down` message when the trigger control
+is pressed and a trigger `up` message when it is released, so holding
+the control holds the button and a quick tap is a click. The client
+SHALL send `up` for a held trigger whenever the press ends in any other
+way: the pointer is cancelled or its capture is lost, the page is
+hidden, or streaming stops. The client SHALL NOT send a second `down`
+while the trigger is already held, nor an `up` when it is not, and
+holding the control SHALL NOT open the browser's long-press menu or
+select text.
+
+#### Scenario: Holding the trigger holds the button
+- **WHEN** the player presses the trigger, keeps it pressed, and later
+  lets go
+- **THEN** the client sends one `down` at the press and one `up` at the
+  release
+
+#### Scenario: Leaving the page releases the trigger
+- **WHEN** the trigger is held and the page is hidden or the pointer is
+  cancelled
+- **THEN** the client sends `up`
+
+#### Scenario: Stopping releases the trigger
+- **WHEN** the trigger is held and streaming is stopped
+- **THEN** the client sends `up` before the connection is closed
+
+### Requirement: The client can adjust the on-screen overlay's manual margin
+The client SHALL let the person holding the phone increase or decrease
+the on-screen overlay's manual panel-avoidance margin, and SHALL show
+its current value. The control belongs here for the same reason marker
+source selection does: judging whether a tag now clears a taskbar
+requires looking at the display, which is where the person holding the
+phone is standing, not at the PC's own keyboard.
+
+#### Scenario: The current margin is visible on the phone
+- **WHEN** the client page is open
+- **THEN** it shows the on-screen overlay's currently configured margin
+
+#### Scenario: Adjusting the margin takes effect without reconnecting
+- **WHEN** the person adjusts the margin while streaming
+- **THEN** the new value is sent and the displayed value updates,
+  without the video connection being restarted
+
+### Requirement: An on-screen trigger sends trigger events on the frame connection
+The client SHALL display a trigger control whose presses are sent as
+trigger messages over the existing frame connection, requiring no
+second connection or endpoint. Which messages a press and a release send
+is specified by the trigger-hold capability. The control SHALL be
+disabled until streaming has started, since there is no connection to
+send it on before then.
+
+#### Scenario: Pressing the trigger uses the existing connection
+- **WHEN** the client is streaming and the player presses the trigger
+  control
+- **THEN** the client sends its trigger message on the existing frame
+  WebSocket connection, and opens no other connection
+
+#### Scenario: The trigger is unusable before streaming starts
+- **WHEN** the client has not yet started streaming
+- **THEN** the trigger control is disabled and pressing it sends
+  nothing
+
+### Requirement: Trigger telemetry is visible on the phone
+The client SHALL display the count of trigger events the server has
+acknowledged, using the same telemetry channel other session counters
+already arrive on, so the player can confirm a press reached the
+server.
+
+#### Scenario: Acknowledged trigger count is displayed
+- **WHEN** the server reports a trigger count in a stats message
+- **THEN** the client updates the displayed count to match

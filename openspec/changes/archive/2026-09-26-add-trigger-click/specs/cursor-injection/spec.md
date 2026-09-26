@@ -3,11 +3,12 @@
 ### Requirement: The cursor backend supports a discrete click
 The cursor backend interface SHALL expose a click operation, distinct
 from absolute movement, that presses and releases the primary button at
-the cursor's current position. On Linux, this SHALL be implemented via
-the same `uinput` virtual device already used for positioning, using a
-button code distinct from the one `move_absolute` uses internally, so a
-click is distinguishable from the touch events positioning already
-generates on every call.
+the cursor's current position. On Linux, the click SHALL be delivered on
+the same pointer that absolute movement positions, so that it lands
+where the cursor is shown, including under a Wayland compositor where
+each input device can have its own pointer position. The button SHALL
+never go down as a side effect of movement, so positioning alone never
+clicks.
 
 #### Scenario: A click presses and releases the primary button
 - **WHEN** the cursor backend's click operation is invoked

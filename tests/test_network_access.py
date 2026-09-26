@@ -9,6 +9,7 @@ identically to a closed one from the operator's chair.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -17,10 +18,15 @@ from starlette.websockets import WebSocketDisconnect
 
 from boresight.inject import FakeCursorBackend
 from boresight.netaccess import (
+    TOKEN_COOKIE_NAME,
     InsecureConfigurationError,
     ServerConfig,
+    TokenRedactionFilter,
+    install_log_redaction,
     is_loopback,
+    origin_matches_host,
     presented_token,
+    redact_token,
     resolve_certificate,
     token_matches,
 )
@@ -99,32 +105,43 @@ def test_a_valid_token_is_served_normally(backend: FakeCursorBackend) -> None:
 def test_the_client_page_links_to_the_marker_sheet(
     backend: FakeCursorBackend,
 ) -> None:
-    """The link is on the page, but its href is filled in by the client
-    script so the token survives the click. A static href would 401
-    exactly when the server is guarded, which is whenever the phone can
-    reach it at all -- so assert both halves: the link exists, and its
-    destination is reachable with the token."""
+    """The link is on the page and carries no token -- the cookie set
+    by loading the page authorizes it. A guarded server is the one the
+    phone can reach at all, so assert both halves: the link exists, and
+    its destination is reachable by the browser that loaded the page."""
     with _client(backend, TOKEN) as client:
         page = client.get(f"/?token={TOKEN}").text
-        script = client.get(f"/capture.js?token={TOKEN}").text
+        script = client.get("/capture.js").text
 
         assert 'id="marker-sheet"' in page
         assert 'sameOriginUrl("markers")' in script
-        assert client.get(f"/markers?token={TOKEN}").status_code == 200
+        assert client.get("/markers").status_code == 200
 
 
 def test_the_client_page_loads_its_own_script_through_the_guard(
     backend: FakeCursorBackend,
 ) -> None:
-    """The page can't rely on sameOriginUrl() to fetch capture.js -- it
-    hasn't loaded yet. A static <script src="capture.js"> would 401
-    exactly when the server is guarded, which is always, over Wi-Fi --
-    so the page must carry the token into that request itself."""
+    """capture.js is guarded like everything else, and the page loads it
+    with a plain src: the response to the page itself set the cookie, so
+    the script request is authorized without the token in its URL --
+    where it would otherwise land in the access log once per load."""
     with _client(backend, TOKEN) as client:
         page = client.get(f"/?token={TOKEN}").text
 
-        assert '<script src="capture.js">' not in page
-        assert "capture.js?token=" in page
+        assert '<script src="capture.js"></script>' in page
+        assert "token=" not in page
+        assert client.get("/capture.js").status_code == 200
+
+
+def test_the_client_script_puts_no_token_in_urls(backend: FakeCursorBackend) -> None:
+    """Source-level, since there is no browser here: the script removes
+    the token from the address bar and never appends one to a request."""
+    with _client(backend, TOKEN) as client:
+        client.get(f"/?token={TOKEN}")
+        script = client.get("/capture.js").text
+
+    assert "history.replaceState" in script
+    assert "searchParams.set(" not in script
 
 
 def test_the_client_page_has_an_overlay_margin_control(
@@ -158,6 +175,284 @@ def test_a_bearer_header_is_accepted_for_http(backend: FakeCursorBackend) -> Non
 def test_a_wrong_token_is_rejected(backend: FakeCursorBackend) -> None:
     with _client(backend, TOKEN) as client:
         assert client.get("/?token=nearly-right").status_code == 401
+
+
+# --- Session cookie ---------------------------------------------------
+
+
+def _set_cookie_headers(response) -> list[str]:
+    return [
+        value
+        for value in response.headers.get_list("set-cookie")
+        if value.startswith(f"{TOKEN_COOKIE_NAME}=")
+    ]
+
+
+def test_a_valid_query_token_sets_the_session_cookie(
+    backend: FakeCursorBackend,
+) -> None:
+    with _client(backend, TOKEN) as client:
+        response = client.get(f"/?token={TOKEN}")
+
+    [cookie] = _set_cookie_headers(response)
+    attributes = [part.strip().lower() for part in cookie.split(";")]
+    assert attributes[0] == f"{TOKEN_COOKIE_NAME}={TOKEN}".lower()
+    assert "httponly" in attributes
+    assert "samesite=strict" in attributes
+    assert "path=/" in attributes
+    assert any(part.startswith("max-age=") for part in attributes)
+    # Plain HTTP is a supported path (adb reverse to localhost); a
+    # Secure cookie would never be stored there.
+    assert "secure" not in attributes
+
+
+def test_the_session_cookie_is_secure_only_under_tls(
+    backend: FakeCursorBackend,
+) -> None:
+    app = create_app(
+        backend_factory=lambda: backend, config=ServerConfig(token=TOKEN, tls=True)
+    )
+    with TestClient(app, base_url="https://testserver") as client:
+        response = client.get(f"/?token={TOKEN}")
+
+    [cookie] = _set_cookie_headers(response)
+    assert "secure" in [part.strip().lower() for part in cookie.split(";")]
+
+
+def test_an_invalid_query_token_sets_no_cookie(backend: FakeCursorBackend) -> None:
+    with _client(backend, TOKEN) as client:
+        response = client.get("/?token=nearly-right")
+
+    assert response.status_code == 401
+    assert _set_cookie_headers(response) == []
+
+
+def test_a_bearer_request_is_not_issued_a_cookie(backend: FakeCursorBackend) -> None:
+    """Callers using the header chose it to stay stateless."""
+    with _client(backend, TOKEN) as client:
+        response = client.get("/", headers={"Authorization": f"Bearer {TOKEN}"})
+
+    assert response.status_code == 200
+    assert _set_cookie_headers(response) == []
+
+
+def test_the_cookie_alone_authorizes_http(backend: FakeCursorBackend) -> None:
+    cookie = {"Cookie": f"{TOKEN_COOKIE_NAME}={TOKEN}"}
+    with _client(backend, TOKEN) as client:
+        assert client.get("/", headers=cookie).status_code == 200
+        response = client.post("/cursor/move", json=MOVE, headers=cookie)
+
+    assert response.status_code == 204
+    assert backend.calls == [(0.5, 0.5)]
+
+
+def test_the_cookie_issued_by_the_page_carries_later_requests(
+    backend: FakeCursorBackend,
+) -> None:
+    """End to end through the client's own cookie jar, as a browser
+    would: one URL with the token, then nothing but the cookie."""
+    with _client(backend, TOKEN) as client:
+        assert client.get(f"/?token={TOKEN}").status_code == 200
+        assert client.post("/cursor/move", json=MOVE).status_code == 204
+        with client.websocket_connect(FRAME_SOCKET_PATH):
+            pass
+
+    assert backend.calls == [(0.5, 0.5)]
+
+
+def test_a_wrong_cookie_is_rejected(backend: FakeCursorBackend) -> None:
+    cookie = {"Cookie": f"{TOKEN_COOKIE_NAME}=nearly-right"}
+    with _client(backend, TOKEN) as client:
+        response = client.post("/cursor/move", json=MOVE, headers=cookie)
+        with pytest.raises(WebSocketDisconnect) as caught:
+            with client.websocket_connect(FRAME_SOCKET_PATH, headers=cookie):
+                pass
+
+    assert response.status_code == 401
+    assert caught.value.code == 1008
+    assert backend.calls == []
+
+
+def test_a_query_token_overrides_a_stale_cookie(backend: FakeCursorBackend) -> None:
+    """A cookie from a previous `--token-auto` run must not mask the URL
+    the operator just opened -- and that URL re-issues the cookie."""
+    with _client(backend, TOKEN) as client:
+        response = client.get(
+            f"/?token={TOKEN}", headers={"Cookie": f"{TOKEN_COOKIE_NAME}=old-run"}
+        )
+        rejected = client.get(
+            "/?token=nearly-right", headers={"Cookie": f"{TOKEN_COOKIE_NAME}={TOKEN}"}
+        )
+
+    assert response.status_code == 200
+    assert len(_set_cookie_headers(response)) == 1
+    # An explicit wrong token is not rescued by a right cookie.
+    assert rejected.status_code == 401
+
+
+def test_the_cookie_alone_authorizes_the_frame_socket(
+    backend: FakeCursorBackend,
+) -> None:
+    """The point of the cookie: the phone's socket URL no longer needs
+    the token, so the handshake line uvicorn logs no longer has one."""
+    cookie = {"Cookie": f"{TOKEN_COOKIE_NAME}={TOKEN}"}
+    with _client(backend, TOKEN) as client:
+        with client.websocket_connect(FRAME_SOCKET_PATH, headers=cookie):
+            pass
+        with client.websocket_connect(
+            FRAME_SOCKET_PATH,
+            headers={**cookie, "Origin": "http://testserver"},
+        ):
+            pass
+
+
+def test_a_foreign_origin_cannot_ride_the_cookie(backend: FakeCursorBackend) -> None:
+    """SameSite ignores ports, and a WebSocket handshake ignores CORS: a
+    page on another port of this host would otherwise get the cookie
+    attached to a socket that moves the cursor."""
+    foreign = {
+        "Cookie": f"{TOKEN_COOKIE_NAME}={TOKEN}",
+        "Origin": "http://testserver:8080",
+    }
+    with _client(backend, TOKEN) as client:
+        response = client.post("/cursor/move", json=MOVE, headers=foreign)
+        with pytest.raises(WebSocketDisconnect) as caught:
+            with client.websocket_connect(FRAME_SOCKET_PATH, headers=foreign):
+                pass
+
+    assert response.status_code == 401
+    assert caught.value.code == 1008
+    assert backend.calls == []
+
+
+def test_an_explicit_token_is_not_subject_to_the_origin_check(
+    backend: FakeCursorBackend,
+) -> None:
+    """Not ambient: whoever put the token in the URL or header meant to."""
+    with _client(backend, TOKEN) as client:
+        with client.websocket_connect(
+            f"{FRAME_SOCKET_PATH}?token={TOKEN}",
+            headers={"Origin": "http://elsewhere"},
+        ):
+            pass
+        response = client.post(
+            "/cursor/move",
+            json=MOVE,
+            headers={
+                "Authorization": f"Bearer {TOKEN}",
+                "Origin": "http://elsewhere",
+            },
+        )
+
+    assert response.status_code == 204
+
+
+def test_the_frame_socket_accepts_a_bearer_header(backend: FakeCursorBackend) -> None:
+    with _client(backend, TOKEN) as client:
+        with client.websocket_connect(
+            FRAME_SOCKET_PATH, headers={"Authorization": f"Bearer {TOKEN}"}
+        ):
+            pass
+
+
+def test_origin_comparison() -> None:
+    assert origin_matches_host(None, "host:7331") is True
+    assert origin_matches_host("https://host:7331", "host:7331") is True
+    assert origin_matches_host("https://HOST:7331", "host:7331") is True
+    assert origin_matches_host("https://host:8080", "host:7331") is False
+    assert origin_matches_host("https://other:7331", "host:7331") is False
+    assert origin_matches_host("https://host:7331", None) is False
+
+
+# --- Log redaction ---------------------------------------------------
+
+
+def _record(msg: str, args) -> logging.LogRecord:
+    return logging.LogRecord(
+        "uvicorn.access", logging.INFO, __file__, 1, msg, args, None
+    )
+
+
+def test_redaction_replaces_any_token_value() -> None:
+    assert redact_token(f"GET /?token={TOKEN} HTTP/1.1") == "GET /?token=*** HTTP/1.1"
+    assert redact_token(f"/m?a=1&token={TOKEN}&b=2") == "/m?a=1&token=***&b=2"
+    # Wrong tokens are credential attempts too.
+    assert redact_token('"GET /?token=nearly-right"') == '"GET /?token=***"'
+    assert redact_token("/?other=1") == "/?other=1"
+
+
+def test_the_filter_redacts_uvicorn_access_args() -> None:
+    """Uvicorn's own shape: the request target is a `%s` argument."""
+    record = _record(
+        '%s - "%s %s HTTP/%s" %d',
+        ("10.0.0.2:5000", "GET", f"/capture.js?token={TOKEN}", "1.1", 200),
+    )
+
+    assert TokenRedactionFilter().filter(record) is True
+    message = record.getMessage()
+    assert TOKEN not in message
+    assert "/capture.js?token=***" in message
+    assert message.endswith(" 200")
+
+
+def test_the_filter_redacts_the_websocket_handshake_line() -> None:
+    record = _record(
+        '%s - "WebSocket %s" [accepted]',
+        ("10.0.0.2:5000", f"/ws/frames?token={TOKEN}"),
+    )
+
+    TokenRedactionFilter().filter(record)
+
+    assert (
+        record.getMessage()
+        == '10.0.0.2:5000 - "WebSocket /ws/frames?token=***" [accepted]'
+    )
+
+
+def test_the_filter_redacts_a_preformatted_message_and_mapping_args() -> None:
+    inline = _record(f"GET /?token={TOKEN}", None)
+    mapping = _record("%(path)s", ({"path": f"/?token={TOKEN}"},))
+
+    TokenRedactionFilter().filter(inline)
+    TokenRedactionFilter().filter(mapping)
+
+    assert inline.getMessage() == "GET /?token=***"
+    assert mapping.getMessage() == "/?token=***"
+
+
+def test_installed_redaction_applies_to_emitted_records(caplog) -> None:
+    name = "test.boresight.redaction"
+    install_log_redaction((name,))
+    install_log_redaction((name,))  # idempotent
+
+    logger = logging.getLogger(name)
+    with caplog.at_level(logging.INFO, logger=name):
+        logger.info('%s - "WebSocket %s" 403', "peer", "/ws/frames?token=guess")
+
+    assert sum(isinstance(f, TokenRedactionFilter) for f in logger.filters) == 1
+    assert "guess" not in caplog.text
+    assert "token=***" in caplog.text
+
+
+def test_main_installs_redaction_before_serving(monkeypatch) -> None:
+    from boresight import server
+
+    seen: list[bool] = []
+
+    def fake_run(*args, **kwargs) -> None:
+        seen.extend(
+            any(
+                isinstance(f, TokenRedactionFilter)
+                for f in logging.getLogger(name).filters
+            )
+            for name in ("uvicorn.access", "uvicorn.error")
+        )
+
+    monkeypatch.setattr("uvicorn.run", fake_run)
+    monkeypatch.setattr(server, "create_app", lambda **kwargs: object())
+    server.main(["--token", TOKEN])
+
+    assert seen == [True, True]
 
 
 def test_no_token_configured_leaves_loopback_unaffected(
@@ -267,6 +562,9 @@ def test_the_token_is_read_from_either_place_a_client_can_put_it() -> None:
     assert presented_token("q", "Bearer h") == "q"  # query wins
     assert presented_token(None, "Basic h") is None
     assert presented_token(None, None) is None
+    assert presented_token(None, None, "c") == "c"
+    assert presented_token("q", None, "c") == "q"  # the URL beats a stale cookie
+    assert presented_token(None, "Bearer h", "c") == "h"
 
 
 # --- TLS --------------------------------------------------------------

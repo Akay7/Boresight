@@ -55,6 +55,7 @@ static EventGroupHandle_t s_events;
 static SemaphoreHandle_t s_lock;
 static esp_websocket_client_handle_t s_client; /* guarded by s_lock */
 static volatile bool s_streaming;
+static volatile uint32_t s_session_id;
 static volatile failure_t s_failure;
 
 static char s_uri[320];
@@ -220,6 +221,11 @@ bool link_is_streaming(void)
     return s_streaming;
 }
 
+uint32_t link_session_id(void)
+{
+    return s_session_id;
+}
+
 esp_err_t link_send_text(const char *text, uint32_t timeout_ms)
 {
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
@@ -304,6 +310,7 @@ static void run_session(esp_websocket_client_handle_t client)
                                        pdMS_TO_TICKS(HELLO_TIMEOUT_MS)) < 0) {
         ESP_LOGW(TAG, "hello was not sent");
     }
+    s_session_id++;
     s_streaming = true;
     xSemaphoreGive(s_lock);
 

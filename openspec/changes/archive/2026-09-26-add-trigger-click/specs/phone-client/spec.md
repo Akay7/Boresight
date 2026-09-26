@@ -1,17 +1,18 @@
 ## ADDED Requirements
 
-### Requirement: An on-screen trigger sends a click event per press
-The client SHALL display a trigger control that, on each press, sends
-one trigger message over the existing frame connection, requiring no
-second connection or endpoint. The control SHALL be disabled until
-streaming has started, since there is no connection to send it on
-before then.
+### Requirement: An on-screen trigger sends trigger events on the frame connection
+The client SHALL display a trigger control whose presses are sent as
+trigger messages over the existing frame connection, requiring no
+second connection or endpoint. Which messages a press and a release send
+is specified by the trigger-hold capability. The control SHALL be
+disabled until streaming has started, since there is no connection to
+send it on before then.
 
-#### Scenario: Pressing the trigger sends one message
+#### Scenario: Pressing the trigger uses the existing connection
 - **WHEN** the client is streaming and the player presses the trigger
   control
-- **THEN** the client sends one trigger message on the existing frame
-  WebSocket connection
+- **THEN** the client sends its trigger message on the existing frame
+  WebSocket connection, and opens no other connection
 
 #### Scenario: The trigger is unusable before streaming starts
 - **WHEN** the client has not yet started streaming

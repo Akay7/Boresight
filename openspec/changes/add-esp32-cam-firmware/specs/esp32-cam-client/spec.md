@@ -92,34 +92,6 @@ the stale frame.
 - **WHEN** the link and server are faster than the configured frame rate
 - **THEN** the device sends no more frames per second than configured
 
-### Requirement: A trigger button press sends one trigger event
-The firmware SHALL read the trigger button from its configured GPIO,
-debounce it, and send exactly one `{"type": "trigger"}` text message on
-the frame socket per press. A release, a held button, and contact bounce
-SHALL NOT produce additional trigger messages. A press while the socket
-is not connected SHALL be discarded rather than delivered later, since a
-late click lands wherever the cursor is by then.
-
-#### Scenario: One press sends one trigger
-- **WHEN** the connected device's trigger button is pressed and released
-  once, including with contact bounce on both edges
-- **THEN** exactly one trigger message is sent and the server's reported
-  trigger count increases by one
-
-#### Scenario: Holding the button does not repeat
-- **WHEN** the trigger button is held down for several seconds
-- **THEN** only the single message from the initial press is sent
-
-#### Scenario: A press while disconnected is not replayed
-- **WHEN** the trigger button is pressed while the socket is down and the
-  connection is later re-established
-- **THEN** no trigger message is sent for the earlier press
-
-#### Scenario: A trigger is not held back by frame streaming
-- **WHEN** the trigger is pressed while frames are streaming
-- **THEN** the trigger message is sent no later than after the frame send
-  already in progress, not after further queued frames
-
 ### Requirement: Buttons are configurable
 The firmware SHALL let each connected push button be configured with its
 GPIO and the action it performs, SHALL wire buttons active-low using the
@@ -212,3 +184,34 @@ missing setting at boot, rather than silently fail to connect.
   address configured
 - **THEN** the build fails or the device reports the missing setting on
   its serial log and status indicator
+
+### Requirement: The trigger button is held while it is pressed
+The firmware SHALL send one trigger `down` message when the debounced
+trigger button goes down and one trigger `up` message when it comes back
+up, so holding the button holds the primary button and contact bounce
+produces neither extra presses nor extra releases. A press while the
+socket is not connected SHALL be discarded rather than delivered later.
+An `up` SHALL be sent only for a `down` that was delivered on the
+connection that is still open; a release after the connection dropped
+SHALL send nothing, since the server already released the hold when the
+session ended.
+
+#### Scenario: A trigger is not held back by frame streaming
+- **WHEN** the trigger is pressed or released while frames are streaming
+- **THEN** its message is sent no later than after the frame send
+  already in progress, not after further queued frames
+
+#### Scenario: Press and release send down and up
+- **WHEN** the connected device's trigger button is pressed, held for a
+  second, and released, with contact bounce on both edges
+- **THEN** exactly one `down` and then one `up` are sent
+
+#### Scenario: A press while disconnected is not replayed
+- **WHEN** the trigger button is pressed while the socket is down, the
+  connection is re-established, and the button is then released
+- **THEN** neither `down` nor `up` is sent for that press
+
+#### Scenario: A hold broken by a reconnect sends no stray release
+- **WHEN** the button is pressed while connected, the connection drops
+  and is re-established, and the button is then released
+- **THEN** no `up` is sent on the new connection

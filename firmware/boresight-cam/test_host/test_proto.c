@@ -87,6 +87,9 @@ static void test_rtt_and_trigger_messages(void)
     CHECK(bp_format_rtt(buffer, sizeof buffer, 42.54) > 0);
     CHECK(strcmp(buffer, "{\"type\":\"rtt\",\"ms\":42.5}") == 0);
     CHECK(strcmp(BP_TRIGGER_MESSAGE, "{\"type\":\"trigger\"}") == 0);
+    CHECK(strcmp(BP_TRIGGER_DOWN_MESSAGE, "{\"type\":\"trigger\",\"state\":\"down\"}") ==
+          0);
+    CHECK(strcmp(BP_TRIGGER_UP_MESSAGE, "{\"type\":\"trigger\",\"state\":\"up\"}") == 0);
 }
 
 /* --- Debouncer --------------------------------------------------------- */
@@ -96,14 +99,15 @@ typedef struct {
     bool pressed;
 } sample_t;
 
-static int count_presses(const sample_t *samples, size_t count,
-                         uint32_t sample_every_ms, uint32_t until_ms)
+static int count_events(const sample_t *samples, size_t count,
+                        uint32_t sample_every_ms, uint32_t until_ms,
+                        bp_button_event_t wanted)
 {
     /* Feeds the level in effect at every tick, like the button task does
      * while settling. */
     bp_debouncer_t debouncer;
     bp_debounce_init(&debouncer, 10, false, 0);
-    int presses = 0;
+    int events = 0;
     size_t next = 0;
     bool level = false;
     for (uint32_t now = 0; now <= until_ms; now += sample_every_ms) {
@@ -111,11 +115,23 @@ static int count_presses(const sample_t *samples, size_t count,
             level = samples[next].pressed;
             next++;
         }
-        if (bp_debounce_update(&debouncer, level, now) == BP_BUTTON_PRESSED) {
-            presses++;
+        if (bp_debounce_update(&debouncer, level, now) == wanted) {
+            events++;
         }
     }
-    return presses;
+    return events;
+}
+
+static int count_presses(const sample_t *samples, size_t count,
+                         uint32_t sample_every_ms, uint32_t until_ms)
+{
+    return count_events(samples, count, sample_every_ms, until_ms, BP_BUTTON_PRESSED);
+}
+
+static int count_releases(const sample_t *samples, size_t count,
+                          uint32_t sample_every_ms, uint32_t until_ms)
+{
+    return count_events(samples, count, sample_every_ms, until_ms, BP_BUTTON_RELEASED);
 }
 
 static void test_a_clean_press_is_one_event(void)
@@ -133,6 +149,7 @@ static void test_bounce_on_both_edges_is_one_event(void)
     };
 
     CHECK(count_presses(samples, sizeof samples / sizeof samples[0], 1, 600) == 1);
+    CHECK(count_releases(samples, sizeof samples / sizeof samples[0], 1, 600) == 1);
 }
 
 static void test_a_long_hold_is_one_event(void)
@@ -140,6 +157,20 @@ static void test_a_long_hold_is_one_event(void)
     const sample_t samples[] = {{100, true}, {5100, false}};
 
     CHECK(count_presses(samples, 2, 1, 6000) == 1);
+    CHECK(count_releases(samples, 2, 1, 6000) == 1);
+}
+
+static void test_the_release_comes_after_the_press_settles(void)
+{
+    /* Released at 5100, reported once it has read up for 10ms. */
+    bp_debouncer_t debouncer;
+    bp_debounce_init(&debouncer, 10, false, 0);
+    CHECK(bp_debounce_update(&debouncer, true, 100) == BP_BUTTON_NONE);
+    CHECK(bp_debounce_update(&debouncer, true, 110) == BP_BUTTON_PRESSED);
+    CHECK(bp_debounce_update(&debouncer, false, 5100) == BP_BUTTON_NONE);
+    CHECK(bp_debounce_update(&debouncer, false, 5109) == BP_BUTTON_NONE);
+    CHECK(bp_debounce_update(&debouncer, false, 5110) == BP_BUTTON_RELEASED);
+    CHECK(bp_debounce_update(&debouncer, false, 5200) == BP_BUTTON_NONE);
 }
 
 static void test_a_glitch_shorter_than_the_debounce_is_nothing(void)
@@ -147,6 +178,7 @@ static void test_a_glitch_shorter_than_the_debounce_is_nothing(void)
     const sample_t samples[] = {{100, true}, {105, false}};
 
     CHECK(count_presses(samples, 2, 1, 600) == 0);
+    CHECK(count_releases(samples, 2, 1, 600) == 0);
 }
 
 static void test_repeated_presses_each_count(void)
@@ -158,6 +190,7 @@ static void test_repeated_presses_each_count(void)
     }
 
     CHECK(count_presses(samples, 20, 1, 1300) == 10);
+    CHECK(count_releases(samples, 20, 1, 1300) == 10);
 }
 
 static void test_a_button_held_at_boot_does_not_fire(void)
@@ -267,6 +300,7 @@ int main(void)
     test_bounce_on_both_edges_is_one_event();
     test_a_long_hold_is_one_event();
     test_a_glitch_shorter_than_the_debounce_is_nothing();
+    test_the_release_comes_after_the_press_settles();
     test_repeated_presses_each_count();
     test_a_button_held_at_boot_does_not_fire();
     test_settling_reports_an_unconfirmed_change();

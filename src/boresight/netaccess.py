@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import datetime as dt
 import ipaddress
+import logging
+import re
 import secrets
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 7331
@@ -29,6 +32,19 @@ KEY_NAME = "server.key"
 CERT_VALID_DAYS = 825
 
 TOKEN_QUERY_PARAM = "token"
+
+# The browser keeps the token here after the first request that carried
+# it in the URL, so nothing after that has to. A URL is copied into
+# access logs, browser history and screenshots; a cookie is not.
+TOKEN_COOKIE_NAME = "boresight_token"
+# Long enough not to nag on a fixed `--token`; a `--token-auto` token
+# dies with the process regardless, and every valid URL re-issues it.
+TOKEN_COOKIE_MAX_AGE_S = 30 * 24 * 3600
+
+# The loggers uvicorn writes request targets to, query string included:
+# the access line for HTTP, and the handshake line for WebSockets.
+UVICORN_REQUEST_LOGGERS = ("uvicorn.access", "uvicorn.error")
+REDACTED = "***"
 
 
 class InsecureConfigurationError(RuntimeError):
@@ -133,18 +149,108 @@ def token_matches(configured: str | None, presented: str | None) -> bool:
     return secrets.compare_digest(configured, presented)
 
 
-def presented_token(query_token: str | None, authorization: str | None) -> str | None:
-    """Pull the token from either place a client can put it.
+def presented_token(
+    query_token: str | None,
+    authorization: str | None,
+    cookie_token: str | None = None,
+) -> str | None:
+    """Pull the token from whichever place the client put it.
 
-    A browser cannot set headers on a WebSocket handshake, so the query
-    parameter is not a convenience -- it is the only mechanism the phone
-    has. Everything else may use a bearer header.
+    A browser cannot set headers on a WebSocket handshake, but it does
+    send cookies on one -- so after its first request the phone uses the
+    cookie the server issued, and the query parameter remains for
+    clients that hold no cookies (the ESP32) and for that first request.
+    Everything else may use a bearer header.
+
+    First present wins, query first: the URL the operator just opened
+    must override a cookie left by an earlier run with a different
+    `--token-auto` value, not be masked by it.
     """
     if query_token:
         return query_token
     if authorization and authorization.lower().startswith("bearer "):
         return authorization[len("bearer ") :].strip()
+    if cookie_token:
+        return cookie_token
     return None
+
+
+def origin_matches_host(origin: str | None, host: str | None) -> bool:
+    """Whether a request's `Origin` is this server's own address.
+
+    Checked only when the cookie is the sole credential. A cookie is
+    ambient: the browser attaches it to requests other pages make, and
+    SameSite ignores the port, so another service on the same host
+    counts as same-site. A WebSocket handshake is not subject to CORS
+    either, so without this a page served from :8080 could open the
+    frame socket on :7331 and drive the cursor. Browsers always send
+    `Origin` on a handshake and on cross-origin requests; a same-origin
+    GET or a navigation may omit it, hence absent is fine.
+
+    Compared against `Host` rather than the advertised address, because
+    `Host` is by definition the address this client used -- which may
+    be `localhost` over `adb reverse`, not the LAN IP.
+    """
+    if not origin:
+        return True
+    if not host:
+        return False
+    return urlsplit(origin).netloc.lower() == host.lower()
+
+
+# The value runs to the next parameter, whitespace, or quote -- uvicorn
+# wraps the request target in double quotes. No word boundary before
+# `token` and case-insensitive: over-redacting `boresight_token=` or a
+# `TOKEN=` costs nothing, under-redacting costs the credential.
+_TOKEN_IN_TEXT = re.compile(r"(token=)[^&\s\"'#]+", re.IGNORECASE)
+
+
+def redact_token(text: str) -> str:
+    return _TOKEN_IN_TEXT.sub(rf"\g<1>{REDACTED}", text)
+
+
+class TokenRedactionFilter(logging.Filter):
+    """Blank out any `token=<value>` before a record is emitted.
+
+    Generic, not a match on the configured token: a wrong token is a
+    credential attempt too, often a character away from the real one,
+    and this way the filter needs no access to configuration. Uvicorn
+    passes the request target as a `%s` argument rather than baking it
+    into the message, so args are rewritten as well as the message.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = redact_token(record.msg)
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                redact_token(arg) if isinstance(arg, str) else arg
+                for arg in record.args
+            )
+        elif isinstance(record.args, dict):
+            record.args = {
+                key: redact_token(arg) if isinstance(arg, str) else arg
+                for key, arg in record.args.items()
+            }
+        return True
+
+
+def install_log_redaction(
+    logger_names: tuple[str, ...] = UVICORN_REQUEST_LOGGERS,
+) -> None:
+    """Attach the redaction filter to uvicorn's request loggers, once.
+
+    On the loggers rather than their handlers: uvicorn's `dictConfig`
+    replaces handlers wholesale but only ever adds logger filters, so
+    installing this before `uvicorn.run` survives it. Defence in depth
+    -- the phone stops putting the token in URLs after its first
+    request, but that request, the ESP32 and any hand-typed URL still
+    do.
+    """
+    for name in logger_names:
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, TokenRedactionFilter) for f in logger.filters):
+            logger.addFilter(TokenRedactionFilter())
 
 
 def resolve_certificate(config: ServerConfig) -> tuple[Path, Path]:

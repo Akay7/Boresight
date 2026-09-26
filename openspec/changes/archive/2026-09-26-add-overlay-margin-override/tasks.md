@@ -50,12 +50,12 @@
 
 ## 4. Manual verification
 
-- [ ] 4.1 On the real multi-monitor setup that surfaced this (the
+- [x] 4.1 On the real multi-monitor setup that surfaced this (the
       external monitor whose overlay log showed no "reserved by desktop
       panels" suffix), start the server with an `--overlay-extra-
       margin-px` value large enough to clear the taskbar, and confirm
       the previously-hidden tag is now fully visible
-- [ ] 4.2 From the phone, with on-screen markers active, tap the margin
+- [x] 4.2 From the phone, with on-screen markers active, tap the margin
       stepper and confirm the overlay visibly restarts with the tag
       clearing the taskbar, without the video connection dropping
 

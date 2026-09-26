@@ -69,7 +69,10 @@
         padding: 1rem 1.1rem;
         touch-action: none;
         user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
       }
+      #trigger.held { background: #ff5a5a; box-shadow: inset 0 0 0 3px #fff; }
       #trigger[disabled] { background: #3a3f47; color: var(--dim); }
       .panel {
         background: #1c1f25;
@@ -186,25 +189,16 @@
     </div>
 
     <div class="links">
-      <!-- href is set in capture.js so the token survives the click.
-           A static href would 401 whenever the server is token-guarded,
-           which is every time it is reachable from this phone. -->
+      <!-- No token in the href: the session cookie the server set when
+           this page loaded authorizes the sheet, as it does every other
+           request from this page. -->
       <a id="marker-sheet" href="markers">Printable marker sheet →</a>
       <p>Print at 100% scale — never "fit to page".</p>
     </div>
 
-    <script>
-      // capture.js is itself token-guarded, like every other request --
-      // so a plain static src would 401 exactly when the server is
-      // guarded, which is whenever this phone can reach it at all. It
-      // can't fix its own request the way sameOriginUrl() fixes later
-      // ones (it hasn't loaded yet), so this does the same thing inline.
-      (function () {
-        var token = new URLSearchParams(location.search).get("token");
-        var script = document.createElement("script");
-        script.src = token ? "capture.js?token=" + encodeURIComponent(token) : "capture.js";
-        document.body.appendChild(script);
-      })();
-    </script>
+    <!-- A plain src, no token: loading this page with the token in its
+         URL set the session cookie, which the browser sends with this
+         request and every one after it. -->
+    <script src="capture.js"></script>
   </body>
 </html>

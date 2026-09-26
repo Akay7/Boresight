@@ -237,7 +237,11 @@ def test_an_empty_size_means_as_the_layout_says(client: TestClient) -> None:
     assert response.text.count('width="80.0mm"') == 8
 
 
-def test_a_token_guarded_sheet_keeps_its_token_through_the_picker() -> None:
+def test_a_token_guarded_sheet_works_through_the_cookie_not_its_links() -> None:
+    """The sheet's picker and download link used to copy the token into
+    themselves, which put it back into URLs and the access log. Opening
+    the sheet with the token sets the session cookie instead, and the
+    plain links it renders are reachable with that alone."""
     from boresight.inject import FakeCursorBackend
     from boresight.netaccess import ServerConfig
     from boresight.server import create_app
@@ -246,12 +250,15 @@ def test_a_token_guarded_sheet_keeps_its_token_through_the_picker() -> None:
         backend_factory=FakeCursorBackend, config=ServerConfig(token="s3cret")
     )
     with TestClient(app) as client:
-        response = client.get(
-            "/markers", params={"token": "s3cret", "size_mm": "100"}
-        ).text
+        response = client.get("/markers", params={"token": "s3cret", "size_mm": "100"})
+        followed = client.get("/markers/layout.toml", params={"size_mm": "100"})
+        picked = client.get("/markers", params={"size_mm": "80"})
 
-    assert '<input type="hidden" name="token" value="s3cret">' in response
-    assert "/markers/layout.toml?size_mm=100&amp;token=s3cret" in response
+    assert "s3cret" not in response.text
+    assert 'name="token"' not in response.text
+    assert "/markers/layout.toml?size_mm=100" in response.text
+    assert followed.status_code == 200
+    assert picked.status_code == 200
 
 
 @pytest.mark.parametrize("size", ["0", "-5", "nan", "inf", "big"])

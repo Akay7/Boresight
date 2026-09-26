@@ -118,6 +118,66 @@ def test_unpack_rejects_truncated_pixel_data() -> None:
         canvas_format.unpack(data)
 
 
+@pytest.mark.parametrize(
+    "rect",
+    [
+        (3, 0, 2, 1),  # past the right edge
+        (0, 3, 1, 2),  # past the bottom edge
+        (0xFFFFFFFF, 0, 2, 1),  # x + w wraps in 32-bit arithmetic
+        (0, 0, 0, 1),  # empty
+        (0, 0, 1, 0),  # empty
+    ],
+)
+def test_unpack_rejects_a_rectangle_outside_the_canvas(rect) -> None:
+    canvas = np.zeros((4, 4), dtype=np.uint8)
+    data = canvas_format.pack(canvas, [(0, 0, 4, 4), rect])
+
+    with pytest.raises(ValueError, match="rectangle"):
+        canvas_format.unpack(data)
+
+
+def test_unpack_accepts_a_rectangle_touching_the_far_edges() -> None:
+    canvas = np.zeros((4, 4), dtype=np.uint8)
+    _canvas, rects = canvas_format.unpack(canvas_format.pack(canvas, [(2, 3, 2, 1)]))
+    assert rects == [(2, 3, 2, 1)]
+
+
+def test_unpack_rejects_truncated_rectangles() -> None:
+    canvas = np.zeros((2, 2), dtype=np.uint8)
+    data = canvas_format.pack(canvas, [(0, 0, 1, 1), (1, 1, 1, 1)])
+    header_size = struct.calcsize("<4sIIIII")
+
+    with pytest.raises(ValueError, match="truncated"):
+        canvas_format.unpack(data[: header_size + 20])
+
+
+def test_unpack_rejects_an_oversized_rect_count() -> None:
+    canvas = np.zeros((2, 2), dtype=np.uint8)
+    data = bytearray(canvas_format.pack(canvas, []))
+    struct.pack_into("<I", data, 16, canvas_format.MAX_RECTS + 1)
+
+    with pytest.raises(ValueError, match="rectangles"):
+        canvas_format.unpack(bytes(data))
+
+
+@pytest.mark.parametrize(
+    "size",
+    [
+        (0, 2),
+        (2, 0),
+        (canvas_format.MAX_DIMENSION + 1, 1),
+        (0xFFFFFFFF, 0xFFFFFFFF),
+    ],
+)
+def test_unpack_rejects_an_out_of_range_canvas_size(size) -> None:
+    canvas = np.zeros((2, 2), dtype=np.uint8)
+    data = bytearray(canvas_format.pack(canvas, []))
+    struct.pack_into("<II", data, 8, *size)
+
+    with pytest.raises(ValueError, match="size"):
+        canvas_format.unpack(bytes(data))
+
+
 # --- Matches the real render_overlay output ---------------------------
 
 

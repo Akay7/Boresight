@@ -20,6 +20,8 @@ void bp_pack_header(double client_ms, uint8_t out[BP_HEADER_SIZE])
 /* --- Control messages -------------------------------------------------- */
 
 const char BP_TRIGGER_MESSAGE[] = "{\"type\":\"trigger\"}";
+const char BP_TRIGGER_DOWN_MESSAGE[] = "{\"type\":\"trigger\",\"state\":\"down\"}";
+const char BP_TRIGGER_UP_MESSAGE[] = "{\"type\":\"trigger\",\"state\":\"up\"}";
 
 static int finish(int written, size_t size)
 {
@@ -80,7 +82,7 @@ bp_button_event_t bp_debounce_update(bp_debouncer_t *debouncer, bool pressed,
         return BP_BUTTON_NONE;
     }
     debouncer->stable_pressed = debouncer->candidate_pressed;
-    return debouncer->stable_pressed ? BP_BUTTON_PRESSED : BP_BUTTON_NONE;
+    return debouncer->stable_pressed ? BP_BUTTON_PRESSED : BP_BUTTON_RELEASED;
 }
 
 bool bp_debounce_settling(const bp_debouncer_t *debouncer)

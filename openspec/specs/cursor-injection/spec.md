@@ -71,3 +71,60 @@ permission denied).
 - **THEN** the server fails to start with an error identifying the
   permission problem, rather than starting successfully and failing on
   the first move request
+
+### Requirement: The cursor backend can hold and release the primary button
+The cursor backend interface SHALL expose press and release operations,
+distinct from click, that respectively press and release the primary
+button at the cursor's current position without moving it. Absolute
+movement between a press and a release SHALL move the cursor with the
+button held. A click SHALL be equivalent to a press immediately followed
+by a release. On Linux the button SHALL be the same one a click uses,
+so a hold and a click land on the same pointer as the cursor movement.
+Closing the backend SHALL release a button still held.
+
+#### Scenario: A press, a move and a release are a drag
+- **WHEN** press is invoked, then absolute movement to a new position,
+  then release
+- **THEN** the OS observes the button going down at the old position,
+  the cursor moving with it held, and the button going up at the new
+  position
+
+#### Scenario: Closing releases a held button
+- **WHEN** the backend is closed while the button is held
+- **THEN** the OS observes the button released
+
+#### Scenario: A fake backend records holds
+- **WHEN** a test presses and releases against a fake backend
+- **THEN** the fake records the press and the release, without
+  `/dev/uinput` access
+
+### Requirement: The cursor backend supports a discrete click
+The cursor backend interface SHALL expose a click operation, distinct
+from absolute movement, that presses and releases the primary button at
+the cursor's current position. On Linux, the click SHALL be delivered on
+the same pointer that absolute movement positions, so that it lands
+where the cursor is shown, including under a Wayland compositor where
+each input device can have its own pointer position. The button SHALL
+never go down as a side effect of movement, so positioning alone never
+clicks.
+
+#### Scenario: A click presses and releases the primary button
+- **WHEN** the cursor backend's click operation is invoked
+- **THEN** the OS observes a primary-button press followed by a release
+  at the cursor's current position, with no change to that position
+
+#### Scenario: A click does not move the cursor
+- **WHEN** the cursor is at an arbitrary position and the click
+  operation is invoked
+- **THEN** the cursor remains at that position after the click
+  completes
+
+### Requirement: Click backend is swappable for testing
+The cursor backend's click operation SHALL be substitutable the same
+way absolute movement already is, so automated tests can assert a click
+occurred without a real `uinput` device or OS-level permissions.
+
+#### Scenario: Test suite asserts a click without a real input device
+- **WHEN** a test invokes the click operation against a fake backend
+- **THEN** the fake backend records that a click occurred, without
+  requiring `/dev/uinput` access

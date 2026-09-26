@@ -68,6 +68,8 @@ BORESIGHT_TRIGGER_PRODUCT_ID = 0xB052
 class CursorBackend(Protocol):
     def move_absolute(self, x: float, y: float) -> None: ...
     def click(self) -> None: ...
+    def press(self) -> None: ...
+    def release(self) -> None: ...
 
 
 class CursorBackendUnavailable(RuntimeError):
@@ -203,6 +205,7 @@ class UinputCursorBackend:
         # position to take a delta against yet, and emitting one against
         # an arbitrary starting point would be a spurious jump.
         self._last_position: tuple[float, float] | None = None
+        self._held = False
 
         # Bring the pen into proximity once and leave it there for the
         # life of the backend. Proximity is what makes the cursor track
@@ -216,9 +219,9 @@ class UinputCursorBackend:
     def move_absolute(self, x: float, y: float) -> None:
         abs_x = round(x * ABS_MAX)
         abs_y = round(y * ABS_MAX)
-        # Position only. The pen is already in proximity and its tip
-        # never goes down, so this moves the cursor and nothing else --
-        # no BTN_TOUCH, and therefore no click.
+        # Position only. The pen is already in proximity, and this never
+        # touches the tip: with the tip up it moves the cursor and
+        # nothing else, and with it held down by press() it is a drag.
         self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_X, abs_x)
         self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_Y, abs_y)
         self._device.syn()
@@ -244,6 +247,12 @@ class UinputCursorBackend:
         # A pen tap -- tip down, then up -- at wherever the pen is
         # hovering, which is exactly where move_absolute left the cursor.
         # A click reports that the trigger was pulled, not a new position.
+        self.press()
+        self.release()
+
+    def press(self) -> None:
+        # Tip down, and it stays down: every move_absolute until
+        # release() drags with it.
         #
         # Not BTN_LEFT on `self._relative_device`: under a Wayland
         # compositor (seen on KWin) the tablet tool and the mouse are
@@ -251,7 +260,7 @@ class UinputCursorBackend:
         # mouse button lands at the mouse pointer's own position, which
         # nothing moves while relative deltas are off -- so the trigger
         # counted on the server and clicked nowhere useful. The tip is
-        # the tablet's own click, delivered at the tablet's position.
+        # the tablet's own button, delivered at the tablet's position.
         #
         # Pressure as well as BTN_TOUCH: for a pressure-capable tool
         # libinput decides tip contact from a pressure threshold and
@@ -261,13 +270,20 @@ class UinputCursorBackend:
         )
         self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 1)
         self._device.syn()
+        self._held = True
+
+    def release(self) -> None:
         self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_PRESSURE, 0)
         self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 0)
         self._device.syn()
+        self._held = False
 
     def close(self) -> None:
-        # Leave proximity before going away, so the pen is not left
-        # hovering from the compositor's point of view.
+        # Lift the tip and leave proximity before going away, so the pen
+        # is neither left pressed nor left hovering from the
+        # compositor's point of view.
+        if self._held:
+            self.release()
         self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOOL_PEN, 0)
         self._device.syn()
         self._device.close()
@@ -277,10 +293,10 @@ class UinputCursorBackend:
 class SmoothingCursorBackend:
     """Wraps another `CursorBackend`, smoothing `move_absolute` positions.
 
-    `click()` passes straight through: it neither reads the filter's
-    state nor feeds it, so a click always fires at wherever the wrapped
-    backend's cursor already is -- unaffected by this class -- rather
-    than at some position of its own.
+    `click()`, `press()` and `release()` pass straight through: they
+    neither read the filter's state nor feed it, so a button always acts
+    at wherever the wrapped backend's cursor already is -- unaffected by
+    this class -- rather than at some position of its own.
 
     Composes at the `CursorBackend` seam rather than living inside
     `AimPipeline`, so the pipeline stays exactly as stateless as its own
@@ -300,6 +316,12 @@ class SmoothingCursorBackend:
     def click(self) -> None:
         self._backend.click()
 
+    def press(self) -> None:
+        self._backend.press()
+
+    def release(self) -> None:
+        self._backend.release()
+
 
 class FakeCursorBackend:
     """Records calls instead of touching a real device. Test-only."""
@@ -307,9 +329,74 @@ class FakeCursorBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[float, float]] = []
         self.clicks: int = 0
+        self.presses: int = 0
+        self.releases: int = 0
+
+    @property
+    def held(self) -> bool:
+        return self.presses > self.releases
 
     def move_absolute(self, x: float, y: float) -> None:
         self.calls.append((x, y))
 
     def click(self) -> None:
         self.clicks += 1
+
+    def press(self) -> None:
+        self.presses += 1
+
+    def release(self) -> None:
+        self.releases += 1
+
+
+class TriggerHold:
+    """The primary button, shared by every session that can hold it.
+
+    One backend serves every connected client, so one button does too:
+    it goes down when the first session holds it and up when the last
+    one lets go. Each session releases only its own hold -- its `up`,
+    its disconnect or its going silent never lifts a button another
+    session is still holding.
+
+    Owners are compared by identity; the server uses each session's
+    stats object. Kept out of the backend itself, which has no idea
+    which session a call comes from.
+    """
+
+    def __init__(self, backend: CursorBackend) -> None:
+        self._backend = backend
+        # id -> owner. The owner itself is kept so its id cannot be
+        # reused by another object while it holds. Owners need not be
+        # hashable (the server's are dataclasses).
+        self._holders: dict[int, object] = {}
+
+    @property
+    def active(self) -> bool:
+        return bool(self._holders)
+
+    def holds(self, owner: object) -> bool:
+        return id(owner) in self._holders
+
+    def acquire(self, owner: object) -> bool:
+        """Hold for `owner`. False if it already held."""
+        if id(owner) in self._holders:
+            return False
+        if not self._holders:
+            self._backend.press()
+        self._holders[id(owner)] = owner
+        return True
+
+    def release(self, owner: object) -> bool:
+        """Let go for `owner`. False if it was not holding."""
+        if id(owner) not in self._holders:
+            return False
+        del self._holders[id(owner)]
+        if not self._holders:
+            self._backend.release()
+        return True
+
+    def click(self) -> None:
+        # With the button already held by someone, a tap would lift it
+        # under them. Down is already down, so there is nothing to add.
+        if not self._holders:
+            self._backend.click()

@@ -33,8 +33,9 @@ and full perspective correction from a single visible tag.
 4. Solve a homography from image plane to screen plane.
 5. Push the image centre through the inverse — that's the aim point.
 6. Filter, then emit as an absolute mouse position.
-7. A tap on the phone's on-screen trigger button rides the same
-   connection and is emitted as a click.
+7. The trigger rides the same connection: pressing it holds the
+   primary button down at the aim point, releasing it lets go. A tap is
+   a click, and aiming while holding is a drag.
 
 One marker is enough to *compute* a homography — four corner points is
 a complete one — but not enough to compute a useful aim point. What
@@ -276,10 +277,15 @@ works, on either path.
 
 ## Cursor injection
 
-**Trigger.** The phone's page renders a trigger button; a tap sends an
-event over the same WebSocket connection the video arrives on. The
-PC-side handler fires a synthetic mouse-down/up alongside the current aim
-point — no separate USB HID device needed for v1.
+**Trigger.** The phone's page renders a trigger button. Pressing it sends
+`{"type": "trigger", "state": "down"}` over the same WebSocket connection
+the video arrives on, and releasing it sends `"up"`. The PC-side handler
+holds the button down (the virtual pen's tip) at the current aim point
+until the release, so frames in between drag. A plain `{"type":
+"trigger"}` with no `state` is still a single click. The button can
+never stay stuck down: the server lets go when the holding session ends,
+and when it sends nothing at all for 2 seconds. No separate USB HID
+device is needed for v1.
 
 Two paths for the aim coordinate, selectable by config flag.
 
@@ -624,8 +630,8 @@ reported exactly as the unsolved frame it is.
 
 The phone loads a page in its browser, which captures from the rear
 camera and streams frames to the PC. Nothing is installed on the phone.
-The page also links to the printable marker sheet (`GET /markers`), with
-the token carried through, so the tags can be reached from whichever
+The page also links to the printable marker sheet (`GET /markers`),
+authorized by the same session cookie as the page, so the tags can be reached from whichever
 device is in front of a printer without hunting for the URL.
 
 ### Read this first: the camera needs a secure context
@@ -713,8 +719,8 @@ Use whatever port you passed to `--port`; 7331 is only the default.
 **Scope the rule to your LAN.** What you are exposing is an endpoint
 that moves your mouse and clicks it. The token is what stands in front
 of it, and a firewall rule limited to the local subnet is the second
-layer — worth having, because the token also travels in a URL and ends
-up in browser history. firewalld can be told the same thing precisely:
+layer — worth having, because the token is still printed in a URL you
+open on the phone, and a device sends it in its handshake URL. firewalld can be told the same thing precisely:
 
     sudo firewall-cmd --permanent --zone=home --add-rich-rule='rule family=ipv4 source address=192.168.1.0/24 port port=7331 protocol=tcp accept'
 
@@ -738,9 +744,19 @@ The thing being prevented is severe and has no local symptom: an
 endpoint on your network that moves your mouse, reachable by anything
 that joins the Wi-Fi. Once set, the token is required on *every*
 endpoint — the client page, the marker sheets, `/cursor/move`, and the
-frame socket. It travels as a `?token=` query parameter, because a
-browser cannot set headers on a WebSocket handshake; HTTP callers may
-use `Authorization: Bearer` instead.
+frame socket. A browser presents it once, as the `?token=` in the URL
+the server printed; the response sets it as a cookie (HttpOnly,
+SameSite=Strict, Secure under `--tls`), and the page then removes it
+from the address bar and never puts it in a URL again — the cookie
+rides every later request, including the WebSocket handshake. A
+request authorized by the cookie alone is refused if its `Origin` is
+not the server's own. Clients without cookies (the ESP32-CAM, curl)
+keep using `?token=`, or `Authorization: Bearer` over HTTP.
+
+Wherever the token does still appear in a URL, uvicorn's access and
+connection log lines show `token=***` instead of its value — for wrong
+tokens too. The startup banner is the one place it is printed, on
+purpose. A reverse proxy in front of the server keeps its own logs.
 
 Loopback with no token keeps working exactly as before. Nothing is
 exposed, so nothing is demanded.
@@ -934,11 +950,13 @@ start sending within the send timeout (200 ms) is skipped and counted,
 never retried. One that fails halfway through leaves half a message on
 the wire, which cannot be taken back, so the device reconnects.
 
-A trigger press is debounced (10 ms) and sends exactly one `trigger`
-message: release, hold and contact bounce send nothing. It waits at most
-for the frame send already in progress — so never longer than the send
-timeout — and a press while disconnected is discarded rather than sent
-later, when the cursor would be somewhere else.
+The trigger is debounced (10 ms) and sends one `trigger` `down` on press
+and one `up` on release, so holding it holds the button and drags. Contact
+bounce sends nothing extra. Each message waits at most for the frame send
+already in progress, so never longer than the send timeout. A press while
+disconnected is discarded rather than sent later, when the cursor would be
+somewhere else. A release is sent only on the connection that carried its
+press; after a reconnect the server has already let go.
 
 If a phone has turned the debug view on, new sessions inherit it and the
 server's per-frame reports grow to kilobytes. The device ignores reports
