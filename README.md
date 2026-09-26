@@ -118,13 +118,18 @@ top. Nothing in the code requires this particular assignment — the
 config file is the source of truth, and the sheet's labels are derived
 from it, so a layout of your own relabels the printout automatically.
 
-Cut on the dashed line, not around the tag: the white margin is the
-quiet zone the detector needs to find the tag's edge at all.
+The sheet prints two tags to an A4 page, after a page of instructions:
+five pages for the default eight 80mm tags. A tag too tall to share a
+page (over about 88mm) prints on its own page. Cut on the dashed line,
+outside the labels, not around the tag. The white border round each
+tag is exactly one cell of its grid wide (13.3mm at 80mm). That is the
+quiet zone the detector needs to find the tag's edge at all, so keep it
+white and uncovered.
 
 ### Sizing
 
 Decode needs roughly 3 px per cell. A 4x4 ArUco is a 6x6 grid including
-its quiet border, so ~20 px across the tag, minimum.
+its black border, so ~20 px across the tag, minimum.
 
 | Distance | FOV | Resolution | Min tag size |
 | --- | --- | --- | --- |
