@@ -415,3 +415,109 @@ whose aim is not moving the cursor can see why.
 #### Scenario: Another client has the cursor
 - **WHEN** the server's stats say `cursor` is `other`
 - **THEN** the page shows that another device is driving the cursor
+
+### Requirement: The client can tune aim and save settings
+The client SHALL offer a tuning panel with a slider for each tuning
+value — smoothing minimum cutoff, smoothing beta, hold time and
+relative-motion scale — bounded by the ranges the server reports, and
+showing each value currently in effect. Releasing a slider SHALL send
+the new value to the server, which applies it live; the client SHALL
+show what the server reports back rather than what was requested, and
+SHALL show the server's reason if a change is refused. A value pinned
+by a flag or environment variable SHALL be marked as such. A save
+control SHALL ask the server to persist the settings in effect and
+SHALL report whether it succeeded. The panel belongs on the phone for
+the same reason the marker controls do: tuning is judged by aiming at
+the display, which is where the person holding the phone is.
+
+#### Scenario: A slider change takes effect without reconnecting
+- **WHEN** the person moves the beta slider while streaming
+- **THEN** the new value is sent, the displayed value is the one the
+  server reports, and the video connection is not restarted
+
+#### Scenario: Saving reports the outcome
+- **WHEN** the person presses save
+- **THEN** the client shows that the settings were saved, or the
+  server's reason they were not
+
+#### Scenario: A pinned value says so
+- **WHEN** the server reports a tuning value as pinned by an
+  environment variable
+- **THEN** the panel marks that value as set by that variable, so a
+  saved change is not expected to survive a restart
+
+### Requirement: The client can calibrate its lens
+The client SHALL offer a control that starts lens calibration for its
+own session, and another that cancels one in progress, sent as
+`calibrate` control messages on its frame connection. It SHALL show the
+calibration status the server reports: views kept out of views needed
+while capturing, and the RMS reprojection error or the failure once
+finished. It SHALL link to the calibration board page. The control
+SHALL be unavailable while the client is not streaming.
+
+#### Scenario: Starting calibration from the phone
+- **WHEN** the operator presses the calibrate control while streaming
+- **THEN** the client sends a `calibrate` message with action `start`
+  and shows the server's progress as it is reported
+
+#### Scenario: Result is shown
+- **WHEN** the server reports the calibration as done
+- **THEN** the client shows the RMS reprojection error
+
+### Requirement: The client names its camera in hello
+The client SHALL include the label of the camera track it is streaming
+from as `camera` in its `hello`, when the browser exposes one, so a
+calibration is kept per camera rather than per phone model.
+
+#### Scenario: Camera label sent
+- **WHEN** the connection opens and the browser reports a non-empty
+  track label
+- **THEN** `hello` carries that label as `camera`
+
+### Requirement: The client can zero the gun
+The client SHALL offer controls to start zeroing, finish it, cancel it
+and reset a stored zero, sending the corresponding zeroing control
+messages on the frame connection. While a run is active it SHALL show
+which target to shoot, its position in the sequence, whether it is
+optional, and the outcome of the last shot. When the session is zeroed
+it SHALL say so, with the fit's residual. The trigger SHALL keep working
+unchanged; the server decides that a press during zeroing is a shot.
+
+#### Scenario: The prompt names the target to shoot
+- **WHEN** a zeroing run is active and the server reports the target
+  "top-left corner"
+- **THEN** the client shows that label and the target's position in the
+  sequence
+
+#### Scenario: Controls are unavailable without a connection
+- **WHEN** the client is not streaming
+- **THEN** the zeroing controls are disabled
+
+### Requirement: The client sends a persistent identity
+The client SHALL generate a random identifier once, keep it in the
+browser's local storage, and include it as `id` in every `hello`, so the
+server can recognise the same phone across reconnects and server
+restarts. Where local storage is unavailable the `hello` SHALL be sent
+without an `id`.
+
+#### Scenario: The same id is sent after a reload
+- **WHEN** the page is reloaded and streaming restarted
+- **THEN** the `hello` carries the same `id` as before
+
+### Requirement: The phone can save the last seconds of its stream
+The client SHALL offer a control, available while streaming, that asks
+the server to save this session's recent frames as a recording, and
+SHALL display the directory the server reports having written and how
+many frames it holds, or the reason the server gives for writing
+nothing. The control SHALL send no credentials of its own: it rides the
+already-authenticated frame connection.
+
+#### Scenario: Saving shows where the recording went
+- **WHEN** the operator presses the save control while streaming
+- **THEN** the page shows the recording's directory and frame count once
+  the server answers
+
+#### Scenario: A refused save is explained
+- **WHEN** the server answers that nothing was recorded
+- **THEN** the page shows the server's reason rather than appearing to
+  have saved

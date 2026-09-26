@@ -964,6 +964,21 @@ unsolvable frame leaves the cursor where it was rather than inventing a
 position; holding the last good pose and decaying it needs state the
 per-frame path does not have, and is the next thing to build.
 
+### Saving what just happened
+
+The server keeps each session's last 10 seconds of frames in memory
+(`--record-seconds`, 0 disables; capped at `--record-max-mb`, default
+64). **Save last few seconds** on the phone — or `POST /recordings` for
+a device with no screen — writes them, byte for byte, to
+`.boresight/recordings/<timestamp>/` with a fixture-style
+`manifest.json` (plus client timestamps, triggers and each frame's live
+result, and the session's lens and zero for reference) and the
+`markers.toml` in use. It replays like any fixture:
+
+    uv run python -m boresight.pipeline .boresight/recordings/<timestamp> --dry-run
+
+A recording holds whatever the camera saw, and never the token.
+
 ## The ESP32-CAM client
 
 An AI-Thinker ESP32-CAM inside the shell replaces the phone: the OV2640

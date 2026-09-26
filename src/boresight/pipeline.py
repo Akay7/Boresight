@@ -259,6 +259,11 @@ class AimPipeline:
             return MarkerTracker()
         return self._detect
 
+    @property
+    def marker_map(self) -> MarkerMap:
+        """The layout this pipeline solves against. Read-only, like the rest."""
+        return self._map
+
     def process_frame(
         self,
         frame: np.ndarray,
@@ -486,8 +491,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--config",
-        default=str(DEFAULT_CONFIG_PATH),
-        help=f"marker layout TOML (default: {DEFAULT_CONFIG_PATH})",
+        default=None,
+        help="marker layout TOML (default: the directory's own markers.toml "
+        f"if it has one, as a saved recording does, else {DEFAULT_CONFIG_PATH})",
     )
     parser.add_argument(
         "--dry-run",
@@ -498,7 +504,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     from boresight.marker_map import load_marker_map
 
-    marker_map = load_marker_map(args.config)
+    # A recording is only reproducible against the layout it was
+    # captured with, so it carries that layout; the fixtures do not,
+    # and get the shipped one they were rendered from.
+    config = args.config
+    if config is None:
+        own = Path(args.frames_dir) / "markers.toml"
+        config = own if own.is_file() else DEFAULT_CONFIG_PATH
+    marker_map = load_marker_map(config)
 
     if args.dry_run:
         from boresight.inject import FakeCursorBackend

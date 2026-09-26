@@ -5,7 +5,9 @@ Turns one captured frame into a cursor position: detects the markers,
 pairs them with the marker map, solves the aim point, normalizes and
 clamps it, and emits it, statelessly, with optional debug geometry and
 a replay entry point for recorded sequences.
+
 ## Requirements
+
 ### Requirement: A single operation turns a frame into a cursor position
 The system SHALL provide one per-frame operation that takes a captured
 frame and, using a marker map, runs marker detection, pairs each detected
@@ -219,3 +221,99 @@ SHALL also report the reprojection error of the fit.
   debug output requested
 - **THEN** the result carries debug geometry with an empty list of
   markers, rather than carrying no debug geometry at all
+
+### Requirement: A caller supplies its own per-session detector per call
+The per-frame operation SHALL accept, per call, the detector state of
+the session the frame belongs to, and SHALL detect that frame through
+it without retaining it, so the pipeline itself stays stateless and
+shareable between sessions. The pipeline SHALL be able to create a new
+per-session detector on request; when the pipeline was built with a
+substitute detector (as tests do), or with tracking disabled, the
+per-session detector it creates SHALL be that detector unchanged.
+Replaying a recorded sequence SHALL detect it through one per-session
+detector, as one streaming session would.
+
+#### Scenario: A per-call detector is used and not kept
+- **WHEN** a frame is processed with a per-session detector supplied,
+  and then another frame is processed without one
+- **THEN** the first frame is detected through the supplied detector,
+  and the second through the pipeline's own detector
+
+#### Scenario: A substitute detector is not bypassed
+- **WHEN** a pipeline built with a substitute detector is asked for a
+  per-session detector
+- **THEN** it returns the substitute detector, so frames processed with
+  it see exactly the substitute's detections
+
+### Requirement: The per-frame operation corrects lens distortion when given a lens model
+The per-frame operation SHALL accept an optional lens model (camera
+matrix and distortion coefficients) per call. When one is given, it
+SHALL undistort every detected marker corner into ideal pinhole pixel
+coordinates with the same camera matrix before solving. It SHALL also
+undistort the image centre the same way and aim through it, so the aim
+point is still the point imaged at the frame's centre. It SHALL NOT
+remap the whole frame. The lens model SHALL be passed per call rather
+than held on the pipeline, because the pipeline is shared between
+sessions whose cameras differ. When no lens model is given, the
+operation SHALL behave exactly as it does without this requirement.
+
+#### Scenario: No lens model changes nothing
+- **WHEN** a frame is processed without a lens model
+- **THEN** the result and the emitted position are identical to those
+  produced before lens support existed
+
+#### Scenario: A distorted frame is solved more accurately with its lens model
+- **WHEN** a frame of the marker layout is rendered through a camera
+  with known strong radial distortion and processed with that camera's
+  lens model
+- **THEN** the aim point is closer to the ground-truth aim point than
+  when the same frame is processed without the lens model, and within
+  a documented tolerance of it
+
+#### Scenario: Debug geometry stays in raw image pixels
+- **WHEN** a frame is processed with a lens model and debug output
+  requested
+- **THEN** detected marker corners are reported as detected, in raw
+  image pixels, and the projected screen quad and cursor position are
+  distorted back into raw image pixels, so an unclamped cursor lands on
+  the image centre
+
+### Requirement: The per-frame operation applies a per-call aim correction
+The per-frame operation SHALL accept an optional aim correction per
+call and, when given one, SHALL use the corrected aim point in place of
+the image-centre aim point for everything downstream of the solve:
+the reported unclamped millimetre aim point, normalization, clamping,
+the emitted position and the debug cursor position. The correction
+SHALL be an argument rather than held on the pipeline, so that one
+session's correction cannot change another's frames. Without a
+correction the operation SHALL behave exactly as before. A solved
+frame's result SHALL also carry the frame's solved geometry (its
+homography, image size and screen size) for a caller that needs it,
+without it taking part in result equality.
+
+#### Scenario: No correction leaves the aim unchanged
+- **WHEN** a frame is processed without a correction
+- **THEN** the result and the emitted position are identical to those
+  produced before corrections existed
+
+#### Scenario: A correction moves the emitted position
+- **WHEN** a frame is processed with a correction whose aim offset is
+  non-zero
+- **THEN** the emitted position is the corrected aim point normalized
+  and clamped, and the debug cursor position no longer coincides with
+  the image centre
+
+### Requirement: Replay uses a sequence's own layout when it carries one
+The replay entry point SHALL, when no layout is explicitly given, use the
+layout file stored in the replayed directory if one is present, and the
+shipped layout otherwise. A recording is only reproducible against the
+layout it was captured with, which need not be the shipped one.
+
+#### Scenario: A recording replays against its own layout
+- **WHEN** a directory holding a layout file is replayed without an
+  explicit layout
+- **THEN** its frames are solved against that directory's layout
+
+#### Scenario: An explicit layout still wins
+- **WHEN** a layout is given explicitly
+- **THEN** it is used even if the directory holds its own
