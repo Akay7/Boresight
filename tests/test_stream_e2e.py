@@ -23,9 +23,11 @@ processor.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
 import time
+from itertools import pairwise
 from pathlib import Path
 
 import cv2
@@ -33,8 +35,10 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from boresight import marker_source, server
 from boresight.inject import FakeCursorBackend
 from boresight.marker_map import load_marker_map
+from boresight.one_euro import OneEuroFilter
 from boresight.pipeline import (
     DEFAULT_CONFIG_PATH,
     AimPipeline,
@@ -330,6 +334,124 @@ def test_repeated_trigger_messages_invoke_click_repeatedly(
     assert backend.clicks == 3
 
 
+# --- Trigger hold -------------------------------------------------------
+
+
+def _send_and_sync(socket, *messages: dict) -> dict:
+    """Send control messages, then a frame, and wait for its report.
+
+    Control messages are handled in arrival order ahead of the frame, so
+    the report proves they have all been acted on.
+    """
+    for message in messages:
+        socket.send_text(json.dumps(message))
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+    socket.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+    return socket.receive_json()
+
+
+DOWN = {"type": "trigger", "state": "down"}
+UP = {"type": "trigger", "state": "up"}
+
+
+def test_down_holds_and_up_releases(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        report = _send_and_sync(socket, DOWN)
+        assert backend.held
+        moves_while_held = len(backend.calls)
+        report = _send_and_sync(socket, UP)
+
+    assert moves_while_held > 0  # the frame moved the cursor with it held
+    assert (backend.presses, backend.releases, backend.clicks) == (1, 1, 0)
+    assert report["triggers"] == 1
+
+
+def test_repeated_down_and_stray_up_are_ignored(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, UP)
+        assert backend.releases == 0
+        report = _send_and_sync(socket, DOWN, DOWN)
+        assert backend.presses == 1
+        assert report["triggers"] == 1
+        _send_and_sync(socket, UP, UP)
+
+    assert backend.releases == 1
+
+
+def test_unknown_trigger_state_does_nothing(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        report = _send_and_sync(socket, {"type": "trigger", "state": "sideways"})
+
+    assert (backend.presses, backend.releases, backend.clicks) == (0, 0, 0)
+    assert report["triggers"] == 0
+
+
+def test_disconnecting_while_held_releases(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, DOWN)
+        assert backend.held
+
+    # The session's teardown runs as the socket closes; give it a moment.
+    deadline = time.monotonic() + 2.0
+    while backend.held and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert not backend.held
+    assert backend.releases == 1
+
+
+def test_one_sessions_release_does_not_end_anothers_hold(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    with client.websocket_connect(FRAME_SOCKET_PATH) as first:
+        with client.websocket_connect(FRAME_SOCKET_PATH) as second:
+            _send_and_sync(first, DOWN)
+            _send_and_sync(second, DOWN)
+            _send_and_sync(first, UP)
+            assert backend.held
+            assert backend.presses == 1
+            _send_and_sync(second, UP)
+            assert not backend.held
+
+
+def test_a_silent_holding_session_is_released(
+    client: TestClient, backend: FakeCursorBackend, monkeypatch
+) -> None:
+    monkeypatch.setattr(server, "HOLD_IDLE_RELEASE_S", 0.2)
+    monkeypatch.setattr(server, "HOLD_CHECK_INTERVAL_S", 0.02)
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, DOWN)
+        deadline = time.monotonic() + 2.0
+        while backend.held and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # Released while the socket is still open, not by the close.
+        assert not backend.held
+
+
+def test_a_streaming_session_can_hold_past_the_idle_window(
+    client: TestClient, backend: FakeCursorBackend, monkeypatch
+) -> None:
+    monkeypatch.setattr(server, "HOLD_IDLE_RELEASE_S", 0.2)
+    monkeypatch.setattr(server, "HOLD_CHECK_INTERVAL_S", 0.02)
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        _send_and_sync(socket, DOWN)
+        until = time.monotonic() + 0.6
+        while time.monotonic() < until:
+            _send_and_sync(socket)
+            time.sleep(0.05)
+        assert backend.held
+        assert backend.releases == 0
+
+
 def test_trigger_interleaved_with_frames_does_not_disturb_frame_handling(
     client: TestClient, backend: FakeCursorBackend
 ) -> None:
@@ -387,7 +509,10 @@ class _HeldPipeline:
         self.release = threading.Event()
         self.seen: list[int] = []
 
-    def process_frame(self, frame, *, debug: bool = False) -> FrameResult:
+    def session_detector(self):
+        return None
+
+    def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
         # A cheap fingerprint that differs per fixture frame, so the
         # test can assert *which* frames survived, not merely how many.
         self.seen.append(int(frame.sum()))
@@ -422,7 +547,7 @@ def test_a_backlog_is_dropped_down_to_its_newest_frame(client: TestClient) -> No
         reports = [socket.receive_json(), socket.receive_json()]
 
     expected = [
-        int(cv2.imdecode(np.frombuffer(p, np.uint8), cv2.IMREAD_COLOR).sum())
+        int(cv2.imdecode(np.frombuffer(p, np.uint8), cv2.IMREAD_GRAYSCALE).sum())
         for p in (payloads[0], payloads[3])
     ]
     assert held.seen == expected, "the surviving frames were not the first and newest"
@@ -597,3 +722,398 @@ def test_a_malformed_debug_message_leaves_the_setting_alone(
 
         socket.send_text(json.dumps({"type": "debug", "enabled": None}))
         assert "debug" in _send_frame(socket, entries[0])
+
+
+# --- A fault in processing is reported, never silent -----------------
+
+
+class _FlakyBackend(FakeCursorBackend):
+    """Raises on the first move, then behaves -- a device write that
+    failed once, which the pipeline has no outcome for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raised = False
+
+    def move_absolute(self, x: float, y: float) -> None:
+        if not self.raised:
+            self.raised = True
+            raise OSError("simulated uinput write failure")
+        super().move_absolute(x, y)
+
+
+def test_a_frame_that_raises_costs_one_frame_not_the_session(caplog) -> None:
+    backend = _FlakyBackend()
+    entries = _manifest(VIDEO_DIR)["frames"][:3]
+    app = create_app(backend_factory=lambda: backend)
+
+    with TestClient(app) as client, client.websocket_connect(FRAME_SOCKET_PATH) as ws:
+        reports = []
+        for entry in entries:
+            ws.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+            reports.append(ws.receive_json())
+
+    assert reports[0]["outcome"] == "error"
+    assert reports[0]["failed"] == 1
+    assert reports[0]["client_ms"] == CLIENT_MS
+    assert [report["outcome"] for report in reports[1:]] == ["solved", "solved"]
+    assert "simulated uinput write failure" in caplog.text
+
+
+def test_a_dead_processor_closes_the_session_instead_of_hanging(
+    monkeypatch, caplog
+) -> None:
+    """The receiver would otherwise go on accepting frames that nothing
+    will ever answer, and the phone would sit there waiting."""
+    from starlette.websockets import WebSocketDisconnect
+
+    import boresight.server as server
+
+    async def broken_report(websocket, stats, client_ms):
+        raise KeyError("simulated processor fault")
+
+    backend = FakeCursorBackend()
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+    app = create_app(backend_factory=lambda: backend)
+    monkeypatch.setattr(server, "_report", broken_report)
+
+    with TestClient(app) as client, client.websocket_connect(FRAME_SOCKET_PATH) as ws:
+        ws.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+
+    assert closed.value.code == server.WS_INTERNAL_ERROR
+    assert "frame processing" in caplog.text
+    assert "simulated processor fault" in caplog.text
+    assert len(app.state.sessions) == 0
+
+
+# --- Teardown with a frame still on an executor thread -----------------
+
+
+class _LateMover:
+    """A session pipeline whose frame is still solving when the client
+    leaves: it blocks until released, then moves the session's cursor
+    the way a real solve would."""
+
+    def __init__(self, cursor) -> None:
+        self.cursor = cursor
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.moved = threading.Event()
+
+    def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
+        self.entered.set()
+        self.release.wait(timeout=5.0)
+        self.cursor.move_absolute(0.5, 0.5)
+        self.moved.set()
+        return FrameResult(outcome=FrameOutcome.SOLVED, position=(0.5, 0.5))
+
+
+def test_a_frame_finishing_after_disconnect_does_not_take_the_cursor(
+    client: TestClient, backend: FakeCursorBackend
+) -> None:
+    """Cancelling the processor cannot stop the executor thread. Its move
+    lands after the session freed the cursor, and a free cursor goes to
+    whoever aims first -- which must not be a session that is gone."""
+    movers: list[_LateMover] = []
+
+    def session_pipeline(cursor):
+        movers.append(_LateMover(cursor))
+        return movers[-1]
+
+    client.app.state.markers.session_pipeline = session_pipeline
+    sessions = client.app.state.sessions
+
+    def release_once_the_session_is_gone() -> None:
+        deadline = time.monotonic() + 5.0
+        while len(sessions) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        movers[0].release.set()
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(CLIENT_MS, _first_frame()))
+        assert movers[0].entered.wait(timeout=5.0)
+        threading.Thread(target=release_once_the_session_is_gone).start()
+
+    assert movers[0].moved.wait(timeout=5.0)
+    assert backend.calls == []
+    assert client.app.state.arbiter.status(object()) == "free"
+
+
+class _FakeSocket:
+    """Just enough of a WebSocket for `run_frame_session`: a hold, one
+    frame, then nothing until the test says the client has gone."""
+
+    def __init__(self, frame: bytes) -> None:
+        self._messages = [
+            {"type": "websocket.receive", "text": '{"type":"trigger","state":"down"}'},
+            {"type": "websocket.receive", "bytes": pack_frame(CLIENT_MS, frame)},
+        ]
+        self.gone = asyncio.Event()
+
+    async def receive(self) -> dict:
+        if self._messages:
+            return self._messages.pop(0)
+        await self.gone.wait()
+        return {"type": "websocket.disconnect", "code": 1000}
+
+    async def send_json(self, data) -> None:
+        pass
+
+
+def test_a_teardown_cancelled_mid_wait_raises_the_cancellers_cancellation() -> None:
+    """A server (or test client) cancelling a session that is already
+    winding down must get back its own cancellation, which it knows to
+    absorb, rather than one the session sent its own tasks."""
+    backend = FakeCursorBackend()
+    markers = marker_source.MarkerSourceController(
+        backend, load_marker_map(DEFAULT_CONFIG_PATH)
+    )
+    movers: list[_LateMover] = []
+
+    def session_pipeline(cursor):
+        movers.append(_LateMover(cursor))
+        return movers[-1]
+
+    markers.session_pipeline = session_pipeline
+    sessions = server.SessionRegistry()
+    hold = server.TriggerHold(backend)
+    arbiter = server.CursorArbiter(backend)
+    socket = _FakeSocket(_first_frame())
+
+    async def scenario() -> BaseException | None:
+        session = asyncio.create_task(
+            server.run_frame_session(
+                socket, markers, backend, sessions=sessions, hold=hold, arbiter=arbiter
+            )
+        )
+        while not movers or not movers[0].entered.is_set():
+            await asyncio.sleep(0.005)
+        socket.gone.set()
+        # Teardown has begun once the session is unlisted; it is now
+        # waiting on the frame still in the executor.
+        while len(sessions):
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.02)
+        session.cancel("server shutting down")
+        try:
+            await session
+        except asyncio.CancelledError as error:
+            return error
+        finally:
+            movers[0].release.set()
+        return None
+
+    error = asyncio.run(scenario())
+
+    assert error is not None, "the cancelled teardown returned normally"
+    assert error.args == ("server shutting down",)
+    assert backend.presses == backend.releases == 1
+    assert arbiter.status(object()) == "free"
+    assert movers[0].moved.wait(timeout=5.0)
+    assert backend.calls == []
+
+
+# --- Aim smoothing is timed by capture, not arrival ---------------------
+
+
+def test_smoothing_is_timed_by_the_client_capture_timestamps(
+    client: TestClient, monkeypatch
+) -> None:
+    """Frames captured 50 ms apart, arriving at deliberately uneven
+    intervals: the aim filter must see 50 ms each time."""
+    seen: list[float] = []
+
+    class _RecordingFilter(OneEuroFilter):
+        def apply(self, point, *, t=None):
+            seen.append(t)
+            return super().apply(point, t=t)
+
+    monkeypatch.setattr(
+        marker_source, "_aim_filter", lambda _tuning: _RecordingFilter()
+    )
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+    payload = _frame_bytes(VIDEO_DIR, entry)
+
+    with client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        for index, pause in enumerate([0.0, 0.12, 0.0, 0.08]):
+            time.sleep(pause)
+            socket.send_bytes(pack_frame(5000.0 + 50.0 * index, payload))
+            assert socket.receive_json()["outcome"] == "solved"
+
+    assert None not in seen
+    intervals = [later - earlier for earlier, later in pairwise(seen)]
+    assert intervals == pytest.approx([0.05, 0.05, 0.05])
+
+
+# --- A shot fires at the aim of the frame it names ----------------------
+
+
+class _EventBackend(FakeCursorBackend):
+    """A fake that also records the order of moves and button events."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[tuple] = []
+
+    def move_absolute(self, x: float, y: float) -> None:
+        super().move_absolute(x, y)
+        self.events.append(("move", x, y))
+
+    def click(self) -> None:
+        super().click()
+        self.events.append(("click",))
+
+    def press(self) -> None:
+        super().press()
+        self.events.append(("press",))
+
+    def release(self) -> None:
+        super().release()
+        self.events.append(("release",))
+
+
+@pytest.fixture
+def events_backend() -> _EventBackend:
+    return _EventBackend()
+
+
+@pytest.fixture
+def events_client(events_backend: _EventBackend) -> TestClient:
+    app = create_app(backend_factory=lambda: events_backend)
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+class _ScriptedPipeline:
+    """Answers each frame with a fixed result and moves nothing, so the
+    only cursor movement a test sees is a shot's. Optionally blocks
+    inside the first frame, to hold a shot waiting for it."""
+
+    def __init__(self, position=(0.3, 0.7), block: bool = False) -> None:
+        self.position = position
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        if not block:
+            self.release.set()
+
+    def session_detector(self):
+        return None
+
+    def process_frame(self, frame, *, debug: bool = False, **_) -> FrameResult:
+        self.entered.set()
+        self.release.wait(timeout=5.0)
+        if self.position is None:
+            return FrameResult(outcome=FrameOutcome.NO_MARKERS)
+        return FrameResult(outcome=FrameOutcome.SOLVED, position=self.position)
+
+
+def _first_frame() -> bytes:
+    return _frame_bytes(VIDEO_DIR, _manifest(VIDEO_DIR)["frames"][0])
+
+
+def test_a_named_shot_fires_at_the_frames_unsmoothed_aim(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    """A fast swing: the smoothed cursor trails, the shot does not."""
+    entries = _manifest(VIDEO_DIR)["frames"][:6]
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        for index, entry in enumerate(entries):
+            client_ms = 1000.0 + 50.0 * index
+            socket.send_bytes(pack_frame(client_ms, _frame_bytes(VIDEO_DIR, entry)))
+            report = socket.receive_json()
+        assert report["outcome"] == "solved"
+        smoothed = events_backend.calls[-1]
+        socket.send_text(json.dumps({**DOWN, "frame_ms": client_ms}))
+        socket.send_text(json.dumps(UP))
+        socket.send_bytes(pack_frame(client_ms + 50.0, _frame_bytes(VIDEO_DIR, entry)))
+        socket.receive_json()
+
+    press = events_backend.events.index(("press",))
+    kind, x, y = events_backend.events[press - 1]
+    assert kind == "move"
+    assert (x, y) == pytest.approx((report["x"], report["y"]), abs=1e-5)
+    # The point of it all: the cursor was somewhere else.
+    assert abs(smoothed[0] - x) > 0.01
+    assert events_backend.events[press + 1] == ("release",)
+
+
+def test_a_shot_waits_for_its_frame_and_keeps_its_release_behind_it(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    scripted = _ScriptedPipeline(position=(0.3, 0.7), block=True)
+    events_client.app.state.markers._pipeline = scripted
+
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(2000.0, _first_frame()))
+        assert scripted.entered.wait(timeout=5.0)
+        socket.send_text(json.dumps({**DOWN, "frame_ms": 2000.0}))
+        socket.send_text(json.dumps(UP))
+        time.sleep(0.1)
+        # Not before its frame: the frame is still being processed.
+        assert events_backend.events == []
+        scripted.release.set()
+        report = socket.receive_json()
+
+    assert events_backend.events == [("move", 0.3, 0.7), ("press",), ("release",)]
+    assert report["triggers"] == 1
+
+
+def test_a_shot_whose_frame_did_not_solve_fires_in_place(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    events_client.app.state.markers._pipeline = _ScriptedPipeline(position=None)
+
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(2000.0, _first_frame()))
+        socket.receive_json()
+        report = _send_and_sync(socket, {"type": "trigger", "frame_ms": 2000.0})
+
+    assert events_backend.events == [("click",)]
+    assert report["triggers"] == 1
+
+
+def test_a_shot_naming_a_frame_that_never_comes_still_fires(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_text(json.dumps({**DOWN, "frame_ms": 1e12}))
+        deadline = time.monotonic() + 2.0
+        while not events_backend.held and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert events_backend.events == [("press",)]
+
+
+@pytest.mark.parametrize("frame_ms", ["2000", None, True, [2000.0], float("nan")])
+def test_an_unusable_frame_ms_is_a_legacy_trigger(
+    events_client: TestClient, events_backend: _EventBackend, frame_ms
+) -> None:
+    events_client.app.state.markers._pipeline = _ScriptedPipeline()
+    with events_client.websocket_connect(FRAME_SOCKET_PATH) as socket:
+        socket.send_bytes(pack_frame(2000.0, _first_frame()))
+        socket.receive_json()
+        # json.dumps writes NaN as a bare token, which the server's
+        # json.loads accepts; the server must still not use it.
+        report = _send_and_sync(socket, {"type": "trigger", "frame_ms": frame_ms})
+
+    assert events_backend.events == [("click",)]
+    assert report["triggers"] == 1
+
+
+def test_a_named_shot_does_not_move_a_button_someone_holds(
+    events_client: TestClient, events_backend: _EventBackend
+) -> None:
+    events_client.app.state.markers._pipeline = _ScriptedPipeline()
+    with (
+        events_client.websocket_connect(FRAME_SOCKET_PATH) as first,
+        events_client.websocket_connect(FRAME_SOCKET_PATH) as second,
+    ):
+        _send_and_sync(first, DOWN)
+        second.send_bytes(pack_frame(2000.0, _first_frame()))
+        second.receive_json()
+        _send_and_sync(second, {**DOWN, "frame_ms": 2000.0})
+        _send_and_sync(first, UP)
+        _send_and_sync(second, UP)
+
+    assert events_backend.events == [("press",), ("release",)]

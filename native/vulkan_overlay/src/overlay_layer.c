@@ -43,6 +43,7 @@
 #include <vulkan/vulkan.h>
 
 #include "canvas_format.h"
+#include "startup_watchdog.h"
 
 #define VK_LAYER_EXPORT __attribute__((visibility("default")))
 
@@ -115,10 +116,11 @@ typedef struct instance_data {
 
     /* Startup diagnostic (spec: "An application that cannot host this
      * backend fails with an actionable diagnostic" / task 4.1): a
-     * detached thread that fires once if no swapchain has been created
-     * within a short window of instance creation. */
-    volatile int swapchain_seen;
-    pthread_t timeout_thread;
+     * thread that fires once if no swapchain has been created within a
+     * short window of instance creation. Owned by this instance --
+     * boresight_DestroyInstance stops and joins it before freeing this
+     * struct (see startup_watchdog.h for why that matters). */
+    startup_watchdog_t watchdog;
 
     struct instance_data *next;
 } instance_data_t;
@@ -325,37 +327,16 @@ static VkLayerDeviceCreateInfo *get_device_chain_info(
 /* Startup diagnostic (spec: "actionable diagnostic" / task 4.1)       */
 /* ------------------------------------------------------------------ */
 
-static void *startup_timeout_thread(void *arg) {
-    instance_data_t *data = (instance_data_t *)arg;
-
-    long timeout_ms = 5000;
-    const char *env = getenv("BORESIGHT_OVERLAY_STARTUP_TIMEOUT_MS");
-    if (env && *env) {
-        char *end = NULL;
-        long parsed = strtol(env, &end, 10);
-        if (end != env && parsed > 0) {
-            timeout_ms = parsed;
-        }
-    }
-
-    struct timespec ts = {
-        .tv_sec = timeout_ms / 1000,
-        .tv_nsec = (timeout_ms % 1000) * 1000000L,
-    };
-    nanosleep(&ts, NULL);
-
-    if (!data->swapchain_seen) {
-        log_line(
-            "this application has not presented a Vulkan swapchain %ldms "
-            "after startup. Either it does not present through Vulkan "
-            "(for example, wined3d's OpenGL path) or it has not reached "
-            "its render loop yet. The window-based overlay "
-            "(`python -m boresight.overlay`) or printed markers "
-            "(open /markers) work regardless of the presentation API.",
-            timeout_ms
-        );
-    }
-    return NULL;
+static void log_startup_timeout(long timeout_ms) {
+    log_line(
+        "this application has not presented a Vulkan swapchain %ldms "
+        "after startup. Either it does not present through Vulkan "
+        "(for example, wined3d's OpenGL path) or it has not reached "
+        "its render loop yet. The window-based overlay "
+        "(`python -m boresight.overlay`) or printed markers "
+        "(open /markers) work regardless of the presentation API.",
+        timeout_ms
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -508,6 +489,21 @@ static bool try_setup_overlay(device_data_t *dd, swapchain_state_t *sc) {
             "resolution change so the canvas is regenerated for the new "
             "size.",
             canvas.width, canvas.height, sc->extent.width, sc->extent.height
+        );
+        bsov_free(&canvas);
+        return false;
+    }
+
+    /* Every rect below becomes a VkImageCopy into a swapchain image of
+     * sc->extent; this is the check that makes each one in bounds.
+     * bsov_load already bounds rects by the canvas, which the size
+     * check above equates with the extent, so this cannot fail today
+     * -- it is here so that guarantee lives in one tested place. */
+    if (!bsov_fits_extent(&canvas, sc->extent.width, sc->extent.height)) {
+        log_line(
+            "a marker rectangle in '%s' lies outside this swapchain's "
+            "%ux%u images; skipping the overlay for this swapchain.",
+            canvas_path, sc->extent.width, sc->extent.height
         );
         bsov_free(&canvas);
         return false;
@@ -670,6 +666,13 @@ static bool try_setup_overlay(device_data_t *dd, swapchain_state_t *sc) {
     };
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage =
         (PFN_vkCmdCopyBufferToImage)dd->gdpa(dd->device, "vkCmdCopyBufferToImage");
+    if (!CmdCopyBufferToImage) {
+        /* Core since 1.0, so never expected -- but a NULL call here
+         * would crash the application, not just this layer. Destroying
+         * `pool` below also frees the still-recording `setup_cmd`. */
+        ok = false;
+        goto cleanup;
+    }
     CmdCopyBufferToImage(
         setup_cmd, staging_buffer, sc->canvas_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
         &copy_region
@@ -886,6 +889,19 @@ static VkResult VKAPI_CALL boresight_CreateInstance(
     }
 
     instance_data_t *data = calloc(1, sizeof(*data));
+    if (!data) {
+        /* Without our own state, this layer's vkGetInstanceProcAddr has
+         * no next-layer GIPA to forward to, so even pure passthrough is
+         * impossible -- undo the downstream create and fail cleanly
+         * instead (design.md: "Allocation failure policy"). */
+        PFN_vkDestroyInstance destroy_next =
+            (PFN_vkDestroyInstance)next_gipa(*instance, "vkDestroyInstance");
+        if (destroy_next) {
+            destroy_next(*instance, allocator);
+        }
+        *instance = VK_NULL_HANDLE;
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
     data->key = GET_KEY(*instance);
     data->instance = *instance;
     data->gipa = next_gipa;
@@ -901,13 +917,16 @@ static VkResult VKAPI_CALL boresight_CreateInstance(
         (PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR)next_gipa(
             *instance, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"
         );
-    data->swapchain_seen = 0;
 
     log_line("layer loaded (VkInstance %p)", (void *)*instance);
 
+    if (startup_watchdog_start(
+            &data->watchdog, startup_watchdog_timeout_from_env(), log_startup_timeout
+        ) != 0) {
+        /* Only the diagnostic is lost; the instance works as normal. */
+        log_line("could not start the startup-diagnostic thread; continuing without it.");
+    }
     add_instance(data);
-    pthread_create(&data->timeout_thread, NULL, startup_timeout_thread, data);
-    pthread_detach(data->timeout_thread);
 
     return VK_SUCCESS;
 }
@@ -917,7 +936,12 @@ static void VKAPI_CALL boresight_DestroyInstance(
 ) {
     instance_data_t *data = remove_instance(GET_KEY(instance));
     PFN_vkDestroyInstance destroy_next = data ? data->DestroyInstance : NULL;
-    free(data);
+    if (data) {
+        /* Wakes and joins the diagnostic thread -- immediately, not
+         * after its timeout -- so nothing can read `data` once freed. */
+        startup_watchdog_stop(&data->watchdog);
+        free(data);
+    }
     if (destroy_next) {
         destroy_next(instance, allocator);
     }
@@ -948,6 +972,19 @@ static VkResult VKAPI_CALL boresight_CreateDevice(
     }
 
     device_data_t *dd = calloc(1, sizeof(*dd));
+    if (!dd) {
+        /* Same reasoning as boresight_CreateInstance: without `dd`, our
+         * vkGetDeviceProcAddr cannot forward anything, so undo the
+         * downstream create rather than hand back a device whose
+         * dispatch through this layer is broken. */
+        PFN_vkDestroyDevice destroy_next =
+            (PFN_vkDestroyDevice)next_gdpa(*device, "vkDestroyDevice");
+        if (destroy_next) {
+            destroy_next(*device, allocator);
+        }
+        *device = VK_NULL_HANDLE;
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
     dd->key = GET_KEY(*device);
     dd->device = *device;
     dd->physical_device = physical_device;
@@ -1002,16 +1039,28 @@ static VkResult VKAPI_CALL boresight_CreateDevice(
     dd->queue_family_index = create_info->pQueueCreateInfos[0].queueFamilyIndex;
     dd->GetDeviceQueue(*device, dd->queue_family_index, 0, &dd->present_queue);
 
+    /* Any failure below leaves `queue_supports_transfer` false (from
+     * calloc), i.e. "draw nothing on this device" -- never a NULL
+     * dereference. A missing `dd->instance` should be impossible (the
+     * physical device came from an instance we saw created), but is
+     * also what swapchain creation checks before using it. */
     uint32_t family_count = 0;
-    dd->instance->GetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, NULL);
-    VkQueueFamilyProperties *families = calloc(family_count, sizeof(VkQueueFamilyProperties));
-    dd->instance->GetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, families);
-    if (dd->queue_family_index < family_count) {
-        VkQueueFlags flags = families[dd->queue_family_index].queueFlags;
-        dd->queue_supports_transfer =
-            (flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != 0;
+    if (dd->instance && dd->instance->GetPhysicalDeviceQueueFamilyProperties) {
+        dd->instance->GetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, NULL);
     }
-    free(families);
+    VkQueueFamilyProperties *families =
+        family_count > 0 ? calloc(family_count, sizeof(VkQueueFamilyProperties)) : NULL;
+    if (families) {
+        dd->instance->GetPhysicalDeviceQueueFamilyProperties(
+            physical_device, &family_count, families
+        );
+        if (dd->queue_family_index < family_count) {
+            VkQueueFlags flags = families[dd->queue_family_index].queueFlags;
+            dd->queue_supports_transfer =
+                (flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != 0;
+        }
+        free(families);
+    }
 
     add_device(dd);
     return VK_SUCCESS;
@@ -1023,6 +1072,22 @@ static void VKAPI_CALL boresight_DestroyDevice(
     device_data_t *dd = remove_device(GET_KEY(device));
     PFN_vkDestroyDevice destroy_next = dd ? dd->DestroyDevice : NULL;
     if (dd) {
+        /* An application should have destroyed every swapchain first,
+         * but if it didn't, the canvas image, memory, pool and
+         * semaphores this layer made for them must still go before the
+         * device does -- otherwise the layer adds leaked-child
+         * validation errors (and a host leak) of its own. */
+        swapchain_state_t *sc = dd->swapchains;
+        dd->swapchains = NULL;
+        if (sc) {
+            dd->DeviceWaitIdle(device);
+        }
+        while (sc) {
+            swapchain_state_t *next = sc->next;
+            teardown_overlay(dd, sc);
+            free(sc);
+            sc = next;
+        }
         pthread_mutex_destroy(&dd->lock);
         free(dd);
     }
@@ -1051,7 +1116,7 @@ static VkResult VKAPI_CALL boresight_CreateSwapchainKHR(
      * uses the image, only what else becomes legal to do to it. */
     VkSwapchainCreateInfoKHR modified_create_info = *create_info;
     bool transfer_dst_supported = false;
-    if (dd->instance->GetPhysicalDeviceSurfaceCapabilitiesKHR) {
+    if (dd->instance && dd->instance->GetPhysicalDeviceSurfaceCapabilitiesKHR) {
         VkSurfaceCapabilitiesKHR capabilities;
         if (dd->instance->GetPhysicalDeviceSurfaceCapabilitiesKHR(
                 dd->physical_device, create_info->surface, &capabilities
@@ -1068,17 +1133,39 @@ static VkResult VKAPI_CALL boresight_CreateSwapchainKHR(
         return result;
     }
 
-    dd->instance->swapchain_seen = 1;
+    if (dd->instance) {
+        startup_watchdog_mark_swapchain_seen(&dd->instance->watchdog);
+    }
 
+    /* From here on the swapchain exists downstream, so failing this
+     * call over our own bookkeeping would break a working application.
+     * Every failure below instead leaves the swapchain untracked, which
+     * boresight_QueuePresentKHR already passes straight through
+     * (design.md: "Allocation failure policy"). */
     swapchain_state_t *sc = calloc(1, sizeof(*sc));
+    if (!sc) {
+        log_line("out of memory tracking a new swapchain; drawing nothing on it.");
+        return VK_SUCCESS;
+    }
     sc->swapchain = *swapchain;
     sc->extent = create_info->imageExtent;
     sc->format = create_info->imageFormat;
     sc->transfer_dst_supported = transfer_dst_supported;
 
-    dd->GetSwapchainImagesKHR(device, *swapchain, &sc->image_count, NULL);
-    sc->images = calloc(sc->image_count, sizeof(VkImage));
-    dd->GetSwapchainImagesKHR(device, *swapchain, &sc->image_count, sc->images);
+    VkResult images_result =
+        dd->GetSwapchainImagesKHR(device, *swapchain, &sc->image_count, NULL);
+    if (images_result == VK_SUCCESS && sc->image_count > 0) {
+        sc->images = calloc(sc->image_count, sizeof(VkImage));
+        images_result = sc->images
+            ? dd->GetSwapchainImagesKHR(device, *swapchain, &sc->image_count, sc->images)
+            : VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    if (images_result != VK_SUCCESS || !sc->images) {
+        log_line("could not query this swapchain's images; drawing nothing on it.");
+        free(sc->images);
+        free(sc);
+        return VK_SUCCESS;
+    }
 
     sc->overlay_ready = try_setup_overlay(dd, sc);
 
@@ -1124,7 +1211,11 @@ static VkResult VKAPI_CALL boresight_QueuePresentKHR(
     swapchain_state_t *states[MAX_SWAPCHAINS_PER_PRESENT];
     for (uint32_t i = 0; all_ready && i < n; i++) {
         swapchain_state_t *sc = find_swapchain(dd, present_info->pSwapchains[i]);
-        if (!sc || !sc->overlay_ready) {
+        /* The image index bound is the application's own valid-usage
+         * obligation, but checking it costs nothing and turns a bad
+         * index into a passthrough rather than an out-of-bounds read of
+         * our per-image arrays. */
+        if (!sc || !sc->overlay_ready || present_info->pImageIndices[i] >= sc->image_count) {
             all_ready = false;
             break;
         }
@@ -1180,10 +1271,26 @@ static VkResult VKAPI_CALL boresight_QueuePresentKHR(
 /* Loader-facing exports                                               */
 /* ------------------------------------------------------------------ */
 
-VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-vkGetInstanceProcAddr(VkInstance instance, const char *name) {
+/* The exported vkGetInstanceProcAddr/vkGetDeviceProcAddr below are
+ * thin wrappers around these static implementations, and every pointer
+ * this layer hands out (to itself, or to the loader during negotiation)
+ * is to the static one. Taking the address of the *exported* symbol
+ * from inside this .so goes through ELF symbol interposition: in any
+ * process that already has libvulkan.so loaded into the global scope --
+ * every application linked against the loader directly -- it resolves
+ * to the loader's own vkGetInstanceProcAddr, the loader then calls
+ * itself as if it were this layer, and vkCreateInstance recurses until
+ * the stack overflows. Found by a create/destroy probe run against
+ * lavapipe while verifying fix-vulkan-layer-lifetime. */
+static PFN_vkVoidFunction VKAPI_CALL boresight_GetDeviceProcAddr(
+    VkDevice device, const char *name
+);
+
+static PFN_vkVoidFunction VKAPI_CALL boresight_GetInstanceProcAddr(
+    VkInstance instance, const char *name
+) {
     if (strcmp(name, "vkGetInstanceProcAddr") == 0) {
-        return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
+        return (PFN_vkVoidFunction)boresight_GetInstanceProcAddr;
     }
     if (strcmp(name, "vkCreateInstance") == 0) {
         return (PFN_vkVoidFunction)boresight_CreateInstance;
@@ -1205,10 +1312,11 @@ vkGetInstanceProcAddr(VkInstance instance, const char *name) {
     return data->gipa(instance, name);
 }
 
-VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
-vkGetDeviceProcAddr(VkDevice device, const char *name) {
+static PFN_vkVoidFunction VKAPI_CALL boresight_GetDeviceProcAddr(
+    VkDevice device, const char *name
+) {
     if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
-        return (PFN_vkVoidFunction)vkGetDeviceProcAddr;
+        return (PFN_vkVoidFunction)boresight_GetDeviceProcAddr;
     }
     if (strcmp(name, "vkDestroyDevice") == 0) {
         return (PFN_vkVoidFunction)boresight_DestroyDevice;
@@ -1230,6 +1338,16 @@ vkGetDeviceProcAddr(VkDevice device, const char *name) {
     return data->gdpa(device, name);
 }
 
+VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vkGetInstanceProcAddr(VkInstance instance, const char *name) {
+    return boresight_GetInstanceProcAddr(instance, name);
+}
+
+VK_LAYER_EXPORT VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vkGetDeviceProcAddr(VkDevice device, const char *name) {
+    return boresight_GetDeviceProcAddr(device, name);
+}
+
 VK_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL
 vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *interface_struct) {
     if (!interface_struct ||
@@ -1238,8 +1356,8 @@ vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface *interface_stru
     }
 
     if (interface_struct->loaderLayerInterfaceVersion >= 2) {
-        interface_struct->pfnGetInstanceProcAddr = vkGetInstanceProcAddr;
-        interface_struct->pfnGetDeviceProcAddr = vkGetDeviceProcAddr;
+        interface_struct->pfnGetInstanceProcAddr = boresight_GetInstanceProcAddr;
+        interface_struct->pfnGetDeviceProcAddr = boresight_GetDeviceProcAddr;
         interface_struct->pfnGetPhysicalDeviceProcAddr = NULL;
     }
 

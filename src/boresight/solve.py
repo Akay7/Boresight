@@ -67,7 +67,17 @@ def _conditioning(screen_pts: np.ndarray, aim_point: np.ndarray):
     return distance >= 0.0, distance, (float(extent[0]), float(extent[1]))
 
 
-def solve(correspondences: Sequence[Correspondence], image_size: Point) -> SolveResult:
+def solve(
+    correspondences: Sequence[Correspondence],
+    image_size: Point,
+    aim_px: Point | None = None,
+) -> SolveResult:
+    """Fit the homography and map the aim pixel through its inverse.
+
+    `aim_px` defaults to the image centre. A caller that undistorted the
+    corners passes the undistorted centre instead, so the corners and
+    the point aimed through are in the same coordinates (see `lens.py`).
+    """
     if len(correspondences) < MIN_CORRESPONDENCES:
         raise InsufficientCorrespondencesError(
             f"homography requires at least {MIN_CORRESPONDENCES} "
@@ -85,9 +95,11 @@ def solve(correspondences: Sequence[Correspondence], image_size: Point) -> Solve
 
     homography_inv = np.linalg.inv(homography)
 
-    width, height = image_size
-    image_centre = np.array([[[width / 2.0, height / 2.0]]], dtype=np.float64)
-    aim_point = cv2.perspectiveTransform(image_centre, homography_inv)[0, 0]
+    if aim_px is None:
+        width, height = image_size
+        aim_px = (width / 2.0, height / 2.0)
+    aim_pixel = np.array([[aim_px]], dtype=np.float64)
+    aim_point = cv2.perspectiveTransform(aim_pixel, homography_inv)[0, 0]
 
     projected = cv2.perspectiveTransform(screen_pts.reshape(-1, 1, 2), homography)
     reprojection_errors = np.linalg.norm(projected[:, 0, :] - image_pts, axis=1)

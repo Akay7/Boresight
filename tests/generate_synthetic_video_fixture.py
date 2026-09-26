@@ -40,6 +40,22 @@ and a gradient painted on in 2D afterwards. A roughness map separates
 matte cardstock from the semi-gloss bezel, which is what README's
 "Matte substrate only. Never glossy" warning is about.
 
+Two render profiles share the scene, the marker layout, the lighting and
+the camera path, and differ only in what the camera is:
+
+    uv run python -m tests.generate_synthetic_video_fixture                    # phone
+    uv run python -m tests.generate_synthetic_video_fixture --profile esp32cam
+
+`phone` (the default) is the original fixture, `tests/fixtures/
+synthetic_video/`. `esp32cam` renders `tests/fixtures/esp32cam_video/` as
+an AI-Thinker ESP32-CAM would see the same sweep: 1024x768 (the firmware's
+default XGA), 4:3, the OV2640's wider stock lens, a noisier sensor and
+heavier JPEG. Its optics and degradation are estimates from the part's
+datasheet-level specs, recorded in its manifest like everything else, to
+be replaced with measurements from a real board. `--manifest-only` prints
+a profile's manifest (without frames, which need a render) so a refactor
+can be checked against the checked-in one without running Blender.
+
 What the scene still does NOT model, so nothing here should be read as
 evidence about it: geometric depth (the bezel is painted on a flat
 plane, so it never occludes a marker at an oblique angle), lens
@@ -49,12 +65,14 @@ generate false-positive quad candidates.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -68,9 +86,7 @@ SCENE_SCRIPT = TESTS_DIR / "blender_video_scene.py"
 
 BLENDER_BINARY = os.environ.get("BORESIGHT_BLENDER", "blender-5.2")
 
-RESOLUTION = (1280, 720)
 FRAME_COUNT = 20
-CAMERA_FOV_DEG = 45.0
 
 # A 16:9 panel, matching README's markers.toml worked example.
 SCREEN_SIZE_MM = (1220.0, 686.0)
@@ -170,6 +186,70 @@ DEGRADATION = {
 # compression artifact to decode against, and it keeps a 20-frame
 # checked-in fixture to a few MB instead of ~12MB of noisy PNG.
 JPEG_QUALITY = 88
+
+
+@dataclass(frozen=True)
+class RenderProfile:
+    """What the camera is. Everything else about the scene is shared."""
+
+    name: str
+    resolution: tuple[int, int]
+    camera_fov_deg: float
+    degradation: dict
+    jpeg_quality: int
+    fixture_dir: Path
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.fixture_dir / "manifest.json"
+
+    @property
+    def blend_path(self) -> Path:
+        return self.fixture_dir / "scene.blend"
+
+
+PHONE = RenderProfile(
+    name="phone",
+    resolution=(1280, 720),
+    camera_fov_deg=45.0,
+    degradation=DEGRADATION,
+    jpeg_quality=JPEG_QUALITY,
+    fixture_dir=FIXTURE_DIR,
+)
+
+# AI-Thinker ESP32-CAM with its stock OV2640 module, at the firmware's
+# default settings. Estimates, not measurements:
+#   - 1024x768 is the firmware's default XGA: the smallest size that
+#     solved every frame of this sweep (800x600 left the 80mm markers at
+#     ~18px and extrapolated 12 of 20 frames). The OV2640 scales its
+#     full array for it, so the field of view is the lens's full one.
+#   - The stock lens is sold as ~66 degrees diagonal; at 4:3 that is
+#     2*atan(tan(33 deg) * 0.8) ~= 55 degrees across.
+#   - A 2 MP sensor at fixed gain is noisier than a phone's, and the
+#     cheap lens softer.
+#   - Quality 70 approximates the sensor's own JPEG encoder at firmware
+#     quality 12; the OV2640's quantisation is not libjpeg's, so this is
+#     a stand-in for the compression level, not a reproduction.
+ESP32CAM = RenderProfile(
+    name="esp32cam",
+    resolution=(1024, 768),
+    camera_fov_deg=55.0,
+    degradation={
+        "base_seed": 0,
+        "blur_kernel": 5,
+        "blur_sigma": 1.2,
+        "noise_sigma": 8.0,
+    },
+    jpeg_quality=70,
+    fixture_dir=TESTS_DIR / "fixtures" / "esp32cam_video",
+)
+
+PROFILES = {profile.name: profile for profile in (PHONE, ESP32CAM)}
+
+# The phone profile's values under their original names, which the
+# close-range generator imports: it renders with the phone camera.
+RESOLUTION = PHONE.resolution
+CAMERA_FOV_DEG = PHONE.camera_fov_deg
 
 # A sweep across the panel, not a model of any real light-gun swing:
 # enough motion, over enough frames, to make the per-frame homography
@@ -315,15 +395,17 @@ def _render_room() -> np.ndarray:
     return room
 
 
-def _degrade(image: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def _degrade(
+    image: np.ndarray, rng: np.random.Generator, degradation: dict = DEGRADATION
+) -> np.ndarray:
     working = image.astype(np.float64)
 
-    kernel = DEGRADATION["blur_kernel"]
+    kernel = degradation["blur_kernel"]
     working = cv2.GaussianBlur(
-        working, (kernel, kernel), sigmaX=DEGRADATION["blur_sigma"]
+        working, (kernel, kernel), sigmaX=degradation["blur_sigma"]
     )
 
-    working += rng.normal(loc=0.0, scale=DEGRADATION["noise_sigma"], size=working.shape)
+    working += rng.normal(loc=0.0, scale=degradation["noise_sigma"], size=working.shape)
 
     return np.clip(working, 0, 255).astype(np.uint8)
 
@@ -333,6 +415,8 @@ def render_sequence(
     keyframes: list[dict],
     frame_count: int,
     blend_path: Path,
+    resolution: tuple[int, int] = RESOLUTION,
+    camera_fov_deg: float = CAMERA_FOV_DEG,
 ) -> tuple[Path, list[dict]]:
     """Render the TV scene along a camera path; returns (raw dir, ground truth).
 
@@ -370,8 +454,8 @@ def render_sequence(
                 "lights": LIGHTS,
                 "cycles_samples": CYCLES_SAMPLES,
                 "cycles_seed": CYCLES_SEED,
-                "resolution": list(RESOLUTION),
-                "camera_fov_deg": CAMERA_FOV_DEG,
+                "resolution": list(resolution),
+                "camera_fov_deg": camera_fov_deg,
                 "frame_count": frame_count,
                 "keyframes": keyframes,
             },
@@ -402,17 +486,65 @@ def render_sequence(
     return raw_dir, json.loads(ground_truth_path.read_text())
 
 
-def main() -> None:
-    if FIXTURE_DIR.exists():
-        shutil.rmtree(FIXTURE_DIR)
-    FIXTURE_DIR.mkdir(parents=True)
+def build_manifest(profile: RenderProfile, frames: list[dict]) -> dict:
+    manifest = {
+        "image_size": [float(profile.resolution[0]), float(profile.resolution[1])],
+        "screen_size_mm": list(SCREEN_SIZE_MM),
+        "marker_size_mm": MARKER_SIZE_MM,
+        "cardstock_mm": CARDSTOCK_MM,
+        "marker_layout_mm": {str(k): list(v) for k, v in MARKER_LAYOUT_MM.items()},
+        "bezel_mm": BEZEL_MM,
+        "tv_size_mm": list(TV_SIZE_MM),
+        "camera_fov_deg": profile.camera_fov_deg,
+        "screen_emission_strength": SCREEN_EMISSION_STRENGTH,
+        "roughness": ROUGHNESS,
+        "lights": LIGHTS,
+        "cycles_samples": CYCLES_SAMPLES,
+        "keyframes": KEYFRAMES,
+        "degradation": profile.degradation,
+        "jpeg_quality": profile.jpeg_quality,
+        "blender": BLENDER_BINARY,
+        "frames": frames,
+    }
+    # Only for the new profile: the phone fixture's manifest predates
+    # profiles and stays exactly as it was.
+    if profile is not PHONE:
+        manifest["profile"] = profile.name
+    return manifest
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="python -m tests.generate_synthetic_video_fixture"
+    )
+    parser.add_argument("--profile", choices=sorted(PROFILES), default=PHONE.name)
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="print the profile's manifest, without frames, and render nothing",
+    )
+    args = parser.parse_args(argv)
+    profile = PROFILES[args.profile]
+
+    if args.manifest_only:
+        print(json.dumps(build_manifest(profile, []), indent=2))
+        return
+
+    if profile.fixture_dir.exists():
+        shutil.rmtree(profile.fixture_dir)
+    profile.fixture_dir.mkdir(parents=True)
 
     with tempfile.TemporaryDirectory() as tmp:
         # Raw renders live in a temp dir and are discarded: only the
         # degraded frames are the fixture, and keeping both would double
         # the checked-in bytes for no added coverage.
         raw_dir, ground_truth = render_sequence(
-            Path(tmp), KEYFRAMES, FRAME_COUNT, BLEND_PATH
+            Path(tmp),
+            KEYFRAMES,
+            FRAME_COUNT,
+            profile.blend_path,
+            resolution=profile.resolution,
+            camera_fov_deg=profile.camera_fov_deg,
         )
 
         frames = []
@@ -423,14 +555,16 @@ def main() -> None:
             if raw_image is None:
                 raise RuntimeError(f"Blender did not produce {raw_path}")
 
-            rng = np.random.default_rng(seed=DEGRADATION["base_seed"] + frame_number)
-            degraded = _degrade(raw_image, rng)
+            rng = np.random.default_rng(
+                seed=profile.degradation["base_seed"] + frame_number
+            )
+            degraded = _degrade(raw_image, rng, profile.degradation)
 
             filename = f"frame_{frame_number:04d}.jpg"
             cv2.imwrite(
-                str(FIXTURE_DIR / filename),
+                str(profile.fixture_dir / filename),
                 degraded,
-                [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY],
+                [cv2.IMWRITE_JPEG_QUALITY, profile.jpeg_quality],
             )
             frames.append(
                 {
@@ -440,28 +574,12 @@ def main() -> None:
                 }
             )
 
-    manifest = {
-        "image_size": [float(RESOLUTION[0]), float(RESOLUTION[1])],
-        "screen_size_mm": list(SCREEN_SIZE_MM),
-        "marker_size_mm": MARKER_SIZE_MM,
-        "cardstock_mm": CARDSTOCK_MM,
-        "marker_layout_mm": {str(k): list(v) for k, v in MARKER_LAYOUT_MM.items()},
-        "bezel_mm": BEZEL_MM,
-        "tv_size_mm": list(TV_SIZE_MM),
-        "camera_fov_deg": CAMERA_FOV_DEG,
-        "screen_emission_strength": SCREEN_EMISSION_STRENGTH,
-        "roughness": ROUGHNESS,
-        "lights": LIGHTS,
-        "cycles_samples": CYCLES_SAMPLES,
-        "keyframes": KEYFRAMES,
-        "degradation": DEGRADATION,
-        "jpeg_quality": JPEG_QUALITY,
-        "blender": BLENDER_BINARY,
-        "frames": frames,
-    }
-    MANIFEST_PATH.write_text(json.dumps(manifest, indent=2) + "\n")
+    manifest = build_manifest(profile, frames)
+    profile.manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
-    print(f"Wrote {len(frames)} frames, {MANIFEST_PATH}, and {BLEND_PATH}")
+    print(
+        f"Wrote {len(frames)} frames, {profile.manifest_path}, and {profile.blend_path}"
+    )
 
 
 if __name__ == "__main__":

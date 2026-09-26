@@ -24,8 +24,11 @@ from collections.abc import Callable
 
 import numpy as np
 
-from boresight.inject import CursorBackend
+from boresight.detect import Detector
+from boresight.inject import CursorBackend, stamped
+from boresight.lens import LensModel
 from boresight.pipeline import AimPipeline, FrameOutcome, FrameResult
+from boresight.zeroing import Zero
 
 # How long to keep re-sending the last solved position after the frames
 # stop solving. Picked by feel, not measurement -- see the change's
@@ -53,23 +56,56 @@ class HoldingPipeline:
     ) -> None:
         self._pipeline = pipeline
         self._backend = backend
-        self._hold_s = hold_s
+        # Public and settable: the hold window is a live setting, and
+        # a session applies a change here between frames, on the
+        # thread that processes them. Measured from the last solve, so
+        # a shorter window takes effect on the very next frame.
+        self.hold_s = hold_s
         self._clock = clock
 
         self._last_position: tuple[float, float] | None = None
         self._last_time: float | None = None
 
-    def process_frame(self, frame: np.ndarray, *, debug: bool = False) -> FrameResult:
-        result = self._pipeline.process_frame(frame, debug=debug)
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        debug: bool = False,
+        t: float | None = None,
+        detector: Detector | None = None,
+        lens: LensModel | None = None,
+        zero: Zero | None = None,
+    ) -> FrameResult:
+        """Solve `frame`, or hold the last solve through its dropout.
+
+        `t` is when the frame was captured, in the aim filter's seconds
+        (see `stream.CaptureClock`). Both the solved move and a held
+        re-send are timed by it, so the filter sees one consistent
+        timeline. The hold window itself stays on this object's own
+        clock: it is about how long the server has gone without a solve,
+        not about the camera. `detector` is handed to the pipeline as is.
+
+        `zero` is passed through, so what is held is the corrected aim.
+        """
+        backend = stamped(self._backend, t)
+        result = self._pipeline.process_frame(
+            frame,
+            debug=debug,
+            backend=backend,
+            detector=detector,
+            lens=lens,
+            zero=zero,
+        )
         now = self._clock()
 
         if result.outcome is FrameOutcome.SOLVED:
             self._last_position = result.position
             self._last_time = now
         elif (
-            self._last_position is not None
+            self.hold_s > 0
+            and self._last_position is not None
             and self._last_time is not None
-            and (now - self._last_time) <= self._hold_s
+            and (now - self._last_time) <= self.hold_s
         ):
             # Re-sent verbatim: through a `SmoothingCursorBackend`, an
             # unchanged value is algebraically a no-op regardless of
@@ -77,6 +113,6 @@ class HoldingPipeline:
             # exactly the value it is already holding), modulo
             # floating-point rounding far below anything visible -- so
             # this cannot introduce a jump, only fresh device traffic.
-            self._backend.move_absolute(*self._last_position)
+            backend.move_absolute(*self._last_position)
 
         return result

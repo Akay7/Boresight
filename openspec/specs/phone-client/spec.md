@@ -1,8 +1,12 @@
 # phone-client Specification
 
 ## Purpose
-TBD - created by archiving change add-phone-video-stream. Update Purpose after archive.
+The browser page the server serves to a phone: camera capture and
+streaming, the on-screen trigger, marker-source and overlay controls,
+and the telemetry that shows whether it is working.
+
 ## Requirements
+
 ### Requirement: The server serves a phone client requiring no installation
 The server SHALL serve a self-contained browser page that turns a phone
 into the barrel camera, requiring nothing installed on the phone beyond
@@ -247,3 +251,167 @@ and never substitutes for whether the aim point lay within the markers.
 - **THEN** the client displays the reprojection error, and continues to
   display whether the aim point was extrapolated beyond the visible
   markers
+
+### Requirement: The client keeps the token out of its URLs
+Once loaded, the client SHALL remove the token from the address shown
+in the browser, and SHALL NOT put the token on the URL of any request
+it makes — page resources, control requests, the marker-sheet link, or
+the frame socket — relying on the session cookie the server issued
+instead. A URL is copied into browser history, server logs and
+screenshots; a cookie is not. Where the server refuses the frame
+socket for want of a valid credential, the client SHALL say so and
+direct the person to reopen the URL the server printed, since a stale
+cookie from an earlier server run looks exactly like a missing one.
+
+#### Scenario: The address bar is cleaned after load
+- **WHEN** the client page is opened from a URL carrying the token
+- **THEN** the address shown in the browser no longer carries the token,
+  and every other part of the address is preserved
+
+#### Scenario: Requests carry no token in their URLs
+- **WHEN** the client fetches its script, reads or changes a setting, or
+  opens the frame socket
+- **THEN** none of those request URLs carries the token, and each is
+  authorized by the session cookie
+
+#### Scenario: A refused socket explains how to recover
+- **WHEN** the server closes the frame socket with a policy-violation
+  status
+- **THEN** the page states that the credential was missing or invalid
+  and to reopen the exact URL the server printed
+
+### Requirement: The on-screen trigger is held while it is pressed
+The client SHALL send a trigger `down` message when the trigger control
+is pressed and a trigger `up` message when it is released, so holding
+the control holds the button and a quick tap is a click. The client
+SHALL send `up` for a held trigger whenever the press ends in any other
+way: the pointer is cancelled or its capture is lost, the page is
+hidden, or streaming stops. The client SHALL NOT send a second `down`
+while the trigger is already held, nor an `up` when it is not, and
+holding the control SHALL NOT open the browser's long-press menu or
+select text.
+
+#### Scenario: Holding the trigger holds the button
+- **WHEN** the player presses the trigger, keeps it pressed, and later
+  lets go
+- **THEN** the client sends one `down` at the press and one `up` at the
+  release
+
+#### Scenario: Leaving the page releases the trigger
+- **WHEN** the trigger is held and the page is hidden or the pointer is
+  cancelled
+- **THEN** the client sends `up`
+
+#### Scenario: Stopping releases the trigger
+- **WHEN** the trigger is held and streaming is stopped
+- **THEN** the client sends `up` before the connection is closed
+
+### Requirement: The client can adjust the on-screen overlay's manual margin
+The client SHALL let the person holding the phone increase or decrease
+the on-screen overlay's manual panel-avoidance margin, and SHALL show
+its current value. The control belongs here for the same reason marker
+source selection does: judging whether a tag now clears a taskbar
+requires looking at the display, which is where the person holding the
+phone is standing, not at the PC's own keyboard.
+
+#### Scenario: The current margin is visible on the phone
+- **WHEN** the client page is open
+- **THEN** it shows the on-screen overlay's currently configured margin
+
+#### Scenario: Adjusting the margin takes effect without reconnecting
+- **WHEN** the person adjusts the margin while streaming
+- **THEN** the new value is sent and the displayed value updates,
+  without the video connection being restarted
+
+### Requirement: An on-screen trigger sends trigger events on the frame connection
+The client SHALL display a trigger control whose presses are sent as
+trigger messages over the existing frame connection, requiring no
+second connection or endpoint. Which messages a press and a release send
+is specified by the trigger-hold capability. The control SHALL be
+disabled until streaming has started, since there is no connection to
+send it on before then.
+
+#### Scenario: Pressing the trigger uses the existing connection
+- **WHEN** the client is streaming and the player presses the trigger
+  control
+- **THEN** the client sends its trigger message on the existing frame
+  WebSocket connection, and opens no other connection
+
+#### Scenario: The trigger is unusable before streaming starts
+- **WHEN** the client has not yet started streaming
+- **THEN** the trigger control is disabled and pressing it sends
+  nothing
+
+### Requirement: Trigger telemetry is visible on the phone
+The client SHALL display the count of trigger events the server has
+acknowledged, using the same telemetry channel other session counters
+already arrive on, so the player can confirm a press reached the
+server.
+
+#### Scenario: Acknowledged trigger count is displayed
+- **WHEN** the server reports a trigger count in a stats message
+- **THEN** the client updates the displayed count to match
+
+### Requirement: The client identifies itself when its connection opens
+The client SHALL send a `hello` control message identifying itself as a
+phone, with the capture resolution it was granted, each time its frame
+connection opens, including after a reconnect. With more than one kind
+of client able to connect, the server's logs and session listing are
+otherwise unable to say which device a session belongs to.
+
+#### Scenario: Hello is sent on connect
+- **WHEN** the client's frame connection opens
+- **THEN** it sends a `hello` message naming the client kind `phone` and
+  the granted capture resolution before or alongside its first frame
+
+#### Scenario: Hello is re-sent after a reconnect
+- **WHEN** the connection is re-established
+- **THEN** the client sends `hello` again on the new connection
+
+### Requirement: Frame timestamps mark the moment of capture
+The client SHALL stamp each frame with the time the camera captured it,
+taken from the browser's per-video-frame capture metadata where
+available and otherwise from the client's monotonic clock at the moment
+the frame is taken from the video element. The stamp SHALL NOT be taken
+after the frame has been encoded, since encoding time varies from frame
+to frame. The client SHALL NOT send a frame whose capture stamp equals
+that of the frame it sent before, since it is the same picture.
+
+#### Scenario: Encoding time does not enter the timestamp
+- **WHEN** the client captures a frame and JPEG encoding it takes a
+  variable amount of time
+- **THEN** the timestamp sent with the frame is the capture time, and is
+  unaffected by how long encoding took
+
+#### Scenario: The same camera frame is not sent twice
+- **WHEN** the capture timer fires again before the camera has
+  delivered a new frame
+- **THEN** the client sends nothing for that tick
+
+### Requirement: The trigger names the frame it was aimed with
+When the on-screen trigger is pressed, the client SHALL include in its
+`down` message a `frame_ms` field holding the timestamp of the latest
+frame it has sent on the current connection, so the server can fire at
+that frame's aim point rather than at the smoothed cursor. If no frame
+has been sent on the connection yet, the client SHALL omit the field.
+
+#### Scenario: A press names the latest sent frame
+- **WHEN** the client has sent frames and the player presses the
+  trigger
+- **THEN** the `down` message carries the timestamp of the most recent
+  frame sent
+
+#### Scenario: A press before any frame names none
+- **WHEN** the player presses the trigger before any frame has been
+  sent on the connection
+- **THEN** the `down` message carries no `frame_ms`
+
+### Requirement: The phone shows whether it drives the cursor
+The client SHALL display, alongside its other telemetry, whether this
+phone currently drives the cursor, another client does, or nobody does,
+from the `cursor` field of the server's stats messages, so a player
+whose aim is not moving the cursor can see why.
+
+#### Scenario: Another client has the cursor
+- **WHEN** the server's stats say `cursor` is `other`
+- **THEN** the page shows that another device is driving the cursor

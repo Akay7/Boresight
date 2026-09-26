@@ -1,0 +1,139 @@
+menu "Boresight camera"
+
+    config BORESIGHT_EMULATOR
+        bool "Build for the QEMU emulator (not for a board)"
+        default n
+        select ETH_USE_OPENETH
+        help
+            Replaces the camera sensor with rendered fixture frames, Wi-Fi
+            with QEMU's emulated Ethernet, and the button pins with console
+            commands (press, release, click). The image cannot run on an
+            ESP32-CAM. Set by `tools/idf.sh emulator` through
+            sdkconfig.emulator; never set it in a device configuration.
+
+    menu "Network"
+
+        config BORESIGHT_WIFI_SSID
+            string "Wi-Fi SSID"
+            default ""
+            help
+                2.4 GHz network the server's machine is reachable on. The
+                ESP32 has no 5 GHz radio.
+
+        config BORESIGHT_WIFI_PASSWORD
+            string "Wi-Fi password"
+            default ""
+
+        config BORESIGHT_SERVER_HOST
+            string "Server address"
+            default ""
+            help
+                The "host" line the server prints under "For a device" at
+                startup -- a LAN IP, not 0.0.0.0.
+
+        config BORESIGHT_SERVER_PORT
+            int "Server port"
+            range 1 65535
+            default 7331
+
+        config BORESIGHT_TOKEN
+            string "Token"
+            default ""
+            help
+                The "token" line the server prints at startup. Required by
+                any server bound to a network address.
+
+        config BORESIGHT_TLS
+            bool "Connect over TLS (wss://)"
+            default n
+            help
+                Requires the server to run with --tls, and its certificate
+                copied to main/server_cert.pem before building. That
+                certificate is the only one the device will accept.
+
+                Without TLS the token crosses the network in plain text,
+                readable by anything on the same Wi-Fi.
+
+    endmenu
+
+    menu "Camera"
+
+        choice BORESIGHT_FRAME_SIZE
+            prompt "Resolution"
+            default BORESIGHT_FRAME_SIZE_XGA
+            help
+                Detection needs roughly 25 px across a marker. Rendered at
+                about 3 m with 80 mm markers through the stock lens, 1024x768
+                gives ~25 px and solved every frame; 800x600 gives ~18 px and
+                extrapolated most of them. Sizes above 800x600 use the
+                sensor's slower full-array mode, about half the frame rate,
+                so 800x600 is worth choosing only with larger markers (about
+                110-120 mm at 3 m) or closer play. 1280x720 adds margin but
+                crops the top and bottom of the view.
+
+            config BORESIGHT_FRAME_SIZE_VGA
+                bool "640x480"
+            config BORESIGHT_FRAME_SIZE_SVGA
+                bool "800x600"
+            config BORESIGHT_FRAME_SIZE_XGA
+                bool "1024x768"
+            config BORESIGHT_FRAME_SIZE_HD
+                bool "1280x720"
+        endchoice
+
+        config BORESIGHT_JPEG_QUALITY
+            int "JPEG quality (lower is better and larger)"
+            range 4 63
+            default 12
+
+        config BORESIGHT_MAX_FPS
+            int "Frame rate cap"
+            range 1 30
+            default 20
+
+        config BORESIGHT_SEND_TIMEOUT_MS
+            int "Frame send timeout (ms)"
+            range 20 2000
+            default 200
+            help
+                A frame that cannot be sent in this long is skipped. It is
+                also the longest a trigger press can wait behind a frame.
+
+        config BORESIGHT_AEC_VALUE
+            int "Fixed exposure (sensor units)"
+            range 0 1200
+            default 300
+            help
+                Automatic exposure is always off: it chases the bright
+                panel and underexposes the paper markers.
+
+        config BORESIGHT_AGC_GAIN
+            int "Fixed gain"
+            range 0 30
+            default 0
+
+    endmenu
+
+    menu "Pins"
+
+        config BORESIGHT_TRIGGER_GPIO
+            int "Trigger button GPIO"
+            range 0 39
+            default 13
+            help
+                Wire the button between this pin and GND; the internal
+                pull-up is used. On the AI-Thinker board only 13 and 14
+                are free -- any other pin is refused at boot.
+
+        config BORESIGHT_DEBOUNCE_MS
+            int "Button debounce (ms)"
+            range 1 100
+            default 10
+
+        config BORESIGHT_STATUS_LED_GPIO
+            int "Status LED GPIO (active-low)"
+            default 33
+
+    endmenu
+
+endmenu

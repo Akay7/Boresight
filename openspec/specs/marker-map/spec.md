@@ -1,7 +1,9 @@
 # marker-map Specification
 
 ## Purpose
-TBD - created by archiving change add-aim-pipeline. Update Purpose after archive.
+Loads the marker layout from configuration and resolves each marker ID
+to its corners on the screen plane, in the coordinate system the solver
+and the aim pipeline share.
 ## Requirements
 ### Requirement: Marker layout is loaded from configuration
 The system SHALL load the physical marker layout from a TOML file

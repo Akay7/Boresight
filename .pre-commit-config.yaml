@@ -12,3 +12,16 @@ repos:
       - id: end-of-file-fixer
       - id: check-toml
       - id: check-yaml
+
+  # The whole suite, not just the staged files' tests: a change to one
+  # module breaks tests of another often enough. About 12 seconds, and
+  # only when a Python file is staged. `uv run`, so it uses the
+  # project's environment rather than one pre-commit would build.
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest
+        entry: uv run pytest -q
+        language: system
+        types: [python]
+        pass_filenames: false

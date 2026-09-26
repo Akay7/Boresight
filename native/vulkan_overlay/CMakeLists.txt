@@ -46,6 +46,7 @@ find_package(Threads REQUIRED)
 add_library(boresight_overlay SHARED
     src/canvas_format.c
     src/overlay_layer.c
+    src/startup_watchdog.c
 )
 
 target_include_directories(boresight_overlay PRIVATE
@@ -56,9 +57,15 @@ target_include_directories(boresight_overlay PRIVATE
 target_link_libraries(boresight_overlay PRIVATE Threads::Threads)
 target_compile_options(boresight_overlay PRIVATE -Wall -Wextra)
 
+# Only the three loader-facing entry points (marked VK_LAYER_EXPORT in
+# overlay_layer.c) are exported; everything else -- bsov_load, the
+# startup watchdog -- stays private to this .so, so it can neither
+# interpose on nor be interposed by a same-named symbol in the host
+# application's process.
 set_target_properties(boresight_overlay PROPERTIES
     OUTPUT_NAME "boresight_overlay"
     PREFIX "lib"
+    C_VISIBILITY_PRESET hidden
 )
 
 # The explicit-layer manifest ships with a manifest-relative
@@ -72,3 +79,49 @@ add_custom_command(TARGET boresight_overlay POST_BUILD
         $<TARGET_FILE_DIR:boresight_overlay>/VkLayer_boresight_overlay.json
     COMMENT "Copying the explicit-layer manifest next to libboresight_overlay.so"
 )
+
+# Native unit tests -- off by default, so the layer build above is
+# exactly what it always was. They cover the parts of the layer that
+# don't need a Vulkan loader: the `.bsov` reader and the startup
+# watchdog's thread lifetime. Typical runs:
+#
+#   cmake -S native/vulkan_overlay -B native/vulkan_overlay/build/asan \
+#       -DBORESIGHT_OVERLAY_BUILD_TESTS=ON \
+#       -DBORESIGHT_OVERLAY_SANITIZE=address,undefined
+#   cmake --build native/vulkan_overlay/build/asan
+#   ctest --test-dir native/vulkan_overlay/build/asan --output-on-failure
+#
+# (and the same with `-DBORESIGHT_OVERLAY_SANITIZE=thread` in
+# build/tsan; ASan and TSan cannot share one binary). Keep these under
+# build/, the only native build path .gitignore covers.
+option(BORESIGHT_OVERLAY_BUILD_TESTS "Build the native unit tests (ctest)" OFF)
+set(BORESIGHT_OVERLAY_SANITIZE "" CACHE STRING
+    "Comma-separated -fsanitize= list for the unit tests, e.g. address,undefined or thread")
+
+if(BORESIGHT_OVERLAY_BUILD_TESTS)
+    enable_testing()
+
+    set(_boresight_test_flags -Wall -Wextra)
+    set(_boresight_test_link_flags "")
+    if(BORESIGHT_OVERLAY_SANITIZE)
+        list(APPEND _boresight_test_flags
+            -fsanitize=${BORESIGHT_OVERLAY_SANITIZE} -fno-omit-frame-pointer -g)
+        list(APPEND _boresight_test_link_flags -fsanitize=${BORESIGHT_OVERLAY_SANITIZE})
+    endif()
+
+    # Each test compiles the sources it exercises directly rather than
+    # linking the layer .so, so sanitizer flags apply to that code too.
+    add_executable(test_canvas_format tests/test_canvas_format.c src/canvas_format.c)
+    add_executable(test_startup_watchdog tests/test_startup_watchdog.c src/startup_watchdog.c)
+
+    foreach(_test test_canvas_format test_startup_watchdog)
+        target_include_directories(${_test} PRIVATE src)
+        target_compile_options(${_test} PRIVATE ${_boresight_test_flags})
+        target_link_options(${_test} PRIVATE ${_boresight_test_link_flags})
+        target_link_libraries(${_test} PRIVATE Threads::Threads)
+        add_test(NAME ${_test} COMMAND ${_test})
+        # Fail the test (not just print) on any UBSan report.
+        set_tests_properties(${_test} PROPERTIES
+            ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
+    endforeach()
+endif()

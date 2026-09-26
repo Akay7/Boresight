@@ -69,7 +69,10 @@
         padding: 1rem 1.1rem;
         touch-action: none;
         user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
       }
+      #trigger.held { background: #ff5a5a; box-shadow: inset 0 0 0 3px #fff; }
       #trigger[disabled] { background: #3a3f47; color: var(--dim); }
       .panel {
         background: #1c1f25;
@@ -118,6 +121,15 @@
       .links p { color: var(--dim); margin: 0.25rem 0 0; }
       .row.debug-only { display: none; }
       .row.debug-only.show { display: flex; }
+      /* Aim tuning. Collapsed by default: set once, then left alone. */
+      #tuning > summary { cursor: pointer; color: var(--dim); }
+      .tune { padding: 0.35rem 0; }
+      .tune label { display: flex; justify-content: space-between; gap: 1rem; }
+      .tune label span:first-child { color: var(--dim); }
+      .tune output { font-variant-numeric: tabular-nums; }
+      .tune input[type="range"] { width: 100%; margin: 0.25rem 0 0; }
+      .tune .pinned { color: var(--warn); font-size: 0.8rem; }
+      #tuning-note { color: var(--dim); font-size: 0.8rem; margin: 0.25rem 0 0; }
     </style>
   </head>
   <body>
@@ -131,6 +143,23 @@
     <button id="trigger" disabled>Trigger</button>
 
     <div id="message"></div>
+
+    <!-- Zeroing: shoot the targets so the cursor lands where the sights
+         point, not where the camera does. Driven by zeroing.js. -->
+    <div class="panel">
+      <div class="row">
+        <span>Zeroing</span><span id="zeroing-state">—</span>
+      </div>
+      <div id="zeroing-prompt" style="padding: 0.2rem 0; white-space: pre-wrap"></div>
+      <div class="row">
+        <span class="choice">
+          <button type="button" id="zeroing-start" class="pick" disabled>Zero</button>
+          <button type="button" id="zeroing-finish" class="pick" disabled>Done</button>
+          <button type="button" id="zeroing-cancel" class="pick" disabled>Cancel</button>
+        </span>
+        <button type="button" id="zeroing-reset" class="pick" disabled>Reset</button>
+      </div>
+    </div>
 
     <div class="panel">
       <div class="row">
@@ -149,6 +178,14 @@
         </span>
       </div>
       <div class="row">
+        <span>Lens</span>
+        <span class="choice">
+          <button type="button" id="calibrate-start" class="pick" disabled>Calibrate</button>
+          <button type="button" id="calibrate-cancel" class="pick" disabled>Cancel</button>
+        </span>
+      </div>
+      <div class="row"><span>Lens status</span><span id="stat-lens">—</span></div>
+      <div class="row">
         <span>Overlay</span>
         <span class="choice">
           <button type="button" id="debug-off" class="pick" aria-pressed="true">Off</button>
@@ -156,6 +193,18 @@
         </span>
       </div>
     </div>
+
+    <!-- Filled in by capture.js from GET /settings, which also gives
+         each slider its range. -->
+    <details class="panel" id="tuning">
+      <summary>Aim tuning</summary>
+      <div id="tuning-rows"></div>
+      <button type="button" id="tuning-save">Save settings</button>
+      <p id="tuning-note">
+        Changes apply at once. Save keeps them, with the marker, margin
+        and overlay choices above, across a server restart.
+      </p>
+    </details>
 
     <div class="panel">
       <div class="row"><span>Connection</span><span id="stat-connection">idle</span></div>
@@ -172,6 +221,7 @@
       <div class="row"><span>Skipped (local)</span><span id="stat-skipped">—</span></div>
       <div class="row"><span>Decode / solve</span><span id="stat-timing">—</span></div>
       <div class="row"><span>Shots</span><span id="stat-shots">—</span></div>
+      <div class="row"><span>Cursor</span><span id="stat-cursor">—</span></div>
       <!-- Only while the overlay is on: these describe the drawing, and
            the reprojection error is meaningless without it. -->
       <div class="row debug-only" id="row-decoded">
@@ -186,25 +236,18 @@
     </div>
 
     <div class="links">
-      <!-- href is set in capture.js so the token survives the click.
-           A static href would 401 whenever the server is token-guarded,
-           which is every time it is reachable from this phone. -->
+      <!-- No token in the href: the session cookie the server set when
+           this page loaded authorizes the sheet, as it does every other
+           request from this page. -->
       <a id="marker-sheet" href="markers">Printable marker sheet →</a>
       <p>Print at 100% scale — never "fit to page".</p>
+      <p><a href="markers/charuco">Lens calibration board →</a></p>
     </div>
 
-    <script>
-      // capture.js is itself token-guarded, like every other request --
-      // so a plain static src would 401 exactly when the server is
-      // guarded, which is whenever this phone can reach it at all. It
-      // can't fix its own request the way sameOriginUrl() fixes later
-      // ones (it hasn't loaded yet), so this does the same thing inline.
-      (function () {
-        var token = new URLSearchParams(location.search).get("token");
-        var script = document.createElement("script");
-        script.src = token ? "capture.js?token=" + encodeURIComponent(token) : "capture.js";
-        document.body.appendChild(script);
-      })();
-    </script>
+    <!-- A plain src, no token: loading this page with the token in its
+         URL set the session cookie, which the browser sends with this
+         request and every one after it. -->
+    <script src="capture.js"></script>
+    <script src="zeroing.js"></script>
   </body>
 </html>

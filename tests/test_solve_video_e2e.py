@@ -25,12 +25,20 @@ where its optical axis meets the panel plane -- with no homography
 involved, so this checks solve.py against an independent reference
 rather than against its own arithmetic.
 
+The same scene and sweep is also rendered as an ESP32-CAM sees it
+(tests/fixtures/esp32cam_video/: 1024x768, 4:3, wider lens, noisier
+sensor, heavier JPEG), and every check here runs against both, each
+against its own tolerances. The phone fixture's are the statement of
+best-case accuracy; the device fixture's say what the firmware's default
+resolution costs.
+
 See generate_synthetic_video_fixture.py to regenerate (needs Blender;
 this test does not).
 """
 
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -40,15 +48,40 @@ import pytest
 from boresight.detect import detect_markers
 from boresight.solve import solve
 
-FIXTURE_DIR = Path(__file__).parent / "fixtures" / "synthetic_video"
-MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
+FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
-# Observed against this fixture: per-frame error peaks at ~1.5mm and
-# consecutive-frame deltas track ground truth to ~1.2mm. 4mm leaves
-# roughly 3x margin without masking a real regression -- on this 1220mm
-# panel it is 0.3% of screen width, a few pixels of cursor travel.
-AIM_TOLERANCE_MM = 4.0
-DELTA_TOLERANCE_MM = 4.0
+
+@dataclass(frozen=True)
+class VideoFixture:
+    name: str
+    aim_tolerance_mm: float
+    delta_tolerance_mm: float
+
+    @property
+    def directory(self) -> Path:
+        return FIXTURES_DIR / self.name
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.directory / "manifest.json"
+
+
+FIXTURES = [
+    # Observed with sub-pixel corner refinement: per-frame error peaks at
+    # ~1.5mm (1.9mm unrefined) and consecutive-frame deltas track ground
+    # truth to ~0.1mm (0.8mm unrefined). 3mm is 2x margin on the aim --
+    # 0.25% of this 1220mm panel's width. The delta bound is the one
+    # that notices refinement going away: 0.5mm is 5x what refined
+    # corners give and below what unrefined ones do.
+    VideoFixture("synthetic_video", aim_tolerance_mm=3.0, delta_tolerance_mm=0.5),
+    # Observed at the firmware's default 1024x768, refined: per-frame
+    # error peaks at ~2.4mm (2.9mm unrefined) and deltas track ground
+    # truth to ~0.4mm (1.5mm unrefined), with 6-8 of the 8 markers found
+    # per frame (~25px across). About 2x margin on both: 5mm is 0.4% of
+    # this panel's width. At 800x600 the same sweep reached 276mm, which
+    # is why that is no longer the default.
+    VideoFixture("esp32cam_video", aim_tolerance_mm=5.0, delta_tolerance_mm=1.0),
+]
 
 # detect+solve runs ~2ms/frame here. 150ms/frame is a loose regression
 # guard against something pathological (an accidental O(n^2), a
@@ -66,17 +99,23 @@ def _marker_corners_mm(
     return [(x, y), (x + size, y), (x + size, y + size), (x, y + size)]
 
 
+@pytest.fixture(scope="module", params=FIXTURES, ids=lambda fixture: fixture.name)
+def video(request: pytest.FixtureRequest) -> VideoFixture:
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def manifest() -> dict:
-    assert MANIFEST_PATH.exists(), (
-        f"video fixture manifest missing at {MANIFEST_PATH}; regenerate with "
-        "`uv run python -m tests.generate_synthetic_video_fixture` (needs Blender)"
+def manifest(video: VideoFixture) -> dict:
+    assert video.manifest_path.exists(), (
+        f"video fixture manifest missing at {video.manifest_path}; regenerate "
+        "with `uv run python -m tests.generate_synthetic_video_fixture` "
+        "(needs Blender; add `--profile esp32cam` for esp32cam_video)"
     )
-    return json.loads(MANIFEST_PATH.read_text())
+    return json.loads(video.manifest_path.read_text())
 
 
 @pytest.fixture(scope="module")
-def solved_track(manifest: dict) -> dict:
+def solved_track(video: VideoFixture, manifest: dict) -> dict:
     """Runs the whole pipeline once over every frame, in order.
 
     Shared across the assertions below so the sequence is solved once,
@@ -92,7 +131,7 @@ def solved_track(manifest: dict) -> dict:
 
     frames = []
     for entry in manifest["frames"]:
-        image = cv2.imread(str(FIXTURE_DIR / entry["file"]), cv2.IMREAD_COLOR)
+        image = cv2.imread(str(video.directory / entry["file"]), cv2.IMREAD_COLOR)
         assert image is not None, f"missing fixture frame {entry['file']}"
         frames.append(image)
 
@@ -157,19 +196,23 @@ def test_every_frame_is_solvable(solved_track: dict):
     assert min(solved_track["detected_counts"]) >= 1
 
 
-def test_each_frame_matches_its_own_ground_truth(solved_track: dict):
+def test_each_frame_matches_its_own_ground_truth(
+    video: VideoFixture, solved_track: dict
+):
     errors = np.linalg.norm(
         solved_track["recovered"] - solved_track["ground_truth"], axis=1
     )
     worst = int(np.argmax(errors))
-    assert errors.max() == pytest.approx(0.0, abs=AIM_TOLERANCE_MM), (
+    assert errors.max() == pytest.approx(0.0, abs=video.aim_tolerance_mm), (
         f"frame {worst + 1} recovered {solved_track['recovered'][worst]} "
         f"vs ground truth {solved_track['ground_truth'][worst]} "
         f"({errors[worst]:.2f}mm off)"
     )
 
 
-def test_consecutive_frames_track_the_known_camera_motion(solved_track: dict):
+def test_consecutive_frames_track_the_known_camera_motion(
+    video: VideoFixture, solved_track: dict
+):
     """The temporal-coherence check.
 
     Compares measured frame-to-frame deltas against ground-truth
@@ -184,10 +227,10 @@ def test_consecutive_frames_track_the_known_camera_motion(solved_track: dict):
 
     # Guards the comparison itself: if the fixture's camera barely moved,
     # matching deltas would be trivially satisfied and prove nothing.
-    assert np.linalg.norm(truth_deltas, axis=1).min() > DELTA_TOLERANCE_MM
+    assert np.linalg.norm(truth_deltas, axis=1).min() > video.delta_tolerance_mm
 
     worst = int(np.argmax(residuals))
-    assert residuals.max() == pytest.approx(0.0, abs=DELTA_TOLERANCE_MM), (
+    assert residuals.max() == pytest.approx(0.0, abs=video.delta_tolerance_mm), (
         f"frames {worst + 1}->{worst + 2} moved by "
         f"{recovered_deltas[worst]} but ground truth moved by "
         f"{truth_deltas[worst]} ({residuals[worst]:.2f}mm of unexplained jump)"

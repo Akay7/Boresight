@@ -14,8 +14,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from boresight.detect import MarkerTracker, detect_markers
 from boresight.inject import FakeCursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
 from boresight.marker_source import (
@@ -25,6 +27,7 @@ from boresight.marker_source import (
     _overlay_command,
 )
 from boresight.one_euro import OneEuroFilter
+from boresight.settings import Tuning
 
 PRINTED = resolve_layout("file")
 
@@ -96,7 +99,7 @@ def test_the_solved_layout_comes_from_what_the_overlay_reported() -> None:
     controller = _controller(REPORTS_1920)
     try:
         controller.select(MarkerSource.SCREEN)
-        layout = controller.pipeline._pipeline._map  # noqa: SLF001 - internals
+        layout = controller.pipeline._map  # noqa: SLF001 - internals
 
         assert layout.screen_size_mm == (1920.0, 1080.0)
         assert layout.markers[0].size_mm == 86.0
@@ -113,7 +116,7 @@ def test_switching_back_restores_the_printed_layout() -> None:
 
         assert state["source"] == "printed"
         assert state["overlay_running"] is False
-        assert controller.pipeline._pipeline._map == PRINTED  # noqa: SLF001
+        assert controller.pipeline._map == PRINTED  # noqa: SLF001
     finally:
         controller.shutdown()
 
@@ -241,7 +244,12 @@ def test_shutdown_is_safe_when_nothing_is_running() -> None:
 
 def test_the_overlay_command_is_fixed() -> None:
     """Nothing from a request reaches this list."""
-    assert _overlay_command(None) == [sys.executable, "-m", "boresight.overlay"]
+    assert _overlay_command(None) == [
+        sys.executable,
+        "-m",
+        "boresight.overlay",
+        "--commands",
+    ]
 
 
 def test_a_display_index_is_forced_through_int() -> None:
@@ -267,7 +275,7 @@ def test_the_controllers_extra_margin_reaches_the_spawned_overlay() -> None:
 
 
 def test_a_zero_extra_margin_omits_the_flag_entirely() -> None:
-    assert _overlay_command(None, 0) == [sys.executable, "-m", "boresight.overlay"]
+    assert "--extra-margin-px" not in _overlay_command(None, 0)
 
 
 def test_a_nonzero_extra_margin_is_forced_through_int() -> None:
@@ -317,72 +325,147 @@ def test_an_existing_pythonpath_is_kept(monkeypatch) -> None:
 # --- Aim smoothing wiring -----------------------------------------------
 
 
-def test_the_backend_is_wrapped_in_a_smoothing_backend() -> None:
+def test_a_session_pipeline_smooths_onto_its_own_cursor() -> None:
     raw = FakeCursorBackend()
     controller = MarkerSourceController(raw, PRINTED, launcher=_stub(REPORTS_1920))
+    cursor = FakeCursorBackend()
 
-    assert isinstance(controller.pipeline._backend, SmoothingCursorBackend)  # noqa: SLF001
-    assert controller.pipeline._backend._backend is raw  # noqa: SLF001
+    session = controller.session_pipeline(cursor)
+
+    assert isinstance(session._backend, SmoothingCursorBackend)  # noqa: SLF001
+    assert session._backend._backend is cursor  # noqa: SLF001
+    # The shared solver itself smooths nothing: that is per session.
+    assert controller.pipeline._backend is raw  # noqa: SLF001
 
 
-def test_a_marker_source_switch_shares_the_same_filter_state() -> None:
-    """The pipeline is rebuilt on every switch; the filter inside its
-    wrapped backend must not be, or a switch would silently reset
-    smoothing."""
+def test_sessions_do_not_share_a_filter() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+
+    first = controller.session_pipeline(FakeCursorBackend())
+    second = controller.session_pipeline(FakeCursorBackend())
+
+    assert first._backend._filter is not second._backend._filter  # noqa: SLF001
+
+
+def test_a_marker_source_switch_keeps_the_filter_and_drops_the_hold() -> None:
+    """The solver is rebuilt on every switch. A session's filter must not
+    be, or a switch would silently reset smoothing; its held position
+    must be, since it belongs to the source being left."""
     raw = FakeCursorBackend()
     controller = MarkerSourceController(raw, PRINTED, launcher=_stub(REPORTS_1920))
+    session = controller.session_pipeline(FakeCursorBackend())
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
     try:
-        before = controller.pipeline._backend  # noqa: SLF001
+        smoothing = session._backend  # noqa: SLF001
+        session.process_frame(frame)
+        holding = session._holding  # noqa: SLF001
 
         controller.select(MarkerSource.SCREEN)
-        after_switch = controller.pipeline._backend  # noqa: SLF001
+        session.process_frame(frame)
 
-        controller.select(MarkerSource.PRINTED)
-        after_switch_back = controller.pipeline._backend  # noqa: SLF001
-
-        assert before is after_switch
-        assert before is after_switch_back
+        assert session._backend is smoothing  # noqa: SLF001
+        assert session._holding is not holding  # noqa: SLF001
+        assert session._holding._pipeline is controller.pipeline  # noqa: SLF001
     finally:
         controller.shutdown()
 
 
-def test_the_aim_filter_defaults_match_one_euro_filters_own_defaults(
-    monkeypatch,
-) -> None:
-    monkeypatch.delenv("BORESIGHT_AIM_MIN_CUTOFF", raising=False)
-    monkeypatch.delenv("BORESIGHT_AIM_BETA", raising=False)
+def test_each_session_tracks_markers_with_its_own_detector() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    first = controller.session_pipeline(FakeCursorBackend())
+    second = controller.session_pipeline(FakeCursorBackend())
+    first.process_frame(frame)
+    second.process_frame(frame)
+
+    assert isinstance(first._detector, MarkerTracker)  # noqa: SLF001
+    assert first._detector is not second._detector  # noqa: SLF001
+
+
+def test_a_marker_source_switch_starts_a_fresh_tracker() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+    )
+    session = controller.session_pipeline(FakeCursorBackend())
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    try:
+        session.process_frame(frame)
+        tracker = session._detector  # noqa: SLF001
+
+        controller.select(MarkerSource.SCREEN)
+        session.process_frame(frame)
+
+        assert isinstance(session._detector, MarkerTracker)  # noqa: SLF001
+        assert session._detector is not tracker  # noqa: SLF001
+    finally:
+        controller.shutdown()
+
+
+def test_tracked_detection_can_be_turned_off() -> None:
+    controller = MarkerSourceController(
+        FakeCursorBackend(),
+        PRINTED,
+        launcher=_stub(REPORTS_1920),
+        tracked_detection=False,
+    )
+    session = controller.session_pipeline(FakeCursorBackend())
+    session.process_frame(np.zeros((72, 128, 3), dtype=np.uint8))
+
+    assert session._detector is detect_markers  # noqa: SLF001
+
+
+def test_the_aim_filter_defaults_match_one_euro_filters_own_defaults() -> None:
     controller = MarkerSourceController(
         FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
     )
 
-    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+    filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
 
-    assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
-    assert filter_._beta == OneEuroFilter()._beta  # noqa: SLF001
+    assert filter_.min_cutoff == OneEuroFilter().min_cutoff
+    assert filter_.beta == OneEuroFilter().beta
 
 
-def test_env_vars_override_the_aim_filters_defaults(monkeypatch) -> None:
-    monkeypatch.setenv("BORESIGHT_AIM_MIN_CUTOFF", "2.5")
-    monkeypatch.setenv("BORESIGHT_AIM_BETA", "0.3")
+def test_a_new_session_takes_the_tuning_in_effect() -> None:
     controller = MarkerSourceController(
-        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+        FakeCursorBackend(),
+        PRINTED,
+        launcher=_stub(REPORTS_1920),
+        tuning=lambda: Tuning(min_cutoff=2.5, beta=0.3),
     )
 
-    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+    filter_ = controller.session_pipeline(FakeCursorBackend())._backend._filter  # noqa: SLF001
 
-    assert filter_._min_cutoff == 2.5  # noqa: SLF001
-    assert filter_._beta == 0.3  # noqa: SLF001
+    assert (filter_.min_cutoff, filter_.beta) == (2.5, 0.3)
 
 
-def test_an_invalid_aim_filter_env_var_falls_back_to_the_default(monkeypatch) -> None:
-    monkeypatch.setenv("BORESIGHT_AIM_MIN_CUTOFF", "not-a-number")
+def test_a_running_session_follows_a_tuning_change_on_its_next_frame() -> None:
+    """Same filter object, new parameters: the change reaches a session
+    already streaming without resetting its smoothing."""
+    current = [Tuning()]
     controller = MarkerSourceController(
-        FakeCursorBackend(), PRINTED, launcher=_stub(REPORTS_1920)
+        FakeCursorBackend(),
+        PRINTED,
+        launcher=_stub(REPORTS_1920),
+        tuning=lambda: current[0],
     )
+    session = controller.session_pipeline(FakeCursorBackend())
+    frame = np.zeros((72, 128, 3), dtype=np.uint8)
+    session.process_frame(frame)
+    filter_ = session._backend._filter  # noqa: SLF001
+    holding = session._holding  # noqa: SLF001
 
-    filter_ = controller.pipeline._backend._filter  # noqa: SLF001
+    current[0] = Tuning(min_cutoff=3.0, beta=0.2, hold_s=0.1)
+    assert filter_.min_cutoff == Tuning().min_cutoff  # not until a frame
+    session.process_frame(frame)
 
-    assert filter_._min_cutoff == OneEuroFilter()._min_cutoff  # noqa: SLF001
+    assert session._backend._filter is filter_  # noqa: SLF001
+    assert session._holding is holding  # noqa: SLF001
+    assert (filter_.min_cutoff, filter_.beta) == (3.0, 0.2)
+    assert holding.hold_s == 0.1
 
 
 # --- Overlay margin, set at runtime --------------------------------------

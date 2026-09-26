@@ -86,3 +86,23 @@ def render_overlay(
         )
 
     return canvas, rectangles
+
+
+def target_image(size_px: int) -> np.ndarray:
+    """A zeroing target, `size_px` on a side (rounded up to odd).
+
+    Drawn like a tag -- an opaque light patch, dark marks -- so it reads
+    over any content. Rings and a crosshair on a centre dot: a point to
+    put the sights on, not an area. Odd-sized so there is a centre pixel
+    for the position the server asked for to land on.
+    """
+    size = max(9, size_px | 1)
+    centre = size // 2
+    stroke = max(1, size // 24)
+    image = np.full((size, size), TAG_LIGHT, dtype=np.uint8)
+    for radius in (centre - stroke, (centre * 2) // 3, centre // 3):
+        cv2.circle(image, (centre, centre), radius, TAG_DARK, stroke)
+    cv2.line(image, (centre, 0), (centre, size - 1), TAG_DARK, 1)
+    cv2.line(image, (0, centre), (size - 1, centre), TAG_DARK, 1)
+    cv2.circle(image, (centre, centre), stroke, TAG_DARK, -1)
+    return image

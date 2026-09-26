@@ -1,39 +1,56 @@
 # video-ingest Specification
 
 ## Purpose
-TBD - created by archiving change add-phone-video-stream. Update Purpose after archive.
+Accepts camera frames from connected clients over a WebSocket, drives
+each through the aim pipeline without letting a slow frame build up
+lag, and reports per-session telemetry and debug geometry back to the
+client and over HTTP.
+
 ## Requirements
+
 ### Requirement: Streamed camera frames drive the aim pipeline
 The server SHALL expose a WebSocket endpoint that accepts camera frames
 from a connected client, decodes each frame, and passes it to the same
-per-frame pipeline operation used everywhere else, so that a frame
-arriving over the network moves the OS cursor exactly as a frame read
-from disk does.
+per-frame pipeline operation used everywhere else. The aim point a
+streamed frame solves to SHALL reach the OS cursor through that
+session's own aim smoothing and dropout hold (see aim-smoothing and
+aim-hold), and only while that session drives the cursor (see
+cursor-ownership).
 
 #### Scenario: A streamed frame moves the cursor
-- **WHEN** a client connected to the frame endpoint sends a frame in
-  which enough mapped markers are visible to solve
+- **WHEN** a client that drives the cursor, or that finds it free, sends
+  a frame in which enough mapped markers are visible to solve
 - **THEN** the server decodes it, runs the pipeline, and the configured
-  cursor backend receives one absolute move at the solved position
+  cursor backend receives one absolute move, at the session's smoothed
+  aim point for that frame
 
 #### Scenario: A streamed frame with nothing to solve moves nothing
-- **WHEN** a connected client sends a frame containing no detectable
-  markers
+- **WHEN** a connected client that has solved no frame within the hold
+  window sends a frame containing no detectable markers
 - **THEN** the cursor backend receives no call, the connection stays
   open, and the server continues accepting frames
 
+#### Scenario: A session that does not drive the cursor moves nothing
+- **WHEN** another session drives the cursor and this session sends a
+  frame that solves
+- **THEN** the cursor backend receives no move for it, and the frame is
+  still solved and reported to this session
+
 ### Requirement: Streaming produces the same result as replaying the same frames
-Streaming a sequence of frames SHALL produce the identical cursor track
-that replaying those same frame files through the pipeline directly
-produces. The transport SHALL introduce no transformation of its own: it
-decodes bytes and delegates.
+Streaming a sequence of frames SHALL produce the identical track of
+solved aim points that replaying those same frame files through the
+pipeline directly produces. The transport SHALL introduce no
+transformation of its own: it decodes bytes and delegates. Smoothing
+sits below the solve, at the cursor, so the solved positions reported
+for each frame are the comparable quantity.
 
 #### Scenario: Streamed fixture frames match the replayed track
 - **WHEN** the frames of a checked-in rendered sequence are sent, in
-  order, over the frame endpoint to a server using a recording cursor
-  backend, with the server given time to process each
-- **THEN** the recorded sequence of cursor positions equals the sequence
-  the same fixture produces when replayed through the pipeline directly
+  order, over the frame endpoint, with the server given time to process
+  each
+- **THEN** the sequence of solved positions the server reports equals
+  the sequence of positions the same fixture produces when replayed
+  through the pipeline directly
 
 ### Requirement: Frames are carried as self-delimiting binary messages
 Each binary WebSocket message SHALL carry exactly one frame: an 8-byte
@@ -118,14 +135,40 @@ system SHALL NOT require external tooling to obtain it.
 ### Requirement: Disconnection leaves no motion and no leaked work
 The server SHALL treat a closed or dropped connection as the end of that
 session: it SHALL stop processing that connection's frames, SHALL NOT
-emit any further cursor movement on its behalf, and SHALL release the
-resources associated with it. It SHALL NOT move the cursor to a
-remembered or extrapolated position after the client is gone.
+emit any further cursor movement on its behalf, SHALL release a primary
+button the session was holding, SHALL give up the cursor if the session
+owned it, and SHALL release the resources associated with it. It SHALL
+NOT move the cursor to a remembered or extrapolated position after the
+client is gone. This SHALL hold for a frame that was already being
+processed when the connection closed: that frame MAY finish, but its
+aim SHALL NOT move the cursor or give the ended session the cursor
+again. Ending a session SHALL NOT itself raise an error: a disconnect
+racing with frame processing, or the server cancelling the session
+while it winds down, SHALL end the session the same way a quiet
+disconnect does.
 
 #### Scenario: A closed connection stops moving the cursor
 - **WHEN** a streaming client disconnects, cleanly or abruptly
 - **THEN** no further cursor movement is emitted for that connection and
   its processing task ends
+
+#### Scenario: A frame still being processed at disconnect does not move the cursor
+- **WHEN** a client disconnects while one of its frames is still being
+  processed, and that frame then solves to an aim point
+- **THEN** the cursor does not move to that aim point, and the cursor is
+  free for the next session to take
+
+#### Scenario: A closed connection releases its held button
+- **WHEN** a client that is holding the trigger disconnects, cleanly,
+  abruptly, or because frame processing stopped
+- **THEN** the server releases the button
+
+#### Scenario: Ending a session mid-frame raises no error
+- **WHEN** a client disconnects while a frame is being processed, and
+  the session is cancelled while it winds down
+- **THEN** the session ends without an error escaping it, the held
+  button and the cursor are released, and the session is no longer
+  listed
 
 #### Scenario: A second connection starts clean
 - **WHEN** a client connects after a previous session has ended
@@ -201,3 +244,91 @@ shape.
   geometry enabled
 - **THEN** it carries the reprojection error in addition to, not in
   place of, the existing conditioning flag for that solve
+
+### Requirement: A session can identify its client kind
+The server SHALL accept a `hello` JSON control message on the frame
+connection's text channel carrying the client kind and, optionally, its
+software version and capture resolution, and SHALL attach that identity
+to the session for its logs and its entry in the session listing. A
+session that never sends `hello` SHALL be served exactly as before and
+labelled as unidentified. A malformed `hello` SHALL be ignored without
+closing the connection, and SHALL NOT affect frame handling.
+
+#### Scenario: An identified session is logged by kind
+- **WHEN** a client sends `hello` with client kind `esp32-cam` and then
+  streams frames
+- **THEN** the server's connection, periodic and disconnection log lines
+  for that session name the client kind
+
+#### Scenario: A session that never says hello is unaffected
+- **WHEN** a client streams frames without sending `hello`
+- **THEN** frames are processed and reported exactly as before, and the
+  session is listed as unidentified
+
+#### Scenario: A malformed hello is ignored
+- **WHEN** a client sends a `hello` message with a missing or non-string
+  client kind
+- **THEN** the connection stays open, the session remains unidentified,
+  and subsequent frames are processed normally
+
+### Requirement: Active sessions' telemetry is readable over HTTP
+The server SHALL serve a listing of the currently active frame sessions,
+each with its client identity, its remote address, how long it has been
+connected, and the same telemetry fields most recently sent to that
+client over its own socket, excluding debug geometry. A client with no
+display of its own cannot show its telemetry, so it SHALL be observable
+from another device. A session SHALL disappear from the listing once its
+connection ends, and the listing SHALL be covered by the same token
+requirement as every other endpoint.
+
+#### Scenario: A streaming session appears in the listing
+- **WHEN** a client is connected and has streamed frames, and the session
+  listing is requested
+- **THEN** the listing contains that session with its client kind,
+  connection age, frame counts, round-trip time and most recent outcome
+
+#### Scenario: A closed session leaves the listing
+- **WHEN** a client disconnects and the listing is requested afterwards
+- **THEN** that session is no longer present
+
+#### Scenario: Debug geometry is not exposed in the listing
+- **WHEN** a session with debug geometry enabled is listed
+- **THEN** its listing entry carries no debug geometry
+
+#### Scenario: The listing requires the token
+- **WHEN** a token is configured and the listing is requested without it
+- **THEN** the request is refused
+
+### Requirement: Aim smoothing is timed by the client's capture timestamps
+The server SHALL time aim smoothing for a session's frames by the
+timestamps the client stamped on them, so that the interval the
+smoothing uses between two frames is the interval between their
+captures, not between their arrivals. Client timestamps SHALL only be
+compared with other timestamps from the same session, never with the
+server's clock or another session's. When a frame's timestamp is not a
+finite number, is not later than the previous processed frame's, or is
+more than one second after it, the server SHALL time that frame by its
+own clock instead, so the interval used is always positive and bounded.
+
+#### Scenario: Network jitter does not change the smoothing interval
+- **WHEN** a client sends frames captured exactly 50 ms apart, and they
+  reach the server at uneven intervals
+- **THEN** the smoothing treats consecutive frames as 50 ms apart
+
+#### Scenario: A repeated timestamp falls back to the server clock
+- **WHEN** a client sends two consecutive frames with the same timestamp
+- **THEN** the second frame is timed by the server's clock, with a
+  positive interval, and the session continues normally
+
+#### Scenario: A clock jump falls back to the server clock
+- **WHEN** a client's timestamps jump backwards, or forwards by more
+  than a second, between two frames
+- **THEN** that frame is timed by the server's clock, and later frames
+  are timed by client timestamps again, measured from the frame after
+  the jump
+
+#### Scenario: Sessions do not share a timeline
+- **WHEN** two clients whose clocks have unrelated epochs stream at the
+  same time
+- **THEN** neither session's timestamps affect how the other's frames
+  are timed

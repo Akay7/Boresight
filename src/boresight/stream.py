@@ -1,8 +1,9 @@
 """The transport layer between the phone's camera and the pipeline.
 
-Three pieces, all independent of FastAPI so they can be tested without
-a server: the frame message codec, a single-slot mailbox that drops
-stale frames, and the per-connection counters.
+Four pieces, all independent of FastAPI so they can be tested without
+a server: the frame message codec, the clock that turns a session's
+capture timestamps into time for the aim filter, a single-slot mailbox
+that drops stale frames, and the per-connection counters.
 
 The wire format is one frame per binary WebSocket message -- an 8-byte
 little-endian timestamp taken by the client at capture, followed by the
@@ -16,8 +17,15 @@ connection.
 from __future__ import annotations
 
 import asyncio
+import math
 import struct
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from boresight.calibration import CalibrationCapture
 
 # One float64, little-endian: milliseconds from the client's own clock.
 # Only ever compared against a later reading of that same clock, so the
@@ -56,6 +64,67 @@ def unpack_frame(message: bytes) -> tuple[float, bytes]:
     if not payload:
         raise FrameDecodeError("frame message carries a header but no image data")
     return client_ms, payload
+
+
+class CaptureClock:
+    """One session's capture timestamps, as seconds for the aim filter.
+
+    The filter's interval between two frames should be how far apart
+    they were *captured*, which only the client's clock knows. The
+    server's clock at processing time adds every millisecond of Wi-Fi,
+    slot and decode jitter to that interval, and the filter turns it
+    into aim jitter.
+
+    Client timestamps are only ever differenced against the same
+    client's previous one. The first frame is placed at the server's
+    clock, and each later one that far after the one before it. A step
+    that cannot be a real frame interval -- not a number, not forward,
+    or longer than `MAX_STEP_S` -- is replaced by the server's own
+    interval since the last stamp, clamped to `[MIN_STEP_S,
+    MAX_STEP_S]`, and the client timeline resumes from that frame. So
+    whatever the client's clock does, time only moves forward, by a
+    bounded amount: a zero or negative interval would spike the
+    filter's speed estimate, and a clock jump is not an interval at all.
+    """
+
+    MIN_STEP_S = 0.001
+    MAX_STEP_S = 1.0
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._last_client_ms: float | None = None
+        self._last_t: float | None = None
+        self._last_server: float | None = None
+        self.fallbacks = 0
+
+    def stamp(self, client_ms: float) -> float:
+        server_now = self._clock()
+        if self._last_t is None or self._last_server is None:
+            t = server_now
+        else:
+            step = self._client_step(client_ms)
+            if step is None:
+                self.fallbacks += 1
+                step = min(
+                    self.MAX_STEP_S,
+                    max(self.MIN_STEP_S, server_now - self._last_server),
+                )
+            t = self._last_t + step
+        # Even an untrusted timestamp becomes the reference for the
+        # next step: after a jump, the client's clock is right again
+        # from here on, just from a different origin.
+        self._last_client_ms = client_ms if math.isfinite(client_ms) else None
+        self._last_t = t
+        self._last_server = server_now
+        return t
+
+    def _client_step(self, client_ms: float) -> float | None:
+        if self._last_client_ms is None or not math.isfinite(client_ms):
+            return None
+        step = (client_ms - self._last_client_ms) / 1000.0
+        if not 0.0 < step <= self.MAX_STEP_S:
+            return None
+        return step
 
 
 class FrameSlot:
@@ -112,11 +181,37 @@ class SessionStats:
     position: tuple[float, float] | None = None
     triggers: int = 0
 
+    # Who is on the other end, from its `hello`. None until it says:
+    # more than one kind of device can stream now, and a log line that
+    # says "phone" about an ESP32-CAM sends the operator to the wrong
+    # device.
+    client_kind: str | None = None
+    client_version: str | None = None
+    frame_size: tuple[int, int] | None = None
+    # Which camera, when the client says: part of the lens calibration
+    # key, so one phone's two rear cameras do not share a calibration.
+    camera: str | None = None
+
+    # RMS error of the lens calibration applied to the latest frame, or
+    # None when none was (see `lens.py`).
+    lens_rms_px: float | None = None
+    # This session's lens calibration, once one has been started in it.
+    # Kept after it finishes so the result stays readable.
+    calibration: CalibrationCapture | None = field(default=None, repr=False)
+
+    # Whether this session drives the cursor: "yours", "other" or
+    # "free" (see `shooter.CursorArbiter`). Set by the server per report.
+    cursor: str | None = None
+
     # Per connection, never per app or per pipeline: one phone turning
     # the debug view on must not change what another phone receives, and
     # the pipeline behind them is shared.
     debug_enabled: bool = False
     debug: dict | None = None
+
+    # This session's zeroing state (`zeroing.SessionZeroing.status`),
+    # set by the server per report.
+    zeroing: dict | None = None
 
     # Owned by the slot, which is where dropping actually happens.
     _slot: FrameSlot | None = field(default=None, repr=False)
@@ -169,7 +264,93 @@ class SessionStats:
             "inside_hull": self.inside_hull,
             "outcome": self.outcome,
             "triggers": self.triggers,
+            "cursor": self.cursor,
+            "zeroing": self.zeroing,
         }
+        # Keyed in only when there is something to say, like `debug`: a
+        # session that never calibrated sees exactly the payload it did
+        # before calibration existed.
+        if self.lens_rms_px is not None:
+            message["lens"] = {"rms_px": round(self.lens_rms_px, 3)}
+        if self.calibration is not None:
+            message["calibration"] = self.calibration.status()
         if self.debug_enabled:
             message["debug"] = self.debug
         return message
+
+
+UNIDENTIFIED = "unidentified"
+
+
+# Identity, not field equality: two fresh sessions from the same address
+# compare equal field by field, and unregistering one must not remove
+# the other.
+@dataclass(eq=False)
+class ActiveSession:
+    address: str
+    stats: SessionStats
+    started: float
+
+    def label(self) -> str:
+        """How logs name this session: its kind once known, then where."""
+        return f"{self.stats.client_kind or UNIDENTIFIED} {self.address}"
+
+
+class SessionRegistry:
+    """The frame sessions currently connected, for reading from outside.
+
+    A client with no screen of its own -- an ESP32-CAM inside a gun
+    shell -- cannot display its telemetry, so it has to be readable from
+    another device. Entries are added when a session starts and removed
+    when it ends, never retained: a listing that kept closed sessions
+    would show a dead camera as streaming.
+
+    Touched only from the event loop, so no locking.
+    """
+
+    def __init__(self) -> None:
+        self._sessions: list[ActiveSession] = []
+
+    def register(
+        self, address: str, stats: SessionStats, started: float
+    ) -> ActiveSession:
+        session = ActiveSession(address, stats, started)
+        self._sessions.append(session)
+        return session
+
+    def unregister(self, session: ActiveSession) -> None:
+        if session in self._sessions:
+            self._sessions.remove(session)
+
+    def __len__(self) -> int:
+        return len(self._sessions)
+
+    def __iter__(self) -> Iterator[ActiveSession]:
+        return iter(list(self._sessions))
+
+    def listing(self, now: float) -> list[dict]:
+        """Each live session's identity and its latest telemetry.
+
+        Debug geometry is left out: it is kilobytes per frame, describes
+        an image nobody reading this can see, and belongs to the client
+        that asked for it.
+        """
+        entries = []
+        for session in self._sessions:
+            stats = session.stats
+            telemetry = stats.as_message()
+            telemetry.pop("debug", None)
+            entries.append(
+                {
+                    "address": session.address,
+                    "client": stats.client_kind or UNIDENTIFIED,
+                    "version": stats.client_version,
+                    "camera": stats.camera,
+                    "frame_size": (
+                        None if stats.frame_size is None else list(stats.frame_size)
+                    ),
+                    "connected_s": round(now - session.started, 1),
+                    "stats": telemetry,
+                }
+            )
+        return entries

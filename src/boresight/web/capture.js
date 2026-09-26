@@ -3,10 +3,12 @@
 // Captures from the rear camera, draws each frame to an offscreen
 // canvas, encodes it as JPEG, and sends it as one binary WebSocket
 // message: an 8-byte little-endian timestamp from this device's clock,
-// then the JPEG bytes. The timestamp is only ever compared against a
-// later reading of the same clock, so the two machines never need to
-// agree on an epoch -- the server echoes it back untouched and we
-// subtract here.
+// then the JPEG bytes. The timestamp is when the camera captured the
+// frame, not when it was sent: the server times its aim smoothing by the
+// interval between two frames' stamps, so encode time must not leak in.
+// It is only ever compared against another reading of the same clock,
+// so the two machines never need to agree on an epoch -- the server
+// echoes it back untouched and we subtract here.
 
 "use strict";
 
@@ -36,7 +38,8 @@ for (const id of [
   "row-decoded", "row-reprojection", "row-lag",
   "stat-connection", "stat-camera", "stat-exposure", "stat-rtt",
   "stat-markers", "stat-aim", "stat-frames", "stat-lost", "stat-skipped",
-  "stat-timing", "stat-shots", "stat-decoded", "stat-reprojection", "stat-lag",
+  "stat-timing", "stat-shots", "stat-cursor", "stat-decoded", "stat-reprojection",
+  "stat-lag", "calibrate-start", "calibrate-cancel", "stat-lens",
 ]) {
   els[id] = document.getElementById(id);
 }
@@ -55,6 +58,20 @@ const state = {
   // What the camera actually granted, kept so the server's decoded
   // frame size can be compared against it rather than assumed equal.
   cameraSize: null,
+  // Whether this page has told the server the trigger is down. Guards
+  // against a second `down` and against an `up` for nothing.
+  triggerHeld: false,
+  // The capture time of the camera frame the preview is showing, from
+  // requestVideoFrameCallback, and when that callback last ran. Null
+  // where the browser has no such callback.
+  frameStamp: null,
+  frameSeenAt: 0,
+  // Bumped on every stop, so a callback chain from an earlier stream
+  // ends instead of running alongside the next one.
+  frameWatch: 0,
+  // The stamp of the last frame sent. The same stamp again means the
+  // same camera frame, which is not worth sending twice.
+  lastSentStamp: null,
 };
 
 function show(kind, text) {
@@ -116,18 +133,29 @@ if (!cameraApiAvailable()) {
 
 // --- Connection ------------------------------------------------------
 
+// The token arrives once, in the URL the server printed. The response
+// to that request set it as an HttpOnly cookie, which the browser now
+// sends on every fetch and on the socket handshake -- so take it out of
+// the address bar (and with it, history, screenshots and a shared tab)
+// before anything else happens. Everything else in the address stays.
+(function forgetTokenInAddress() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("token")) return;
+  params.delete("token");
+  const query = params.toString();
+  history.replaceState(
+    history.state,
+    "",
+    location.pathname + (query ? `?${query}` : "") + location.hash,
+  );
+})();
+
 // Every link and socket on this page is built from where the page was
 // loaded, not hardcoded: the address the phone opened is by definition
-// one it can reach, and the token rides along on the same URL.
-function currentToken() {
-  return new URLSearchParams(location.search).get("token");
-}
-
+// one it can reach. No token on any of them -- the cookie carries it,
+// and a token in a URL is a token in the server's access log.
 function sameOriginUrl(path) {
-  const url = new URL(path, location.href);
-  const token = currentToken();
-  if (token) url.searchParams.set("token", token);
-  return url;
+  return new URL(path, location.href);
 }
 
 function socketUrl() {
@@ -136,8 +164,7 @@ function socketUrl() {
   return url.toString();
 }
 
-// Carrying the token matters: without it the link 401s, and it is
-// guarded exactly when the server is reachable from this phone.
+// Built the same way as every other URL on the page.
 els["marker-sheet"].href = sameOriginUrl("markers").toString();
 
 // --- Marker source ---------------------------------------------------
@@ -547,20 +574,73 @@ const CAMERA_TIMEOUT_MS = 30000;
 // the same machine over adb.
 const SOCKET_TIMEOUT_MS = 8000;
 
+// A random id kept on this phone, so the server finds this gun's zero
+// again after a reconnect or a restart (see zeroing.js). Null where
+// storage is unavailable: the server then falls back to the kind.
+function clientId() {
+  try {
+    let id = localStorage.getItem("boresight-client-id");
+    if (!id) {
+      const bytes = crypto.getRandomValues(new Uint8Array(8));
+      id = "phone-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      localStorage.setItem("boresight-client-id", id);
+    }
+    return id;
+  } catch {
+    return null;
+  }
+}
+
+// The server takes more than one kind of client now; without this its
+// logs and GET /sessions cannot say whether a session is this phone or
+// a camera inside a gun. Sends the size the camera granted, not the one
+// requested.
+function helloMessage() {
+  const track = state.stream && state.stream.getVideoTracks()[0];
+  const settings = track ? track.getSettings() : {};
+  const message = { type: "hello", client: "phone" };
+  const id = clientId();
+  if (id) message.id = id;
+  if (Number.isInteger(settings.width) && Number.isInteger(settings.height)) {
+    message.frame_size = [settings.width, settings.height];
+  }
+  // Which camera: the lens calibration is kept per camera, and a phone
+  // may have several behind the same "environment" facing mode.
+  if (track && track.label) message.camera = track.label;
+  return message;
+}
+
 function connect() {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(socketUrl());
+    // Current from the moment it exists, so a cancel or timeout during
+    // the handshake closes it too, and `onclose` below can tell it
+    // apart from an older socket closing late.
+    state.socket = socket;
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
       set("stat-connection", "connected");
+      // On every connection, not once per page: the server's identity
+      // for a session belongs to that connection.
+      socket.send(JSON.stringify(helloMessage()));
       resolve(socket);
     };
     socket.onerror = () => reject(new Error("could not connect to the server"));
     socket.onclose = (event) => {
+      // A socket this page has already let go of -- stopped, or
+      // replaced by a newer start -- must not tear down whatever is
+      // streaming now.
+      if (state.socket !== socket) return;
       set("stat-connection", `closed (${event.code})`);
       stop();
       if (event.code === 1008) {
-        show("error", "Rejected: missing or invalid token. Reopen the exact URL the server printed.");
+        show(
+          "error",
+          "Rejected: missing or invalid token. Reopen the exact URL the server " +
+            "printed -- if it restarted, its token may have changed.",
+        );
+      } else if (event.code === 1011) {
+        show("error", "The server stopped processing frames (see its log). Press Start to reconnect.");
       } else if (event.code !== 1000) {
         show("warn", `Connection closed (code ${event.code}).`);
       }
@@ -581,6 +661,15 @@ let lastRender = 0;
 let lastRttReport = 0;
 let lastRoundTrip = null;
 
+// Whose aim the server's cursor is following. Only one device drives it
+// at a time: the last to pull the trigger, or the first to aim at a free
+// cursor. Without this, a phone whose aim moves nothing looks broken.
+const CURSOR_OWNER = {
+  yours: "this phone",
+  other: "another device",
+  free: "free",
+};
+
 function onTelemetry(data) {
   let stats;
   try {
@@ -589,6 +678,8 @@ function onTelemetry(data) {
     return;
   }
   if (stats.type !== "stats") return;
+  // For the page's other scripts (zeroing.js), unthrottled.
+  document.dispatchEvent(new CustomEvent("boresight:stats", { detail: stats }));
 
   const now = performance.now();
 
@@ -631,7 +722,44 @@ function onTelemetry(data) {
   set("stat-lost", `${stats.dropped} / ${stats.failed}`);
   set("stat-timing", `${stats.decode_ms} / ${stats.solve_ms} ms`);
   set("stat-shots", String(stats.triggers));
+  set("stat-cursor", CURSOR_OWNER[stats.cursor] || "—");
+  showLens(stats);
 }
+
+// --- Lens calibration ------------------------------------------------
+
+// The server collects the views from this session's own frames and
+// says how far it has got; the page only starts, cancels and reports.
+function showLens(stats) {
+  const calibration = stats.calibration;
+  const capturing = Boolean(calibration && calibration.state === "capturing");
+  els["calibrate-cancel"].disabled = !capturing;
+  if (capturing) {
+    set("stat-lens", `capturing ${calibration.views} / ${calibration.views_needed}`);
+  } else if (calibration && calibration.state === "failed") {
+    set("stat-lens", `failed: ${calibration.detail || "no fit"}`);
+  } else if (stats.lens) {
+    set("stat-lens", `calibrated, ${stats.lens.rms_px} px RMS`);
+  } else if (calibration && calibration.state === "done") {
+    set("stat-lens", `done, ${calibration.rms_px} px RMS`);
+  } else {
+    set("stat-lens", "not calibrated");
+  }
+}
+
+els["calibrate-start"].addEventListener("click", () => {
+  send(JSON.stringify({ type: "calibrate", action: "start" }));
+  show(
+    "info",
+    "Calibrating. Show the lens calibration board (link below) and move " +
+      "the camera so it appears in many places -- right up to every edge " +
+      "and corner of the frame, tilted, near and far. A view is taken " +
+      "only when the board has moved."
+  );
+});
+els["calibrate-cancel"].addEventListener("click", () => {
+  send(JSON.stringify({ type: "calibrate", action: "cancel" }));
+});
 
 function send(payload) {
   if (state.socket && state.socket.readyState === WebSocket.OPEN) {
@@ -701,6 +829,44 @@ async function pinExposure(track) {
 const canvas = document.createElement("canvas");
 const context = canvas.getContext("2d", { willReadFrequently: false });
 
+// A frame stamp older than this is not trusted to describe what the
+// preview is showing: the callback stops when the video is not being
+// composited, and the capture loop must not stall waiting for it.
+const FRAME_STAMP_STALE_MS = 250;
+
+// Records, per camera frame the preview presents, when it was captured.
+// captureTime is the camera's own timestamp where the browser exposes
+// it; expectedDisplayTime is not a capture time but sits a steady offset
+// after one, and only differences between stamps are ever used. Both are
+// on the performance.now() timebase.
+function watchFrames(video) {
+  if (typeof video.requestVideoFrameCallback !== "function") return;
+  const generation = state.frameWatch;
+  const onFrame = (_now, metadata) => {
+    if (generation !== state.frameWatch) return;
+    const stamp = Number.isFinite(metadata.captureTime)
+      ? metadata.captureTime
+      : metadata.expectedDisplayTime;
+    if (Number.isFinite(stamp)) {
+      state.frameStamp = stamp;
+      state.frameSeenAt = performance.now();
+    }
+    video.requestVideoFrameCallback(onFrame);
+  };
+  video.requestVideoFrameCallback(onFrame);
+}
+
+// When the frame about to be drawn was captured: the preview's frame
+// stamp while it is fresh, otherwise this instant, taken before drawing
+// -- never after encoding, whose duration varies frame to frame.
+function captureStamp() {
+  const now = performance.now();
+  if (state.frameStamp !== null && now - state.frameSeenAt < FRAME_STAMP_STALE_MS) {
+    return state.frameStamp;
+  }
+  return now;
+}
+
 async function captureAndSend() {
   if (state.sending) return;
   if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
@@ -713,6 +879,11 @@ async function captureAndSend() {
 
   const video = els.preview;
   if (!video.videoWidth) return;
+
+  // Still the frame sent last tick: the camera has not delivered a new
+  // one. Not a skip -- there is nothing new to send.
+  const stamp = captureStamp();
+  if (stamp === state.lastSentStamp) return;
 
   state.sending = true;
   try {
@@ -727,9 +898,10 @@ async function captureAndSend() {
 
     const jpeg = new Uint8Array(await blob.arrayBuffer());
     const message = new Uint8Array(CONFIG.headerBytes + jpeg.length);
-    new DataView(message.buffer).setFloat64(0, performance.now(), true);
+    new DataView(message.buffer).setFloat64(0, stamp, true);
     message.set(jpeg, CONFIG.headerBytes);
     send(message.buffer);
+    state.lastSentStamp = stamp;
   } catch (error) {
     show("error", `Capture failed: ${error.message}`);
   } finally {
@@ -738,15 +910,27 @@ async function captureAndSend() {
 }
 
 function stop() {
+  // While the socket is still open, so the server hears it. The server
+  // would release on the close anyway; this makes it explicit.
+  releaseTrigger();
   if (state.timer) clearInterval(state.timer);
   state.timer = null;
+  state.frameWatch += 1;
+  state.frameStamp = null;
+  state.lastSentStamp = null;
   if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
   state.stream = null;
+  // Closed, not just forgotten: an abandoned socket stays open until the
+  // page unloads, and the server goes on listing it as a live session.
+  const socket = state.socket;
   state.socket = null;
+  if (socket && socket.readyState <= WebSocket.OPEN) socket.close(1000, "stopped");
   state.geometry = null;
   els.start.disabled = false;
   els.start.textContent = "Start streaming";
   els.trigger.disabled = true;
+  els["calibrate-start"].disabled = true;
+  els["calibrate-cancel"].disabled = true;
   // The camera is gone, so there is no longer an image for the reticle
   // to mark a point on. The debug toggle keeps its setting.
   drawOverlay();
@@ -794,6 +978,7 @@ els.start.addEventListener("click", async () => {
     set("stat-connection", "camera ready");
     els.preview.srcObject = state.stream;
     await els.preview.play();
+    watchFrames(els.preview);
     // Before the socket: the reticle is a property of the preview, not
     // of the connection, and it should be there the moment there is an
     // image to mark.
@@ -816,8 +1001,12 @@ els.start.addEventListener("click", async () => {
     els.start.disabled = false;
     els.start.textContent = "Stop streaming";
     els.trigger.disabled = false;
+    els["calibrate-start"].disabled = false;
     show("info", "Streaming. Aim at the display; the cursor follows the frame centre.");
   } catch (error) {
+    // Cancelled mid-start: closing the half-open socket rejects the
+    // wait, and that is not a failure to report over "Start cancelled."
+    if (!state.starting) return;
     stop();
     set("stat-connection", "failed");
     show("error", `${error.name || "Error"}: ${error.message}`);
@@ -826,12 +1015,181 @@ els.start.addEventListener("click", async () => {
   }
 });
 
+// Down on press, up on release, so holding the trigger holds the
+// button and aim movement in between drags; a quick tap is a click.
+//
 // pointerdown rather than click: click waits for pointerup and, on
 // touch, the browser's tap-recognition delay -- a trigger should fire
 // the instant it's pressed. preventDefault plus touch-action: none (in
 // CSS) stops the browser from treating the press as the start of a
-// scroll/zoom gesture instead of a tap on the button.
+// scroll/zoom gesture instead of a tap on the button. Pointer capture
+// keeps the release coming to this button even if the finger slides
+// off it.
 els.trigger.addEventListener("pointerdown", (event) => {
   event.preventDefault();
-  send(JSON.stringify({ type: "trigger" }));
+  if (state.triggerHeld) return;
+  els.trigger.setPointerCapture(event.pointerId);
+  state.triggerHeld = true;
+  els.trigger.classList.add("held");
+  // Names the latest frame sent, so the server fires at that frame's
+  // aim rather than at the smoothed cursor trailing behind it.
+  const message = { type: "trigger", state: "down" };
+  if (state.lastSentStamp !== null) message.frame_ms = state.lastSentStamp;
+  send(JSON.stringify(message));
 });
+
+// Every way a press can end sends the release: a stuck button would
+// turn all further aiming into a drag.
+function releaseTrigger() {
+  if (!state.triggerHeld) return;
+  state.triggerHeld = false;
+  els.trigger.classList.remove("held");
+  send(JSON.stringify({ type: "trigger", state: "up" }));
+}
+
+for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  els.trigger.addEventListener(type, releaseTrigger);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseTrigger();
+});
+// A long press would otherwise open the browser's context menu.
+els.trigger.addEventListener("contextmenu", (event) => event.preventDefault());
+
+// --- Aim tuning --------------------------------------------------------
+
+// Sliders for the server's live tuning (settings.py). Each is built from
+// the range the server reports, so this page never hardcodes one, and
+// shows what the server says is in effect after a change rather than
+// what was asked for -- the same rule as the marker controls above. A
+// change is sent when the slider is let go, not on every step of the
+// drag: each one is applied to every streaming session at once.
+//
+// Self-contained: nothing above this section refers to it.
+
+const TUNING_CONTROLS = [
+  { key: "min_cutoff", label: "Smoothing (min cutoff)", step: 0.01, unit: " Hz", digits: 2 },
+  { key: "beta", label: "Fast-swing response (beta)", step: 0.05, unit: "", digits: 2 },
+  { key: "hold_s", label: "Dropout hold", step: 0.05, unit: " s", digits: 2 },
+  { key: "rel_scale", label: "Relative motion scale", step: 50, unit: "", digits: 0 },
+];
+
+const tuningEls = {
+  panel: document.getElementById("tuning"),
+  rows: document.getElementById("tuning-rows"),
+  save: document.getElementById("tuning-save"),
+};
+const tuningInputs = {};
+
+function formatTuning(control, value) {
+  return `${Number(value).toFixed(control.digits)}${control.unit}`;
+}
+
+function buildTuning(settings) {
+  tuningEls.rows.textContent = "";
+  for (const control of TUNING_CONTROLS) {
+    const limits = settings.limits[control.key];
+    const row = document.createElement("div");
+    row.className = "tune";
+    const label = document.createElement("label");
+    const name = document.createElement("span");
+    name.textContent = control.label;
+    const output = document.createElement("output");
+    label.append(name, output);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = String(limits.min);
+    input.max = String(limits.max);
+    input.step = String(control.step);
+    const pinned = document.createElement("div");
+    pinned.className = "pinned";
+    label.htmlFor = input.id = `tune-${control.key}`;
+    row.append(label, input, pinned);
+    tuningEls.rows.append(row);
+
+    input.addEventListener("input", () => {
+      output.textContent = formatTuning(control, input.value);
+    });
+    input.addEventListener("change", () =>
+      changeTuning({ [control.key]: Number(input.value) })
+    );
+    tuningInputs[control.key] = { control, input, output, pinned };
+  }
+}
+
+function showTuning(settings) {
+  if (!settings || !settings.tuning) return;
+  if (!Object.keys(tuningInputs).length) buildTuning(settings);
+  for (const [key, { control, input, output, pinned }] of Object.entries(tuningInputs)) {
+    const value = settings.tuning[key];
+    input.value = String(value);
+    output.textContent = formatTuning(control, value);
+    // Pinned values win over the file again on the next start, so a
+    // saved change to one would quietly not survive a restart.
+    const source = settings.pinned[`tuning.${key}`];
+    pinned.textContent = source ? `Set by ${source}; overrides the saved value.` : "";
+    if (key === "rel_scale" && !settings.rel_scale_supported) {
+      input.disabled = true;
+      pinned.textContent = "Not supported by this server's cursor backend.";
+    }
+  }
+}
+
+async function loadTuning() {
+  try {
+    const response = await fetch(sameOriginUrl("settings"));
+    if (response.ok) showTuning(await response.json());
+  } catch {
+    // As with the other controls: a real connection problem shows
+    // itself when streaming starts.
+  }
+}
+
+function tuningError(body, fallback) {
+  const detail = body && body.detail;
+  if (typeof detail === "string") return detail;
+  // FastAPI's validation errors are a list of {loc, msg}.
+  if (Array.isArray(detail)) return detail.map((item) => item.msg).join("; ");
+  return fallback;
+}
+
+async function changeTuning(changes) {
+  try {
+    const response = await fetch(sameOriginUrl("settings/tuning"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(changes),
+    });
+    const body = await response.json();
+    if (response.ok) {
+      showTuning(body);
+    } else {
+      show("error", tuningError(body, "could not change the tuning"));
+      // Put the sliders back where the server actually is.
+      loadTuning();
+    }
+  } catch (error) {
+    show("error", `Could not change the tuning: ${error.message}`);
+    loadTuning();
+  }
+}
+
+tuningEls.save.addEventListener("click", async () => {
+  tuningEls.save.disabled = true;
+  try {
+    const response = await fetch(sameOriginUrl("settings/save"), { method: "POST" });
+    const body = await response.json();
+    if (response.ok) {
+      showTuning(body);
+      show("info", `Settings saved to ${body.path}.`);
+    } else {
+      show("error", tuningError(body, "could not save the settings"));
+    }
+  } catch (error) {
+    show("error", `Could not save the settings: ${error.message}`);
+  } finally {
+    tuningEls.save.disabled = false;
+  }
+});
+
+loadTuning();

@@ -40,6 +40,24 @@ VERSION = 1
 _HEADER = struct.Struct("<4sIIIII")
 _RECT = struct.Struct("<IIII")
 
+# Sanity bounds, mirroring BSOV_MAX_DIMENSION / BSOV_MAX_RECTS in
+# canvas_format.h -- the layer rejects anything outside them, so this
+# reader does too, keeping the two in agreement on what a valid file is.
+MAX_DIMENSION = 16384
+MAX_RECTS = 4096
+
+
+def _check_rectangle(rect: tuple[int, int, int, int], width: int, height: int) -> None:
+    """Raise unless `rect` is non-empty and wholly inside the canvas --
+    the same rule `bsov_load` and `bsov_fits_extent` apply in C."""
+    x, y, w, h = rect
+    # Python ints don't overflow, so `x + w` here is exactly the
+    # overflow-free comparison the C side does by subtraction.
+    if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > width or y + h > height:
+        raise ValueError(
+            f"invalid .bsov rectangle {tuple(rect)} for a {width}x{height} canvas"
+        )
+
 
 def pack(canvas: np.ndarray, rectangles: list[tuple[int, int, int, int]]) -> bytes:
     """Serialize a rendered canvas + rectangles to the `.bsov` wire format."""
@@ -51,10 +69,14 @@ def pack(canvas: np.ndarray, rectangles: list[tuple[int, int, int, int]]) -> byt
 
 
 def unpack(data: bytes) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
-    """The inverse of `pack`.
+    """The inverse of `pack`, with the same validation as the C reader.
 
     Exists for tests and introspection -- the layer itself has its own
-    C reader, `bsov_load`, and never goes through this function.
+    C reader, `bsov_load`, and never goes through this function. It
+    rejects exactly what `bsov_load` rejects: width/height outside
+    `1..MAX_DIMENSION`, more than `MAX_RECTS` rectangles, data shorter
+    than the header declares, and any rectangle that is empty or not
+    entirely inside the canvas. `pack` itself stays permissive.
     """
     if len(data) < _HEADER.size:
         raise ValueError("truncated .bsov data: shorter than the header")
@@ -65,10 +87,19 @@ def unpack(data: bytes) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
     if version != VERSION:
         raise ValueError(f"unsupported .bsov version {version}")
 
+    if not (1 <= width <= MAX_DIMENSION and 1 <= height <= MAX_DIMENSION):
+        raise ValueError(f"invalid .bsov canvas size {width}x{height}")
+    if rect_count > MAX_RECTS:
+        raise ValueError(f"too many .bsov rectangles: {rect_count}")
+
     offset = _HEADER.size
+    if len(data) < offset + rect_count * _RECT.size:
+        raise ValueError("truncated .bsov data: fewer rectangles than rect_count")
     rectangles: list[tuple[int, int, int, int]] = []
     for _ in range(rect_count):
-        rectangles.append(_RECT.unpack_from(data, offset))
+        rect = _RECT.unpack_from(data, offset)
+        _check_rectangle(rect, width, height)
+        rectangles.append(rect)
         offset += _RECT.size
 
     pixel_count = width * height
@@ -82,5 +113,13 @@ def unpack(data: bytes) -> tuple[np.ndarray, list[tuple[int, int, int, int]]]:
 def write_file(
     path: Path, canvas: np.ndarray, rectangles: list[tuple[int, int, int, int]]
 ) -> None:
-    """Write `canvas`/`rectangles` to `path` in the `.bsov` format."""
+    """Write `canvas`/`rectangles` to `path` in the `.bsov` format.
+
+    Unlike `pack`, refuses a rectangle the layer would reject, so a bad
+    layout fails here, loudly, instead of as a line in the game's log
+    and a frame with no markers.
+    """
+    height, width = canvas.shape
+    for rect in rectangles:
+        _check_rectangle(rect, width, height)
     path.write_bytes(pack(canvas, rectangles))

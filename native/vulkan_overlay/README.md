@@ -38,6 +38,26 @@ Verify the manifest is discoverable:
 VK_LAYER_PATH=native/vulkan_overlay/build vulkaninfo | grep boresight
 ```
 
+### Native unit tests
+
+The parts of the layer that don't need a Vulkan loader -- the `.bsov`
+reader and the startup-diagnostic thread's lifetime -- have C unit
+tests, off by default. Build them in a directory under `build/` (the
+only native build path `.gitignore` covers), ideally with sanitizers:
+
+```sh
+cmake -S native/vulkan_overlay -B native/vulkan_overlay/build/asan \
+    -DBORESIGHT_OVERLAY_BUILD_TESTS=ON \
+    -DBORESIGHT_OVERLAY_SANITIZE=address,undefined
+cmake --build native/vulkan_overlay/build/asan
+ctest --test-dir native/vulkan_overlay/build/asan --output-on-failure
+```
+
+Repeat with `build/tsan` and `-DBORESIGHT_OVERLAY_SANITIZE=thread` for
+ThreadSanitizer (it can't share a binary with ASan). `test_canvas_format`
+also takes a path and exits 0 only if `bsov_load` accepts that file,
+which is a quick way to check a canvas the Python side wrote.
+
 ## Using it
 
 Activation is always per-launch (an explicit layer), never system-wide.

@@ -85,6 +85,19 @@ def test_a_missing_layout_file_is_reported_as_missing(tmp_path: Path) -> None:
         resolve_layout(f"file:{tmp_path / 'absent.toml'}")
 
 
+@pytest.mark.parametrize("spec", ["file:", "file:   "])
+def test_a_file_source_with_no_path_says_so(spec: str) -> None:
+    """`Path("")` is `Path(".")`, so without an explicit check this
+    surfaced as `IsADirectoryError: '.'` -- true, and no help at all."""
+    with pytest.raises(LayoutSourceError) as caught:
+        marker_map_factory(spec)
+
+    message = str(caught.value)
+    assert "needs a path" in message
+    assert "file:markers.toml" in message
+    assert "plain 'file'" in message
+
+
 def test_a_bad_spec_is_rejected_when_written_not_at_first_frame() -> None:
     """`marker_map_factory` resolves once eagerly, so a typo surfaces
     while you are typing it rather than when the phone connects."""

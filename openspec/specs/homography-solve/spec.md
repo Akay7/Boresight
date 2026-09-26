@@ -1,7 +1,9 @@
 # homography-solve Specification
 
 ## Purpose
-TBD - created by syncing change add-homography-solver. Update Purpose after archive.
+Computes the aim point on the screen plane from marker
+correspondences, independent of detection and configuration I/O, and
+reports how well conditioned each solve is.
 
 ## Requirements
 
