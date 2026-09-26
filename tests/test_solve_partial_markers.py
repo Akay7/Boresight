@@ -37,18 +37,20 @@ CORNERS = (0, 1, 2, 3)
 TOP_EDGE = (0, 4, 1)
 OPPOSITE_MIDPOINTS = (7, 5)
 
-# Every inside-hull solve observed across all 4844 subset x frame
-# combinations landed within 18.3mm; 25mm leaves margin. This is the
-# bound the conditioning flag actually buys you.
-INSIDE_HULL_BOUND_MM = 25.0
+# Every inside-hull solve observed across all 5100 subset x frame
+# combinations landed within 3.0mm with sub-pixel corner refinement
+# (11.9mm without it); 6mm is 2x margin. This is the bound the
+# conditioning flag actually buys you.
+INSIDE_HULL_BOUND_MM = 6.0
 
 # A well-spread subset (the four corners -- half the layout) is
-# essentially as good as full visibility: 1.95mm observed vs 1.59mm.
-WELL_CONDITIONED_TOLERANCE_MM = 4.0
+# essentially as good as full visibility: 1.49mm observed vs 1.48mm.
+WELL_CONDITIONED_TOLERANCE_MM = 3.0
 
 # Locks in the *currently observed* badness of single-marker solves
-# (median 145mm, max 2037mm on a 1220mm panel). Not a desired property:
-# if the solvePnP-with-intrinsics path ever lands, this fails loudly and
+# (median 13.5mm, max 132mm on a 1220mm panel; sub-pixel refinement
+# brought these down from 83mm and 1017mm). Not a desired property: if
+# the solvePnP-with-intrinsics path ever lands, this fails loudly and
 # should be revisited rather than quietly passing.
 SPARSE_ERROR_IS_STILL_BAD_MM = 100.0
 
@@ -177,11 +179,12 @@ def test_a_single_marker_still_returns_an_answer_but_is_flagged(fixture_data: di
 def test_single_marker_accuracy_is_still_poor(fixture_data: dict):
     """Documented observation, not a desired property.
 
-    Extrapolating from one 80mm marker is measured at up to ~2m of error
-    on a 1220mm panel. If a future pose-based solve (solvePnP with
-    calibrated intrinsics) fixes this, this test fails and should be
-    deleted along with the caveat it documents -- rather than the
-    improvement landing silently.
+    Extrapolating from one 80mm marker is measured at up to ~130mm of
+    error on a 1220mm panel (~2m before sub-pixel corner refinement;
+    refinement shrank it but cannot fix extrapolation). If a future
+    pose-based solve (solvePnP with calibrated intrinsics) fixes this,
+    this test fails and should be deleted along with the caveat it
+    documents -- rather than the improvement landing silently.
     """
     worst = 0.0
     for detected, ground_truth in fixture_data["frames"]:

@@ -487,10 +487,11 @@ project dependency:
     uv run python -m tests.generate_synthetic_video_fixture
     uv run python -m tests.generate_close_range_fixture
 
-`detect.py` currently wraps `cv2.aruco.ArucoDetector` only — dictionary
-match and corner extraction, no cornerSubPix refinement or
-undistortPoints yet (those are separate Pipeline steps, still future
-work). Per-frame behaviour over a synthetic frame sequence is covered
+`detect.py` wraps `cv2.aruco.ArucoDetector` with cornerSubPix
+refinement enabled (`CORNER_REFINE_SUBPIX`, window one marker module
+wide); undistortPoints is still a separate Pipeline step and future
+work. `uv run python tests/measure_detection.py` prints corner and aim
+error per fixture, with and without refinement. Per-frame behaviour over a synthetic frame sequence is covered
 below; what's still missing is a real video source, 1-euro filtering,
 and any wiring into `server.py`.
 
@@ -1216,7 +1217,7 @@ a defect invisible to a test suite that always runs from a checkout.
         server.py             # HTTP + frame socket, serves web/ to the phone
         stream.py             # frame codec, drop slot, per-session counters, live sessions
         netaccess.py          # bind address, shared token, TLS certificate
-        detect.py             # ArUco detection (+ future subpixel refinement)
+        detect.py             # ArUco detection + subpixel corner refinement
         marker_map.py         # markers.toml -> id to screen-plane corners
         markers.py            # printable marker SVG, served over HTTP
         solve.py              # homography, RANSAC, aim point
