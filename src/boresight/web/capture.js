@@ -564,6 +564,10 @@ function helloMessage() {
 function connect() {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(socketUrl());
+    // Current from the moment it exists, so a cancel or timeout during
+    // the handshake closes it too, and `onclose` below can tell it
+    // apart from an older socket closing late.
+    state.socket = socket;
     socket.binaryType = "arraybuffer";
     socket.onopen = () => {
       set("stat-connection", "connected");
@@ -574,10 +578,16 @@ function connect() {
     };
     socket.onerror = () => reject(new Error("could not connect to the server"));
     socket.onclose = (event) => {
+      // A socket this page has already let go of -- stopped, or
+      // replaced by a newer start -- must not tear down whatever is
+      // streaming now.
+      if (state.socket !== socket) return;
       set("stat-connection", `closed (${event.code})`);
       stop();
       if (event.code === 1008) {
         show("error", "Rejected: missing or invalid token. Reopen the exact URL the server printed.");
+      } else if (event.code === 1011) {
+        show("error", "The server stopped processing frames (see its log). Press Start to reconnect.");
       } else if (event.code !== 1000) {
         show("warn", `Connection closed (code ${event.code}).`);
       }
@@ -759,7 +769,11 @@ function stop() {
   state.timer = null;
   if (state.stream) state.stream.getTracks().forEach((track) => track.stop());
   state.stream = null;
+  // Closed, not just forgotten: an abandoned socket stays open until the
+  // page unloads, and the server goes on listing it as a live session.
+  const socket = state.socket;
   state.socket = null;
+  if (socket && socket.readyState <= WebSocket.OPEN) socket.close(1000, "stopped");
   state.geometry = null;
   els.start.disabled = false;
   els.start.textContent = "Start streaming";
@@ -835,6 +849,9 @@ els.start.addEventListener("click", async () => {
     els.trigger.disabled = false;
     show("info", "Streaming. Aim at the display; the cursor follows the frame centre.");
   } catch (error) {
+    // Cancelled mid-start: closing the half-open socket rejects the
+    // wait, and that is not a failure to report over "Start cancelled."
+    if (!state.starting) return;
     stop();
     set("stat-connection", "failed");
     show("error", `${error.name || "Error"}: ${error.message}`);

@@ -10,13 +10,19 @@ DPI this code would otherwise have to choose.
 
 from __future__ import annotations
 
+import html
+import math
+from dataclasses import replace
+from urllib.parse import urlencode
+
 import cv2
 import numpy as np
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 
 from boresight.detect import DICTIONARY
 from boresight.marker_map import Marker, MarkerMap, load_marker_map
+from boresight.netaccess import TOKEN_QUERY_PARAM
 from boresight.pipeline import DEFAULT_CONFIG_PATH
 
 router = APIRouter()
@@ -30,6 +36,21 @@ DEFAULT_SIZE_MM = 80.0
 # cardstock the rendered fixtures put around their 80mm tags. Labels go
 # outside it, never inside.
 MARGIN_FRACTION = 0.25
+
+# Sizes the sheet offers. 120mm is the largest whose cut-out -- the tag
+# plus MARGIN_FRACTION of white on each side -- still fits across an A4
+# page's printable width; a larger one can still be asked for with
+# `size_mm` directly, and the picker says it will not fit.
+SIZE_PRESETS_MM = (40.0, 50.0, 60.0, 80.0, 100.0, 120.0)
+A4_PRINTABLE_WIDTH_MM = 190.0
+
+# The range estimate shown next to each size. README's decode floor is
+# about 3px per cell, ~20px across a 6-cell tag; the camera is a typical
+# phone main camera streaming 1280 wide at ~70 deg horizontal. An upper
+# bound, not a promise: angle, motion blur and JPEG all take from it.
+RANGE_MIN_TAG_PX = 20.0
+RANGE_IMAGE_WIDTH_PX = 1280
+RANGE_HFOV_DEG = 70.0
 
 _POSITION_LABELS = {
     (0, 0): "top-left corner",
@@ -114,13 +135,214 @@ def position_label(marker: Marker, screen_size_mm: tuple[float, float]) -> str:
     return _POSITION_LABELS[marker_slot(marker, screen_size_mm)]
 
 
-def _reference_layout() -> MarkerMap | None:
-    """The shipped layout, if it is readable.
+def estimated_range_m(size_mm: float) -> float:
+    """Farthest decodable distance for a tag this size, in metres."""
+    focal_px = (RANGE_IMAGE_WIDTH_PX / 2) / math.tan(math.radians(RANGE_HFOV_DEG / 2))
+    return size_mm * focal_px / RANGE_MIN_TAG_PX / 1000.0
 
-    The sheet is still useful without it -- you get tags, just not the
-    labels saying where each one goes -- so a missing or broken layout
-    degrades the page rather than failing the request.
+
+def fits_a4(size_mm: float) -> bool:
+    """Whether one cut-out fits across an A4 page at 100% scale."""
+    return size_mm * (1 + 2 * MARGIN_FRACTION) <= A4_PRINTABLE_WIDTH_MM
+
+
+def resized_layout(layout: MarkerMap, size_mm: float) -> MarkerMap:
+    """The same layout with every tag `size_mm` on a side.
+
+    Each tag keeps its gap to the panel and grows away from it: a tag
+    left of the panel grows leftwards, one above it upwards, and one
+    alongside an edge about its own centre along that edge. So a bigger
+    tag never creeps over the display it is meant to frame, and the
+    diagram's positions still describe it.
     """
+    if not math.isfinite(size_mm) or size_mm <= 0:
+        raise ValueError("size_mm must be positive")
+
+    def moved(start: float, old: float, slot: int) -> float:
+        if slot == 0:  # before the panel: keep the edge facing it
+            return start + old - size_mm
+        if slot == 2:  # past the panel: its near edge is `start` already
+            return start
+        return start + (old - size_mm) / 2  # alongside: keep the centre
+
+    markers = {}
+    for marker_id, marker in layout.markers.items():
+        row, column = marker_slot(marker, layout.screen_size_mm)
+        markers[marker_id] = replace(
+            marker,
+            x_mm=moved(marker.x_mm, marker.size_mm, column),
+            y_mm=moved(marker.y_mm, marker.size_mm, row),
+            size_mm=size_mm,
+        )
+    return replace(layout, markers=markers)
+
+
+def _toml_number(value: float) -> str:
+    # repr, not :g -- :g rounds to six significant figures, which would
+    # quietly move a tag.
+    return str(int(value)) if float(value).is_integer() else repr(float(value))
+
+
+def layout_toml(layout: MarkerMap, header: str = "") -> str:
+    """`layout` as a `markers.toml` that `load_marker_map` reads back."""
+    width, height = layout.screen_size_mm
+    lines = [f"# {line}" if line else "#" for line in header.splitlines()]
+    if lines:
+        lines.append("")
+    lines += [
+        f"screen_width_mm = {_toml_number(width)}",
+        f"screen_height_mm = {_toml_number(height)}",
+    ]
+    for marker_id in sorted(layout.markers):
+        marker = layout.markers[marker_id]
+        lines += [
+            "",
+            "[[marker]]",
+            f"id = {marker_id}",
+            f"x = {_toml_number(marker.x_mm)}",
+            f"y = {_toml_number(marker.y_mm)}",
+            f"size_mm = {_toml_number(marker.size_mm)}",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _parse_size(size_mm: str | None) -> float | None:
+    """The `size_mm` query value. Empty means "as the layout says".
+
+    Taken as a string rather than a float so the picker's "as in layout"
+    choice can submit an empty value instead of needing script to drop
+    the field.
+    """
+    if size_mm is None or not size_mm.strip():
+        return None
+    try:
+        value = float(size_mm)
+    except ValueError:
+        value = math.nan
+    if not math.isfinite(value) or value <= 0:
+        raise HTTPException(status_code=422, detail="size_mm must be positive")
+    return value
+
+
+def _with_token(request: Request, path: str, **params: object) -> str:
+    """A same-server link that still works on a token-guarded server."""
+    token = request.query_params.get(TOKEN_QUERY_PARAM)
+    if token:
+        params[TOKEN_QUERY_PARAM] = token
+    query = urlencode({k: v for k, v in params.items() if v is not None})
+    return f"{path}?{query}" if query else path
+
+
+def _size_picker(
+    request: Request,
+    layout: MarkerMap | None,
+    chosen_mm: float | None,
+    ids: str | None,
+) -> str:
+    """Choose a size. A form, so it works without script."""
+    layout_sizes = (
+        sorted({marker.size_mm for marker in layout.markers.values()})
+        if layout is not None
+        else []
+    )
+    options = []
+    if len(layout_sizes) > 1:
+        selected = " selected" if chosen_mm is None else ""
+        options.append(f'<option value=""{selected}>as in the layout (mixed)</option>')
+    current = (
+        chosen_mm
+        if chosen_mm is not None
+        else (layout_sizes[0] if len(layout_sizes) == 1 else None)
+    )
+    for size in sorted({*SIZE_PRESETS_MM, *layout_sizes, *filter(None, [current])}):
+        notes = [f"up to ~{estimated_range_m(size):.1f} m"]
+        if size in layout_sizes:
+            notes.append("matches the layout")
+        if not fits_a4(size):
+            notes.append("too wide for A4")
+        selected = " selected" if size == current else ""
+        options.append(
+            f'<option value="{size:g}"{selected}>{size:g} mm &mdash; '
+            f"{', '.join(notes)}</option>"
+        )
+
+    hidden = ""
+    token = request.query_params.get(TOKEN_QUERY_PARAM)
+    if token:
+        hidden += (
+            f'<input type="hidden" name="{TOKEN_QUERY_PARAM}" '
+            f'value="{html.escape(token, quote=True)}">'
+        )
+    if ids is not None:
+        hidden += (
+            f'<input type="hidden" name="ids" value="{html.escape(ids, quote=True)}">'
+        )
+
+    return (
+        '<form class="noprint picker" method="get" action="/markers">'
+        '<label>Tag size <select name="size_mm">'
+        f"{''.join(options)}"
+        "</select></label> "
+        f"{hidden}"
+        '<button type="submit">Show</button>'
+        '<p class="hint">Bigger tags are read from farther away. Ranges are'
+        " the most a typical phone camera at 1280&times;720 can decode;"
+        " expect about two-thirds of that in play.</p>"
+        "</form>"
+    )
+
+
+def _size_mismatch(
+    request: Request, layout: MarkerMap | None, chosen_mm: float | None, ids: list[int]
+) -> str:
+    """Warn when the printed size is not the size the solver assumes."""
+    if layout is None or chosen_mm is None:
+        return ""
+    differing = sorted(
+        {
+            layout.markers[marker_id].size_mm
+            for marker_id in ids
+            if marker_id in layout.markers
+            and layout.markers[marker_id].size_mm != chosen_mm
+        }
+    )
+    if not differing:
+        return ""
+    layout_says = " / ".join(f"{size:g}mm" for size in differing)
+    download = html.escape(
+        _with_token(request, "/markers/layout.toml", size_mm=f"{chosen_mm:g}"),
+        quote=True,
+    )
+    return (
+        '<div class="noprint mismatch">'
+        f"<p><b>These tags are {chosen_mm:g}mm, but the layout this server is"
+        f" running with says {layout_says}.</b> The solver places every"
+        " corner from the layout's size, so tags printed at another size"
+        " aim somewhere else &mdash; with no error to warn you.</p>"
+        f'<p><a href="{download}">Download a matching markers.toml</a>, save'
+        " it, and restart the server with"
+        " <code>--markers file:&lt;the saved file&gt;</code>. Every tag keeps"
+        " its gap to the screen and grows outwards, so attach them where the"
+        " diagram says, the same distance from the screen edge as before.</p>"
+        "</div>"
+    )
+
+
+def _sheet_layout(request: Request) -> MarkerMap | None:
+    """The printed layout this server solves against, if there is one.
+
+    The server's own layout, not the shipped reference: a sheet labelled
+    from one file while the solver reads another is exactly the silent
+    ID-swap this page exists to prevent. Falls back to the shipped file
+    only when the router is mounted without a server around it.
+
+    The sheet is still useful without any layout -- you get tags, just
+    not the labels saying where each one goes -- so a missing or broken
+    layout degrades the page rather than failing the request.
+    """
+    layout = getattr(request.app.state, "marker_map", None)
+    if layout is not None:
+        return layout
     try:
         return load_marker_map(DEFAULT_CONFIG_PATH)
     except OSError, ValueError:
@@ -168,16 +390,45 @@ def _tag(marker_id: int, size_mm: float, label: str | None) -> str:
         f'<div class="marker" style="padding: {margin}mm">'
         '<div class="up">&#9650; TOP</div>'
         f"{marker_svg(marker_id, size_mm)}"
-        f'<div class="label">id {marker_id}</div>'
+        f'<div class="label">id {marker_id} &middot; {size_mm:g}mm</div>'
         f"{detail}"
         "</div>"
     )
 
 
+@router.get("/markers/layout.toml")
+def get_layout_toml(request: Request, size_mm: str | None = None) -> Response:
+    """The server's printed layout, optionally resized, as a file to save."""
+    layout = _sheet_layout(request)
+    if layout is None:
+        raise HTTPException(status_code=404, detail="no marker layout is loaded")
+    chosen = _parse_size(size_mm)
+    header = "Boresight marker layout."
+    if chosen is not None:
+        layout = resized_layout(layout, chosen)
+        header += (
+            f"\nEvery tag resized to {chosen:g}mm, keeping its gap to the screen."
+            "\nPrint the sheet at this size, attach the tags where these"
+            "\npositions say, and start the server with"
+            "\n  --markers file:<this file>"
+        )
+    name = "markers.toml" if chosen is None else f"markers-{chosen:g}mm.toml"
+    return Response(
+        content=layout_toml(layout, header),
+        media_type="application/toml",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
 @router.get("/markers", response_class=HTMLResponse)
-def get_marker_sheet(ids: str | None = None, size_mm: float = DEFAULT_SIZE_MM) -> str:
+def get_marker_sheet(
+    request: Request, ids: str | None = None, size_mm: str | None = None
+) -> str:
+    layout = _sheet_layout(request)
+    raw_ids = ids
+    size_mm = _parse_size(size_mm)
     if ids is None:
-        marker_ids = DEFAULT_IDS
+        marker_ids = DEFAULT_IDS if layout is None else sorted(layout.markers)
     else:
         try:
             marker_ids = [int(part) for part in ids.split(",") if part]
@@ -185,8 +436,19 @@ def get_marker_sheet(ids: str | None = None, size_mm: float = DEFAULT_SIZE_MM) -
             raise HTTPException(
                 status_code=422, detail="ids must be a comma-separated list of integers"
             ) from exc
+        if not marker_ids:
+            raise HTTPException(status_code=422, detail="ids names no markers")
 
-    layout = _reference_layout()
+    def tag_size(marker_id: int) -> float:
+        # An explicit size_mm wins; otherwise each tag prints at the size
+        # the layout says it is, since that is the size the solver
+        # assumes. A printed tag of any other size shifts every corner.
+        if size_mm is not None:
+            return size_mm
+        if layout is not None and marker_id in layout.markers:
+            return layout.markers[marker_id].size_mm
+        return DEFAULT_SIZE_MM
+
     try:
         # The SVG is inlined rather than fetched through <img>, so the
         # page prints as one document. It also has to be: when the
@@ -195,7 +457,7 @@ def get_marker_sheet(ids: str | None = None, size_mm: float = DEFAULT_SIZE_MM) -
         tags = "".join(
             _tag(
                 marker_id,
-                size_mm,
+                tag_size(marker_id),
                 None
                 if layout is None or marker_id not in layout.markers
                 else position_label(layout.markers[marker_id], layout.screen_size_mm),
@@ -206,6 +468,14 @@ def get_marker_sheet(ids: str | None = None, size_mm: float = DEFAULT_SIZE_MM) -
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     diagram = "" if layout is None else _layout_diagram(layout, marker_ids)
+    picker = _size_picker(request, layout, size_mm, raw_ids)
+    mismatch = _size_mismatch(request, layout, size_mm, marker_ids)
+    sizes = sorted({tag_size(marker_id) for marker_id in marker_ids})
+    expected = (
+        f"it should be exactly {sizes[0]:g}mm on a side"
+        if len(sizes) == 1
+        else "each should measure exactly the size printed under it"
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<title>Boresight markers</title>"
@@ -226,11 +496,18 @@ def get_marker_sheet(ids: str | None = None, size_mm: float = DEFAULT_SIZE_MM) -
         " margin-bottom: 0.4em; }"
         ".label { font-weight: bold; margin-top: 0.4em; }"
         ".where { font-size: 9pt; color: #444; }"
+        ".picker { margin: 1em 0; }"
+        ".picker select, .picker button { font-size: 1em; }"
+        ".hint { font-size: 9pt; color: #555; margin: 0.4em 0 0; }"
+        ".mismatch { border: 2px solid #c60; background: #fff4e5;"
+        " padding: 0.2em 1em; max-width: 46em; }"
         "@media print { .noprint { display: none; } }"
         "</style></head><body>"
         '<p class="instructions">Print at 100% / actual size'
         " &mdash; never &quot;fit to page&quot;. Measure one tag against a"
-        f" ruler before cutting: it should be exactly {size_mm:g}mm on a side.</p>"
+        f" ruler before cutting: {expected}.</p>"
+        f"{picker}"
+        f"{mismatch}"
         '<div class="noprint">'
         "<ol>"
         "<li><b>Attach each tag upright</b>, with &#9650; TOP pointing up."
@@ -248,10 +525,11 @@ def get_marker_sheet(ids: str | None = None, size_mm: float = DEFAULT_SIZE_MM) -
         " edge.</li>"
         "<li>Matte paper only. Gloss catches screen glare and blows out a"
         " corner of the tag.</li>"
-        "<li>These positions describe the shipped reference layout. If your"
-        " display is a different size, measure it into your own"
-        " <code>markers.toml</code> &mdash; the labels below will follow"
-        " it.</li>"
+        "<li>These positions and sizes come from the layout this server is"
+        " running with. If your display is a different size, measure it"
+        " into your own <code>markers.toml</code> and start the server"
+        " with <code>--markers file:&lt;path&gt;</code> &mdash; the labels"
+        " below will follow it.</li>"
         "</ol>"
         f"{diagram}"
         "</div>"

@@ -58,6 +58,11 @@ FRAME_SOCKET_PATH = "/ws/frames"
 # unsupported, which is not what happened.
 WS_POLICY_VIOLATION = 1008
 
+# 1011: the server hit a condition it could not continue from. Sent when
+# frame processing itself has stopped, so the client reconnects rather
+# than streaming into a session that will never answer.
+WS_INTERNAL_ERROR = 1011
+
 # How often a live session reports itself. Frequent enough to answer
 # "is the camera actually sending anything" at a glance, rare enough not
 # to bury the log under a line per frame.
@@ -379,14 +384,41 @@ async def run_frame_session(
                 continue
             slot.put(client_ms, jpeg)
 
+    frame_errors = 0
+
     async def process_loop() -> None:
+        nonlocal frame_errors
         while True:
             client_ms, jpeg = await slot.get()
-            # Read per frame rather than captured once: a debug toggle
-            # arriving mid-session takes effect on the next frame.
-            result, decode_ms, solve_ms = await loop.run_in_executor(
-                None, _decode_and_solve, markers.pipeline, jpeg, stats.debug_enabled
-            )
+            try:
+                # Read per frame rather than captured once: a debug toggle
+                # arriving mid-session takes effect on the next frame.
+                result, decode_ms, solve_ms = await loop.run_in_executor(
+                    None,
+                    _decode_and_solve,
+                    markers.pipeline,
+                    jpeg,
+                    stats.debug_enabled,
+                )
+            except Exception:
+                # Anything the pipeline does not already turn into an
+                # outcome -- an OpenCV error on a pathological frame, a
+                # cursor device write failing. One frame is lost, not the
+                # session. The traceback is logged once: at frame rate, a
+                # persistent fault would otherwise bury the log.
+                frame_errors += 1
+                if frame_errors == 1:
+                    logger.exception(
+                        "frame from %s raised; counting it as failed "
+                        "(further errors this session are counted, not logged)",
+                        session.label(),
+                    )
+                stats.failed += 1
+                stats.outcome = "error"
+                stats.position = None
+                stats.debug = None
+                await _report(websocket, stats, client_ms)
+                continue
             stats.decode_ms = decode_ms
             stats.solve_ms = solve_ms
             if result is None:
@@ -424,13 +456,36 @@ async def run_frame_session(
                     stats.dropped,
                     stats.failed,
                 )
+                if frame_errors:
+                    logger.warning(
+                        "%s: %d frame(s) raised so far", session.label(), frame_errors
+                    )
                 last_logged = now
 
     receiver = asyncio.create_task(receive_loop())
     processor = asyncio.create_task(process_loop())
     try:
-        await receiver
+        # Both, not just the receiver: a processor that dies while the
+        # receiver carries on would leave a session that accepts frames
+        # forever and never answers one, with nothing in the log to say
+        # why.
+        await asyncio.wait((receiver, processor), return_when=asyncio.FIRST_COMPLETED)
+        if processor.done() and not processor.cancelled():
+            error = processor.exception()
+            logger.error(
+                "frame processing for %s stopped; closing the session",
+                session.label(),
+                exc_info=error,
+            )
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
+            try:
+                await websocket.close(code=WS_INTERNAL_ERROR)
+            except RuntimeError, ConnectionError:
+                pass
     finally:
+        receiver.cancel()
+        await asyncio.gather(receiver, return_exceptions=True)
         # The client is gone: stop solving its frames and emit nothing
         # further on its behalf. Both tasks and the slot go with the
         # connection, so the next one starts from zero.

@@ -167,18 +167,31 @@ def test_relative_deltas_are_off_by_default(fake_uinput) -> None:
     assert _relative_events(relative_device, evdev.ecodes.REL_Y) == []
 
 
-def test_click_is_unaffected_by_the_relative_capability(fake_uinput) -> None:
+def test_click_is_a_pen_tap_not_a_mouse_button(fake_uinput) -> None:
+    """Tip down then up on the pen, so the click lands where the pen
+    hovers -- a mouse button on the other device would land at a
+    separate Wayland pointer's position instead."""
     backend = UinputCursorBackend()
+    pen, relative_device = fake_uinput
+    pen.events.clear()
 
     backend.click()
 
-    relative_device = fake_uinput[1]
-    presses = [
+    assert _writes(relative_device) == []
+    touches = [
         value
-        for etype, c, value in _writes(relative_device)
-        if etype == evdev.ecodes.EV_KEY and c == evdev.ecodes.BTN_LEFT
+        for etype, c, value in _writes(pen)
+        if etype == evdev.ecodes.EV_KEY and c == evdev.ecodes.BTN_TOUCH
     ]
-    assert presses == [1, 0]
+    pressures = [
+        value
+        for etype, c, value in _writes(pen)
+        if etype == evdev.ecodes.EV_ABS and c == evdev.ecodes.ABS_PRESSURE
+    ]
+    assert touches == [1, 0]
+    assert pressures[0] > 0 and pressures[-1] == 0
+    # Down and up are separate frames, or they cancel out.
+    assert pen.events.count(("SYN",)) == 2
 
 
 def test_close_closes_both_devices(fake_uinput) -> None:

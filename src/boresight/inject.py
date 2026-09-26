@@ -24,6 +24,11 @@ from boresight.one_euro import OneEuroFilter
 
 ABS_MAX = 32767
 
+# Tip pressure for a click, out of the pen's 0-1023 range. Well clear of
+# libinput's tip-contact threshold (a few percent of the range); any
+# value above it is the same click.
+CLICK_PRESSURE = 512
+
 # Device-motion units per full [0.0, 1.0] sweep of the relative axis.
 # Zero (off) by default -- deliberately, not merely a conservative
 # starting point. Absolute placement is self-correcting: whatever
@@ -135,8 +140,9 @@ class UinputCursorBackend:
             ) from exc
 
         try:
-            # click()'s device, and now also the relative-motion one --
-            # deliberately separate from `self._device` above. Adding
+            # The relative-motion device (and formerly click()'s; see
+            # click() for why that moved to the pen) -- deliberately
+            # separate from `self._device` above. Adding
             # BTN_LEFT to the ABS_X/Y + BTN_TOUCH + INPUT_PROP_DIRECT
             # device above changes udev's classification of it from
             # ID_INPUT_TOUCHSCREEN to ID_INPUT_MOUSE, which would send
@@ -235,14 +241,29 @@ class UinputCursorBackend:
         self._last_position = (x, y)
 
     def click(self) -> None:
-        # BTN_LEFT press then release, on the dedicated click device, at
-        # whatever position the last move_absolute call left the
-        # cursor -- a click reports that the trigger was pulled, not a
-        # new position.
-        self._relative_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 1)
-        self._relative_device.syn()
-        self._relative_device.write(self._ecodes.EV_KEY, self._ecodes.BTN_LEFT, 0)
-        self._relative_device.syn()
+        # A pen tap -- tip down, then up -- at wherever the pen is
+        # hovering, which is exactly where move_absolute left the cursor.
+        # A click reports that the trigger was pulled, not a new position.
+        #
+        # Not BTN_LEFT on `self._relative_device`: under a Wayland
+        # compositor (seen on KWin) the tablet tool and the mouse are
+        # separate pointers. The pen moves the visible cursor, but a
+        # mouse button lands at the mouse pointer's own position, which
+        # nothing moves while relative deltas are off -- so the trigger
+        # counted on the server and clicked nowhere useful. The tip is
+        # the tablet's own click, delivered at the tablet's position.
+        #
+        # Pressure as well as BTN_TOUCH: for a pressure-capable tool
+        # libinput decides tip contact from a pressure threshold and
+        # ignores BTN_TOUCH alone.
+        self._device.write(
+            self._ecodes.EV_ABS, self._ecodes.ABS_PRESSURE, CLICK_PRESSURE
+        )
+        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 1)
+        self._device.syn()
+        self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_PRESSURE, 0)
+        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 0)
+        self._device.syn()
 
     def close(self) -> None:
         # Leave proximity before going away, so the pen is not left

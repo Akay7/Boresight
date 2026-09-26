@@ -597,3 +597,67 @@ def test_a_malformed_debug_message_leaves_the_setting_alone(
 
         socket.send_text(json.dumps({"type": "debug", "enabled": None}))
         assert "debug" in _send_frame(socket, entries[0])
+
+
+# --- A fault in processing is reported, never silent -----------------
+
+
+class _FlakyBackend(FakeCursorBackend):
+    """Raises on the first move, then behaves -- a device write that
+    failed once, which the pipeline has no outcome for."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.raised = False
+
+    def move_absolute(self, x: float, y: float) -> None:
+        if not self.raised:
+            self.raised = True
+            raise OSError("simulated uinput write failure")
+        super().move_absolute(x, y)
+
+
+def test_a_frame_that_raises_costs_one_frame_not_the_session(caplog) -> None:
+    backend = _FlakyBackend()
+    entries = _manifest(VIDEO_DIR)["frames"][:3]
+    app = create_app(backend_factory=lambda: backend)
+
+    with TestClient(app) as client, client.websocket_connect(FRAME_SOCKET_PATH) as ws:
+        reports = []
+        for entry in entries:
+            ws.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+            reports.append(ws.receive_json())
+
+    assert reports[0]["outcome"] == "error"
+    assert reports[0]["failed"] == 1
+    assert reports[0]["client_ms"] == CLIENT_MS
+    assert [report["outcome"] for report in reports[1:]] == ["solved", "solved"]
+    assert "simulated uinput write failure" in caplog.text
+
+
+def test_a_dead_processor_closes_the_session_instead_of_hanging(
+    monkeypatch, caplog
+) -> None:
+    """The receiver would otherwise go on accepting frames that nothing
+    will ever answer, and the phone would sit there waiting."""
+    from starlette.websockets import WebSocketDisconnect
+
+    import boresight.server as server
+
+    async def broken_report(websocket, stats, client_ms):
+        raise KeyError("simulated processor fault")
+
+    backend = FakeCursorBackend()
+    entry = _manifest(VIDEO_DIR)["frames"][0]
+    app = create_app(backend_factory=lambda: backend)
+    monkeypatch.setattr(server, "_report", broken_report)
+
+    with TestClient(app) as client, client.websocket_connect(FRAME_SOCKET_PATH) as ws:
+        ws.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+        with pytest.raises(WebSocketDisconnect) as closed:
+            ws.receive_json()
+
+    assert closed.value.code == server.WS_INTERNAL_ERROR
+    assert "frame processing" in caplog.text
+    assert "simulated processor fault" in caplog.text
+    assert len(app.state.sessions) == 0

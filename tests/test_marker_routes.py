@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -127,3 +128,195 @@ def test_an_id_outside_the_layout_still_prints_without_a_position(
     assert response.text.count('class="up"') == 2
     # Only the mapped one gets a position.
     assert response.text.count('class="where"') == 1
+
+
+# --- The sheet follows the layout the server runs with ---------------
+
+
+def _custom_layout_client(fake_backend):
+    from boresight.marker_map import parse_marker_map
+    from boresight.server import create_app
+
+    layout = parse_marker_map(
+        {
+            "screen_width_mm": 500,
+            "screen_height_mm": 300,
+            "marker": [
+                # Deliberately not the reference assignment: id 3 at the
+                # top-left, id 11 at the bottom-right, at their own sizes.
+                {"id": 3, "x": -60, "y": -60, "size_mm": 50},
+                {"id": 11, "x": 510, "y": 310, "size_mm": 35},
+            ],
+        }
+    )
+    return TestClient(
+        create_app(
+            backend_factory=lambda: fake_backend, marker_map_factory=lambda: layout
+        )
+    )
+
+
+def test_the_sheet_uses_the_servers_layout_not_the_shipped_one(fake_backend) -> None:
+    """A sheet labelled from the shipped file while the solver reads
+    another is a silent ID swap: tags go up where the sheet says, and the
+    aim is wrong with nothing to report it."""
+    with _custom_layout_client(fake_backend) as client:
+        response = client.get("/markers").text
+
+    assert response.count("<svg") == 2
+    assert "id 3" in response and "id 11" in response
+    assert "id 0" not in response
+    assert "500 &times; 300 mm" in response
+    # id 3 is top-left in *this* layout; in the reference it is bottom-left.
+    top_left = response.index("top-left corner")
+    assert response.rindex("id 3", 0, top_left) > response.rfind("id 11", 0, top_left)
+    assert "bottom-left corner" not in response
+
+
+def test_each_tag_prints_at_its_layout_size(fake_backend) -> None:
+    with _custom_layout_client(fake_backend) as client:
+        response = client.get("/markers").text
+
+    assert response.count('width="50.0mm"') == 1
+    assert response.count('width="35.0mm"') == 1
+    assert "exactly the size printed under it" in response
+
+
+def test_an_explicit_size_still_overrides_the_layout(fake_backend) -> None:
+    with _custom_layout_client(fake_backend) as client:
+        response = client.get("/markers", params={"size_mm": 60}).text
+
+    assert response.count('width="60.0mm"') == 2
+    assert "exactly 60mm on a side" in response
+
+
+# --- Choosing the tag size ---------------------------------------------
+
+
+def test_the_sheet_offers_sizes_with_their_range(client: TestClient) -> None:
+    response = client.get("/markers").text
+
+    assert '<select name="size_mm">' in response
+    for size in ("40", "60", "80", "100", "120"):
+        assert f'<option value="{size}"' in response
+    # The layout's own size is preselected and says so.
+    assert '<option value="80" selected>' in response
+    assert "matches the layout" in response
+    assert "up to ~3.7 m" in response  # 80mm on a ~70 deg, 1280px camera
+
+
+def test_the_picker_is_not_printed(client: TestClient) -> None:
+    response = client.get("/markers").text
+
+    assert '<form class="noprint picker"' in response
+
+
+def test_a_size_matching_the_layout_raises_no_warning(client: TestClient) -> None:
+    response = client.get("/markers", params={"size_mm": "80"}).text
+
+    assert "mismatch" not in response.split("</style>")[1]
+
+
+def test_a_size_differing_from_the_layout_warns_and_offers_a_layout(
+    client: TestClient,
+) -> None:
+    """Printed at another size, every corner the solver places is wrong,
+    and nothing reports it -- so the sheet has to."""
+    response = client.get("/markers", params={"size_mm": "120"}).text
+
+    assert '<div class="noprint mismatch">' in response
+    assert "says 80mm" in response
+    assert "/markers/layout.toml?size_mm=120" in response
+    assert response.count('width="120.0mm"') == 8
+
+
+def test_an_empty_size_means_as_the_layout_says(client: TestClient) -> None:
+    response = client.get("/markers", params={"size_mm": ""})
+
+    assert response.status_code == 200
+    assert response.text.count('width="80.0mm"') == 8
+
+
+def test_a_token_guarded_sheet_keeps_its_token_through_the_picker() -> None:
+    from boresight.inject import FakeCursorBackend
+    from boresight.netaccess import ServerConfig
+    from boresight.server import create_app
+
+    app = create_app(
+        backend_factory=FakeCursorBackend, config=ServerConfig(token="s3cret")
+    )
+    with TestClient(app) as client:
+        response = client.get(
+            "/markers", params={"token": "s3cret", "size_mm": "100"}
+        ).text
+
+    assert '<input type="hidden" name="token" value="s3cret">' in response
+    assert "/markers/layout.toml?size_mm=100&amp;token=s3cret" in response
+
+
+@pytest.mark.parametrize("size", ["0", "-5", "nan", "inf", "big"])
+def test_an_unusable_size_is_rejected(client: TestClient, size: str) -> None:
+    assert client.get("/markers", params={"size_mm": size}).status_code == 422
+    assert (
+        client.get("/markers/layout.toml", params={"size_mm": size}).status_code == 422
+    )
+
+
+# --- The matching layout file --------------------------------------------
+
+
+def _downloaded_layout(client: TestClient, **params):
+    import tomllib
+
+    from boresight.marker_map import parse_marker_map
+
+    response = client.get("/markers/layout.toml", params=params)
+    assert response.status_code == 200
+    return response, parse_marker_map(tomllib.loads(response.text))
+
+
+def test_the_layout_file_round_trips_unchanged_without_a_size(
+    client: TestClient,
+) -> None:
+    from boresight.marker_map import load_marker_map
+    from boresight.pipeline import DEFAULT_CONFIG_PATH
+
+    response, layout = _downloaded_layout(client)
+
+    assert layout == load_marker_map(DEFAULT_CONFIG_PATH)
+    assert 'filename="markers.toml"' in response.headers["content-disposition"]
+
+
+def test_a_resized_layout_keeps_each_gap_and_grows_outwards(
+    client: TestClient,
+) -> None:
+    """Reference 80mm tags sit 40mm off the panel. At 120mm they must
+    still sit 40mm off it, not creep 40mm over the display."""
+    response, layout = _downloaded_layout(client, size_mm="120")
+    markers = layout.markers
+
+    assert all(marker.size_mm == 120 for marker in markers.values())
+    assert layout.screen_size_mm == (1220, 686)
+    # Top-left corner: its right and bottom edges stay 40mm off the panel.
+    assert (markers[0].x_mm, markers[0].y_mm) == (-160, -160)
+    # Bottom-right corner: its near edges were already where they belong.
+    assert (markers[2].x_mm, markers[2].y_mm) == (1260, 726)
+    # Top edge, middle: same centre along the edge, still 40mm above it.
+    assert markers[4].x_mm + 60 == 610
+    assert markers[4].y_mm + 120 == -40
+    assert 'filename="markers-120mm.toml"' in response.headers["content-disposition"]
+    assert response.text.startswith("# Boresight marker layout.")
+
+
+def test_a_resized_layout_keeps_every_tag_in_its_slot(client: TestClient) -> None:
+    from boresight.marker_map import load_marker_map
+    from boresight.markers import marker_slot
+    from boresight.pipeline import DEFAULT_CONFIG_PATH
+
+    original = load_marker_map(DEFAULT_CONFIG_PATH)
+    for size in ("40", "150"):
+        _, resized = _downloaded_layout(client, size_mm=size)
+        for marker_id, marker in original.markers.items():
+            assert marker_slot(
+                resized.markers[marker_id], resized.screen_size_mm
+            ) == marker_slot(marker, original.screen_size_mm)
