@@ -67,3 +67,25 @@ def test_insufficient_correspondences_raises_before_calling_findhomography():
 
     with pytest.raises(InsufficientCorrespondencesError):
         solve(correspondences, IMAGE_SIZE)
+
+
+def _correspondences():
+    image_points = _apply_homography(GROUND_TRUTH_HOMOGRAPHY, SCREEN_MARKER_CORNERS_MM)
+    return list(zip(SCREEN_MARKER_CORNERS_MM, image_points, strict=True))
+
+
+def test_default_aim_pixel_is_the_image_centre():
+    centre = (IMAGE_SIZE[0] / 2.0, IMAGE_SIZE[1] / 2.0)
+    default = solve(_correspondences(), IMAGE_SIZE)
+    explicit = solve(_correspondences(), IMAGE_SIZE, aim_px=centre)
+
+    assert default.aim_point_mm == explicit.aim_point_mm
+
+
+def test_an_explicit_aim_pixel_is_mapped_instead():
+    aim_px = (700.0, 400.0)
+    result = solve(_correspondences(), IMAGE_SIZE, aim_px=aim_px)
+
+    true_inverse = np.linalg.inv(GROUND_TRUTH_HOMOGRAPHY)
+    expected = _apply_homography(true_inverse, [aim_px])[0]
+    assert result.aim_point_mm == pytest.approx(expected, abs=1e-2)

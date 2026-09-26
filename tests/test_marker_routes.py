@@ -376,3 +376,30 @@ def test_a_resized_layout_keeps_every_tag_in_its_slot(client: TestClient) -> Non
             assert marker_slot(
                 resized.markers[marker_id], resized.screen_size_mm
             ) == marker_slot(marker, original.screen_size_mm)
+
+
+def test_charuco_svg_is_served_at_the_requested_width(client: TestClient) -> None:
+    response = client.get("/markers/charuco.svg", params={"width_mm": 200})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/svg+xml"
+    assert 'width="200mm"' in response.text
+
+
+@pytest.mark.parametrize("width", [0, -10])
+def test_charuco_svg_rejects_non_positive_width(client: TestClient, width) -> None:
+    response = client.get("/markers/charuco.svg", params={"width_mm": width})
+
+    assert response.status_code == 422
+
+
+def test_charuco_page_embeds_the_board(client: TestClient) -> None:
+    response = client.get("/markers/charuco")
+
+    assert response.status_code == 200
+    assert response.text.count("<svg") == 1
+    assert "does not matter" in response.text
+
+
+def test_marker_sheet_links_to_the_calibration_board(client: TestClient) -> None:
+    assert 'href="/markers/charuco"' in client.get("/markers").text

@@ -61,6 +61,7 @@ import numpy as np
 from boresight.aim_hold import HoldingPipeline
 from boresight.inject import CursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
+from boresight.lens import LensModel
 from boresight.marker_map import MarkerMap
 from boresight.one_euro import OneEuroFilter
 from boresight.overlay.layout import overlay_layout
@@ -210,13 +211,18 @@ class SessionPipeline:
         self._holding: HoldingPipeline | None = None
 
     def process_frame(
-        self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
+        self,
+        frame: np.ndarray,
+        *,
+        debug: bool = False,
+        t: float | None = None,
+        lens: LensModel | None = None,
     ) -> FrameResult:
         solver = self._controller.pipeline
         if solver is not self._solver or self._holding is None:
             self._solver = solver
             self._holding = HoldingPipeline(solver, self._backend)
-        return self._holding.process_frame(frame, debug=debug, t=t)
+        return self._holding.process_frame(frame, debug=debug, t=t, lens=lens)
 
 
 class MarkerSourceController:
