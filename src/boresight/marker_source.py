@@ -29,6 +29,18 @@ handling only helps whoever holds its terminal. When this module
 spawned it, that terminal is the server's. An overlay that outlived the
 server would be genuinely hard to get rid of, so the parent always
 cleans up.
+
+Everything the overlay writes is read as it is written, on both pipes,
+for as long as it runs: a pipe holds about 64 KiB, and a child whose
+pipe nobody reads blocks on its next write while still looking alive.
+See `_PipeDrain`.
+
+Every change of marker source -- selecting one, changing the overlay
+margin, shutting down -- happens under one lock. The routes that call
+this are plain `def`s run in FastAPI's threadpool, so two taps on the
+phone are two threads here at once, and without the lock both could
+start an overlay. Reading the state and reading the pipeline never
+wait on it.
 """
 
 from __future__ import annotations
@@ -36,8 +48,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
+import threading
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -60,7 +76,18 @@ GEOMETRY_TIMEOUT_S = 20.0
 # How long a stopped overlay gets to exit before it is killed.
 STOP_TIMEOUT_S = 5.0
 
+# How much of the overlay's output is kept for an error message. The
+# rest is still read -- it has to be, or the child blocks -- and goes
+# to the log. Lines longer than the cap are kept in pieces, so the
+# memory held is bounded whatever the child writes.
+OUTPUT_TAIL_LINES = 20
+OUTPUT_LINE_CHARS = 1000
+
 logger = logging.getLogger("boresight")
+# The child's own words, line by line, at DEBUG: a chatty overlay is
+# exactly the case the draining exists for, and at INFO it would bury
+# the server's log. Failures surface its last words at WARNING anyway.
+overlay_logger = logging.getLogger("boresight.overlay")
 
 
 def _aim_filter() -> OneEuroFilter:
@@ -196,8 +223,20 @@ class MarkerSourceController:
             AimPipeline(printed_layout, self._backend), self._backend
         )
         self._process: subprocess.Popen | None = None
+        self._stdout: _PipeDrain | None = None
+        self._stderr: _PipeDrain | None = None
         self._geometry: OverlayGeometry | None = None
         self._last_error: str | None = None
+
+        # Held for the whole of any change of source, including the
+        # wait for an overlay to report its geometry. A `threading`
+        # lock, not an `asyncio` one: the callers are threadpool
+        # threads and, for shutdown, the event loop thread. Not
+        # reentrant on purpose -- the `_locked` helpers assume it is
+        # held and never take it again.
+        self._lock = threading.Lock()
+        self._switching = False
+        self._closed = False
 
     # --- What the serving path reads ---------------------------------
 
@@ -225,12 +264,32 @@ class MarkerSourceController:
         Polled on read rather than watched by a supervisor task: the
         state is read whenever the phone asks, which is often enough to
         notice a crash and much simpler than a watchdog.
-        """
-        if self._source is MarkerSource.SCREEN and not self._overlay_alive():
-            self._forget_overlay(
-                "the overlay exited on its own; printed markers are active again"
-            )
 
+        Never waits for a switch in progress, which can take as long as
+        an overlay start. During one it reports `switching` and skips
+        the liveness check: mid-restart the old overlay has already
+        been stopped on purpose, and must not be reported as having
+        died. The snapshot can then mix old and new values; the
+        switch's own response is the authoritative result.
+        """
+        if not self._lock.acquire(blocking=False):
+            return self._snapshot()
+        try:
+            self._reap_locked()
+            return self._snapshot()
+        finally:
+            self._lock.release()
+
+    def _reap_locked(self) -> None:
+        if self._source is MarkerSource.SCREEN and not self._overlay_alive():
+            reason = "the overlay exited on its own; printed markers are active again"
+            last = self._stderr.last_line() if self._stderr else ""
+            if last:
+                reason = f"{reason} (its last words: {last})"
+            logger.warning("%s", reason)
+            self._forget_overlay(reason)
+
+    def _snapshot(self) -> dict:
         return {
             "source": self._source.value,
             "overlay_running": self._overlay_alive(),
@@ -238,6 +297,7 @@ class MarkerSourceController:
             "screen_size": list(self._layout.screen_size_mm),
             "error": self._last_error,
             "overlay_extra_margin_px": self._overlay_extra_margin_px,
+            "switching": self._switching,
         }
 
     # --- Selecting ----------------------------------------------------
@@ -252,36 +312,58 @@ class MarkerSourceController:
         raised as `MarkerSourceError`, printed markers left active. If
         printed markers are active, only the stored value changes; it
         takes effect the next time on-screen markers are selected.
+
+        Setting the value already in effect is a no-op, like selecting
+        the active source: a restart would produce the same overlay.
         """
-        self._overlay_extra_margin_px = value
-        if self._source is MarkerSource.SCREEN:
-            return self._start_screen_markers()
-        return self.state()
+        with self._switching_locked():
+            self._reap_locked()
+            unchanged = value == self._overlay_extra_margin_px
+            self._overlay_extra_margin_px = value
+            if self._source is MarkerSource.SCREEN and not unchanged:
+                return self._start_screen_markers_locked()
+            return self._snapshot()
 
     def select(self, source: MarkerSource) -> dict:
         """Switch to `source`, starting or stopping the overlay.
 
         Selecting the source that is already active is a no-op, so a
-        double tap on the phone does not restart the overlay.
+        double tap on the phone does not restart the overlay. The check
+        is made under the lock, so the second of two concurrent taps
+        sees what the first one did rather than repeating it.
         """
-        if source is self._source and (
-            source is MarkerSource.PRINTED or self._overlay_alive()
-        ):
-            return self.state()
+        with self._switching_locked():
+            # A dead overlay is forgotten first, so "already on screen"
+            # below means an overlay that is actually running.
+            self._reap_locked()
+            if source is self._source:
+                return self._snapshot()
 
-        if source is MarkerSource.PRINTED:
-            if self._process is not None:
-                logger.info("printed markers: stopping the overlay")
-            self.stop_overlay()
-            self._use(self._printed_layout, MarkerSource.PRINTED)
-            self._last_error = None
-            return self.state()
+            if source is MarkerSource.PRINTED:
+                if self._process is not None:
+                    logger.info("printed markers: stopping the overlay")
+                self._stop_overlay_locked()
+                self._use(self._printed_layout, MarkerSource.PRINTED)
+                self._last_error = None
+                return self._snapshot()
 
-        return self._start_screen_markers()
+            return self._start_screen_markers_locked()
 
-    def _start_screen_markers(self) -> dict:
-        self.stop_overlay()  # never two overlays at once
+    @contextmanager
+    def _switching_locked(self):
+        """Hold the lock, reporting a switch in progress meanwhile."""
+        with self._lock:
+            self._switching = True
+            try:
+                yield
+            finally:
+                self._switching = False
+
+    def _start_screen_markers_locked(self) -> dict:
+        self._stop_overlay_locked()  # never two overlays at once
         try:
+            if self._closed:
+                raise MarkerSourceError("the server is shutting down")
             geometry = self._launch_and_read_geometry()
         except MarkerSourceError as error:
             # Printed markers stay active. Reporting the requested
@@ -290,7 +372,10 @@ class MarkerSourceController:
             # which presents as terrible aim with no visible cause.
             logger.warning("on-screen markers unavailable: %s", error)
             self._last_error = str(error)
-            self.stop_overlay()
+            self._stop_overlay_locked()
+            # Already printed on a first selection; not on a margin
+            # restart, whose old overlay has just been stopped.
+            self._use(self._printed_layout, MarkerSource.PRINTED)
             raise
 
         # Built from exactly the numbers the overlay reported, so the
@@ -317,7 +402,7 @@ class MarkerSourceController:
             MarkerSource.SCREEN,
         )
         self._last_error = None
-        return self.state()
+        return self._snapshot()
 
     def _use(self, layout: MarkerMap, source: MarkerSource) -> None:
         # A new pipeline, not a mutated one: AimPipeline promises it
@@ -345,13 +430,35 @@ class MarkerSourceController:
         except OSError as error:
             raise MarkerSourceError(f"could not start the overlay: {error}") from error
 
+        # Both pipes are read from here on, for the life of the child;
+        # see `_PipeDrain`. Started before anything waits on the
+        # geometry, since an overlay can fill stderr before it reports.
+        self._stdout = _PipeDrain(process.stdout, "stdout")
+        self._stderr = _PipeDrain(process.stderr, "stderr")
+        # Stored before `_closed` is checked, while `shutdown()` sets
+        # `_closed` before reading this: whichever runs second sees the
+        # other, so a start can never slip past a shutdown unnoticed.
         self._process = process
-        return self._read_geometry(process)
-
-    def _read_geometry(self, process) -> OverlayGeometry:
+        if self._closed:
+            raise MarkerSourceError("the server is shutting down")
         try:
-            line = _readline_with_timeout(process, GEOMETRY_TIMEOUT_S)
+            geometry = self._read_geometry(process, self._stdout, self._stderr)
+        except MarkerSourceError:
+            if self._closed:
+                # Shutdown stopped it mid-start; that is the real reason.
+                raise MarkerSourceError("the server is shutting down") from None
+            raise
+        if self._closed:
+            raise MarkerSourceError("the server is shutting down")
+        return geometry
+
+    def _read_geometry(
+        self, process, stdout: _PipeDrain, stderr: _PipeDrain
+    ) -> OverlayGeometry:
+        try:
+            line = stdout.first_line(GEOMETRY_TIMEOUT_S)
         except TimeoutError:
+            process.kill()
             raise MarkerSourceError(
                 "the overlay did not report its geometry within "
                 f"{GEOMETRY_TIMEOUT_S:g}s and was stopped"
@@ -361,7 +468,7 @@ class MarkerSourceController:
             # Exited without reporting. Its own message is the useful
             # part: an unsupported compositor, a missing extra, no
             # display.
-            raise MarkerSourceError(_explain_exit(process))
+            raise MarkerSourceError(_explain_exit(process, stderr))
 
         try:
             message = json.loads(line)
@@ -394,10 +501,17 @@ class MarkerSourceController:
             self._last_error = reason
 
     def stop_overlay(self) -> None:
-        """Terminate the overlay if one is running.
+        """Terminate the overlay if one is running, and use printed markers.
 
-        Safe to call when none is. Called on shutdown, on switching to
-        printed markers, and before starting a replacement.
+        Safe to call when none is.
+        """
+        with self._switching_locked():
+            self._stop_overlay_locked()
+            self._use(self._printed_layout, MarkerSource.PRINTED)
+
+    def _stop_overlay_locked(self) -> None:
+        """Called on shutdown, on switching to printed markers, and
+        before starting a replacement. Leaves the source to the caller.
         """
         process = self._process
         self._process = None
@@ -413,40 +527,104 @@ class MarkerSourceController:
             process.wait(timeout=STOP_TIMEOUT_S)
 
     def shutdown(self) -> None:
-        self.stop_overlay()
+        """Stop the overlay for good, including one still starting.
+
+        A start waiting for the overlay's geometry holds the lock for
+        up to `GEOMETRY_TIMEOUT_S`. Rather than wait that out, its
+        process is terminated, which ends the wait at once (the child's
+        stdout closes) and fails the start through its ordinary path.
+        `_closed` is set first, so nothing starts an overlay after this.
+        """
+        self._closed = True
+        if not self._lock.acquire(blocking=False):
+            starting = self._process
+            if starting is not None and starting.poll() is None:
+                logger.info("shutting down: stopping an overlay that was starting")
+                starting.terminate()
+            self._lock.acquire()
+        try:
+            self._stop_overlay_locked()
+            self._use(self._printed_layout, MarkerSource.PRINTED)
+        finally:
+            self._lock.release()
 
 
-def _readline_with_timeout(process, timeout: float) -> str:
-    """One line from the child's stdout, or TimeoutError.
+class _PipeDrain:
+    """Reads one of the child's pipes, continuously, until it closes.
+
+    The reason this exists: nothing else reads these pipes while the
+    overlay runs, and a pipe nobody reads fills (about 64 KiB) and then
+    blocks the child on its next write -- an overlay that is still
+    "alive" but frozen, or stuck before it ever reports its geometry.
 
     A thread rather than `select`, so this works the same on Windows,
-    where a pipe is not selectable.
+    where a pipe is not selectable. A daemon, so a pipe held open by
+    some grandchild never keeps the server from exiting.
+
+    The first line is handed to whoever waits in `first_line()` -- on
+    stdout, that is the geometry report -- so one reader owns the pipe
+    from start to end, with no hand-over in which it goes unread.
+    Every line goes to the log at DEBUG; the last `OUTPUT_TAIL_LINES`
+    are kept for an error message, each at most `OUTPUT_LINE_CHARS`.
     """
-    import threading
 
-    result: list[str] = []
+    def __init__(self, stream, name: str) -> None:
+        self._name = name
+        self._tail: deque[str] = deque(maxlen=OUTPUT_TAIL_LINES)
+        self._first: queue.Queue[str] = queue.Queue(maxsize=1)
+        self._thread = threading.Thread(
+            target=self._run, args=(stream,), name=f"overlay-{name}", daemon=True
+        )
+        self._thread.start()
 
-    def read() -> None:
-        line = process.stdout.readline()
-        result.append(line)
+    def _run(self, stream) -> None:
+        delivered = False
+        try:
+            while stream is not None:
+                try:
+                    line = stream.readline(OUTPUT_LINE_CHARS)
+                except ValueError, OSError:  # pragma: no cover - closed pipe
+                    break
+                if not line:
+                    break
+                if not delivered:
+                    self._first.put(line)
+                    delivered = True
+                text = line.rstrip("\r\n")
+                if text:
+                    self._tail.append(text)
+                    overlay_logger.debug("overlay %s: %s", self._name, text)
+        finally:
+            if not delivered:
+                self._first.put("")  # EOF before any line
 
-    reader = threading.Thread(target=read, daemon=True)
-    reader.start()
-    reader.join(timeout)
-    if reader.is_alive():
-        process.kill()
-        raise TimeoutError
-    return result[0] if result else ""
+    def first_line(self, timeout: float) -> str:
+        """The first line written, "" at EOF, or TimeoutError."""
+        try:
+            return self._first.get(timeout=timeout)
+        except queue.Empty:
+            raise TimeoutError from None
+
+    def join(self, timeout: float) -> None:
+        self._thread.join(timeout)
+
+    def tail(self) -> str:
+        return "\n".join(self._tail)
+
+    def last_line(self) -> str:
+        return self._tail[-1] if self._tail else ""
 
 
-def _explain_exit(process) -> str:
-    """Why the overlay stopped, in its own words where it left any."""
-    try:
-        stderr = process.stderr.read() or ""
-    except ValueError, OSError:  # pragma: no cover - closed pipe
-        stderr = ""
+def _explain_exit(process, stderr: _PipeDrain) -> str:
+    """Why the overlay stopped, in its own words where it left any.
+
+    Taken from what the stderr drain kept, once it has reached EOF.
+    Bounded in time (a grandchild could hold the pipe open) and in size
+    (only the tail was kept).
+    """
     process.wait(timeout=STOP_TIMEOUT_S)
-    detail = stderr.strip()
+    stderr.join(STOP_TIMEOUT_S)
+    detail = stderr.tail().strip()
     if detail:
         return detail
     return f"the overlay exited with status {process.returncode} without explanation"
