@@ -63,6 +63,13 @@ from boresight.stream import (
     SessionStats,
     unpack_frame,
 )
+from boresight.zeroing import (
+    DEFAULT_ZEROING_PATH,
+    SessionZeroing,
+    SightFrame,
+    ZeroingService,
+    ZeroingStore,
+)
 
 # Inside the package, not at the repository root: the wheel target is
 # `src/boresight`, so anything outside it is omitted from the built
@@ -174,6 +181,7 @@ def create_app(
     tracked_detection: bool = True,
     settings: LiveSettings | None = None,
     lens_store_factory: Callable[[], LensStore] = lambda: LensStore(None),
+    zeroing_path: Path | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -191,6 +199,9 @@ def create_app(
     Lens calibrations default to an in-memory store, so an app built for
     a test never reads or writes the operator's `.boresight/lenses.json`;
     `main()` passes the persistent one.
+
+    `zeroing_path` is where clients' zeroes are kept; None keeps them in
+    memory, which is what tests want. `main()` passes the real file.
     """
     config = config or ServerConfig()
     live_settings = settings or LiveSettings(
@@ -218,6 +229,9 @@ def create_app(
         app.state.sessions = SessionRegistry()
         app.state.trigger_hold = TriggerHold(app.state.cursor_backend)
         app.state.arbiter = CursorArbiter(app.state.cursor_backend)
+        app.state.zeroing = ZeroingService(
+            ZeroingStore(zeroing_path), app.state.markers
+        )
         try:
             yield
         finally:
@@ -394,6 +408,7 @@ def create_app(
             websocket.app.state.trigger_hold,
             websocket.app.state.arbiter,
             lenses=websocket.app.state.lenses,
+            zeroing=websocket.app.state.zeroing,
         )
 
     if WEB_DIR.is_dir():
@@ -518,6 +533,7 @@ async def run_frame_session(
     hold: TriggerHold | None = None,
     arbiter: CursorArbiter | None = None,
     lenses: LensStore | None = None,
+    zeroing: ZeroingService | None = None,
 ) -> None:
     """One connection: receive frames, solve the newest, report back.
 
@@ -545,6 +561,9 @@ async def run_frame_session(
     Its aim is its own: the session smooths and holds through its own
     `SessionPipeline`, and reaches the cursor only through `arbiter`,
     which lets one session at a time -- the active shooter -- move it.
+
+    Its zero is its own too: loaded when the client says who it is, and
+    handed to its `SessionPipeline` per frame (see `zeroing.py`).
     """
     settings = settings or ViewSettings()
     slot = FrameSlot()
@@ -569,14 +588,26 @@ async def run_frame_session(
     # lands while this session is the active shooter.
     cursor = arbiter.cursor_for(stats, session.label)
     aim = markers.session_pipeline(cursor)
+    zeroing = zeroing if zeroing is not None else ZeroingService(ZeroingStore(None))
+
+    def use_zero(zero) -> None:
+        aim.zero = zero
+
+    session_zeroing = SessionZeroing(zeroing, use_zero)
     # The gated cursor, not the smoothing one: a shot goes exactly where
     # its frame aimed, and the filter never hears about it.
     triggers = _SessionTriggers(
-        stats, hold, cursor, loop, claim=lambda: arbiter.claim(stats, session.label)
+        stats,
+        hold,
+        cursor,
+        loop,
+        claim=lambda: arbiter.claim(stats, session.label),
+        zeroing=session_zeroing,
     )
 
     async def report(client_ms: float | None) -> None:
         stats.cursor = arbiter.status(stats)
+        stats.zeroing = session_zeroing.status()
         await _report(websocket, stats, client_ms)
 
     async def receive_loop() -> None:
@@ -598,6 +629,7 @@ async def run_frame_session(
                     calibrate=lambda action: _calibration_action(
                         stats, action, lenses, session.label
                     ),
+                    zeroing=session_zeroing,
                 )
                 if stats.client_kind != known_kind:
                     logger.info(
@@ -698,7 +730,9 @@ async def run_frame_session(
                 )
             # Before the report, so a shot this frame resolved is already
             # in the trigger count it carries.
-            triggers.frame_processed(client_ms, stats.position)
+            triggers.frame_processed(
+                client_ms, stats.position, None if result is None else result.sight
+            )
             await report(client_ms)
 
             nonlocal last_logged
@@ -774,6 +808,9 @@ async def run_frame_session(
         # A shot still waiting for its frame never fired, so there is
         # nothing to undo: it is simply dropped with the session.
         triggers.close()
+        # A run in progress takes its target off the screen with it, and
+        # lets another client zero.
+        session_zeroing.close()
         # Whatever ended the session, a button it was holding goes up
         # with it: nothing else would ever send the release.
         hold.release(stats)
@@ -836,6 +873,7 @@ def _handle_control(
     text: str | None,
     settings: ViewSettings,
     calibrate: Callable[[object], None] | None = None,
+    zeroing: SessionZeroing | None = None,
 ) -> None:
     """Client-side telemetry and control arriving the other way.
 
@@ -863,6 +901,9 @@ def _handle_control(
     pipeline behind every session is one shared object, so anything
     stickier than a per-connection flag would let one phone's debug view
     change what another phone's frames compute.
+
+    `zeroing` starts, finishes, cancels or resets this session's zeroing
+    run; `hello`'s optional `id` says whose stored zero to use.
     """
     if not text:
         return
@@ -902,6 +943,11 @@ def _handle_control(
             if isinstance(camera, str)
             else None
         )
+        if zeroing is not None:
+            zeroing.identify(message.get("id"), stats.client_kind)
+    elif message.get("type") == "zeroing":
+        if zeroing is not None:
+            zeroing.control(message.get("action"))
     elif message.get("type") == "calibrate":
         # An unknown action is ignored there, as everywhere here.
         if calibrate is not None:
@@ -944,6 +990,9 @@ class _SessionTriggers:
     them. A shot still waiting after `SHOT_WAIT_S` fires anyway, with
     whatever the history has -- late, never lost.
 
+    While the session is zeroing, a press is a zeroing shot instead: it
+    hands the named frame's geometry to `zeroing` and clicks nothing.
+
     The cursor is moved only for an action that will actually press:
     with the button already down, a click or `down` presses nothing, and
     moving would drag whatever is held.
@@ -956,13 +1005,16 @@ class _SessionTriggers:
         cursor: CursorBackend,
         loop: asyncio.AbstractEventLoop,
         claim: Callable[[], None] = lambda: None,
+        zeroing: SessionZeroing | None = None,
     ) -> None:
         self._stats = stats
         self._hold = hold
         self._cursor = cursor
         self._loop = loop
         self._claim = claim
-        self.history = AimHistory()
+        self._zeroing = zeroing
+        self.history: AimHistory[Point] = AimHistory()
+        self.sights: AimHistory[SightFrame] = AimHistory()
         self._queue = TriggerQueue()
         self.processing = False
         self._deadline: asyncio.TimerHandle | None = None
@@ -972,8 +1024,14 @@ class _SessionTriggers:
         self._queue.push(action)
         self.drain()
 
-    def frame_processed(self, client_ms: float, position: Point | None) -> None:
+    def frame_processed(
+        self,
+        client_ms: float,
+        position: Point | None,
+        sight: SightFrame | None = None,
+    ) -> None:
         self.history.record(client_ms, position)
+        self.sights.record(client_ms, sight)
         self.drain()
 
     def drain(self) -> None:
@@ -1004,6 +1062,16 @@ class _SessionTriggers:
     def _run(self, action: TriggerAction) -> None:
         if action.state == "up":
             self._hold.release(self._stats)
+            return
+        if self._zeroing is not None and self._zeroing.active:
+            # Not a press: no claim, no button, no move. A trigger that
+            # names no frame is aimed with the newest one.
+            frame_ms = action.frame_ms
+            if frame_ms is None:
+                frame_ms = self.sights.newest_ms
+            self._zeroing.shoot(
+                None if frame_ms is None else self.sights.aim_at(frame_ms)
+            )
             return
         if action.state == "down" and self._hold.holds(self._stats):
             return
@@ -1265,6 +1333,7 @@ def main(argv: list[str] | None = None) -> int:
             tracked_detection=not args.full_frame_detection,
             settings=settings,
             lens_store_factory=lambda: lens_store,
+            zeroing_path=DEFAULT_ZEROING_PATH,
         ),
         host=config.host,
         port=config.port,

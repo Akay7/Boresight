@@ -37,20 +37,24 @@ MATCH_MS = 100.0
 TriggerState = Literal["click", "down", "up"]
 
 
-class AimHistory:
-    """Recent unsmoothed aim points, keyed by the client's timestamps."""
+class AimHistory[T]:
+    """Recent unsmoothed aim points, keyed by the client's timestamps.
+
+    `T` is what is remembered per frame: an aim point to fire at, or,
+    for zeroing, the frame's whole geometry (`zeroing.SightFrame`).
+    """
 
     def __init__(
         self, span_ms: float = HISTORY_MS, max_entries: int = HISTORY_MAX_ENTRIES
     ) -> None:
         self._span_ms = span_ms
-        self._entries: deque[tuple[float, Point | None]] = deque(maxlen=max_entries)
+        self._entries: deque[tuple[float, T | None]] = deque(maxlen=max_entries)
 
     @property
     def newest_ms(self) -> float | None:
         return self._entries[-1][0] if self._entries else None
 
-    def record(self, client_ms: float, position: Point | None) -> None:
+    def record(self, client_ms: float, position: T | None) -> None:
         """One processed frame: its aim, or None if it did not solve."""
         if not math.isfinite(client_ms):
             return
@@ -68,9 +72,9 @@ class AimHistory:
         newest = self.newest_ms
         return newest is not None and newest >= frame_ms
 
-    def aim_at(self, frame_ms: float, tolerance_ms: float = MATCH_MS) -> Point | None:
+    def aim_at(self, frame_ms: float, tolerance_ms: float = MATCH_MS) -> T | None:
         """The solved aim nearest `frame_ms`, if one is close enough."""
-        best: Point | None = None
+        best: T | None = None
         best_distance = tolerance_ms
         for client_ms, position in self._entries:
             if position is None:

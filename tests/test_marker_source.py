@@ -244,7 +244,12 @@ def test_shutdown_is_safe_when_nothing_is_running() -> None:
 
 def test_the_overlay_command_is_fixed() -> None:
     """Nothing from a request reaches this list."""
-    assert _overlay_command(None) == [sys.executable, "-m", "boresight.overlay"]
+    assert _overlay_command(None) == [
+        sys.executable,
+        "-m",
+        "boresight.overlay",
+        "--commands",
+    ]
 
 
 def test_a_display_index_is_forced_through_int() -> None:
@@ -270,7 +275,7 @@ def test_the_controllers_extra_margin_reaches_the_spawned_overlay() -> None:
 
 
 def test_a_zero_extra_margin_omits_the_flag_entirely() -> None:
-    assert _overlay_command(None, 0) == [sys.executable, "-m", "boresight.overlay"]
+    assert "--extra-margin-px" not in _overlay_command(None, 0)
 
 
 def test_a_nonzero_extra_margin_is_forced_through_int() -> None:

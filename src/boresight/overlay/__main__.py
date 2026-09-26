@@ -55,6 +55,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "already reserve. For a display whose panel reservation isn't "
         "detected automatically (default: 0, no change)",
     )
+    parser.add_argument(
+        "--commands",
+        action="store_true",
+        help="read zeroing-target commands as JSON lines on stdin (used "
+        "when the server starts the overlay)",
+    )
     args = parser.parse_args(argv)
 
     from boresight.overlay import qt_backend
@@ -66,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.inset_px,
             report_only=args.report_only,
             extra_margin_px=args.extra_margin_px,
+            commands=args.commands,
         )
     except OverlayUnavailableError as error:
         # Includes the missing-dependency case, which subclasses this.

@@ -28,6 +28,7 @@ from boresight.detect import Detector
 from boresight.inject import CursorBackend, stamped
 from boresight.lens import LensModel
 from boresight.pipeline import AimPipeline, FrameOutcome, FrameResult
+from boresight.zeroing import Zero
 
 # How long to keep re-sending the last solved position after the frames
 # stop solving. Picked by feel, not measurement -- see the change's
@@ -73,6 +74,7 @@ class HoldingPipeline:
         t: float | None = None,
         detector: Detector | None = None,
         lens: LensModel | None = None,
+        zero: Zero | None = None,
     ) -> FrameResult:
         """Solve `frame`, or hold the last solve through its dropout.
 
@@ -82,10 +84,17 @@ class HoldingPipeline:
         timeline. The hold window itself stays on this object's own
         clock: it is about how long the server has gone without a solve,
         not about the camera. `detector` is handed to the pipeline as is.
+
+        `zero` is passed through, so what is held is the corrected aim.
         """
         backend = stamped(self._backend, t)
         result = self._pipeline.process_frame(
-            frame, debug=debug, backend=backend, detector=detector, lens=lens
+            frame,
+            debug=debug,
+            backend=backend,
+            detector=detector,
+            lens=lens,
+            zero=zero,
         )
         now = self._clock()
 

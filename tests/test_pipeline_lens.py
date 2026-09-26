@@ -27,6 +27,7 @@ from boresight.inject import FakeCursorBackend
 from boresight.lens import LensModel
 from boresight.marker_map import MarkerMap, load_marker_map
 from boresight.pipeline import DEFAULT_CONFIG_PATH, AimPipeline, FrameOutcome
+from boresight.zeroing import Zero
 
 # Canvas origin in screen mm: markers sit up to 120mm outside the panel.
 CANVAS_ORIGIN_MM = (-150.0, -150.0)
@@ -133,3 +134,18 @@ def test_debug_geometry_stays_in_raw_pixels(marker_map, maps) -> None:
     assert corrected.debug.cursor_px == pytest.approx(
         (IMAGE_SIZE[0] / 2, IMAGE_SIZE[1] / 2), abs=0.05
     )
+
+
+def test_a_zero_is_measured_from_the_undistorted_centre(marker_map, maps) -> None:
+    rvec, tvec = POSES[0]
+    frame = render(
+        _canvas(marker_map), plane_homography(rvec, tvec) @ _canvas_to_plane(), maps
+    )
+    pipeline = AimPipeline(marker_map, FakeCursorBackend())
+    plain = pipeline.process_frame(frame, lens=TRUE_LENS)
+    zeroed = pipeline.process_frame(frame, lens=TRUE_LENS, zero=Zero())
+
+    # A zero with no correction aims exactly where the lens-corrected
+    # solve does: both measure from the centre undistorted, not the raw
+    # centre pixel, which here is ~2mm away on the screen.
+    assert zeroed.aim_point_mm == pytest.approx(plain.aim_point_mm, abs=1e-6)

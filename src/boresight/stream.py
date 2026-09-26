@@ -209,6 +209,10 @@ class SessionStats:
     debug_enabled: bool = False
     debug: dict | None = None
 
+    # This session's zeroing state (`zeroing.SessionZeroing.status`),
+    # set by the server per report.
+    zeroing: dict | None = None
+
     # Owned by the slot, which is where dropping actually happens.
     _slot: FrameSlot | None = field(default=None, repr=False)
 
@@ -261,6 +265,7 @@ class SessionStats:
             "outcome": self.outcome,
             "triggers": self.triggers,
             "cursor": self.cursor,
+            "zeroing": self.zeroing,
         }
         # Keyed in only when there is something to say, like `debug`: a
         # session that never calibrated sees exactly the payload it did

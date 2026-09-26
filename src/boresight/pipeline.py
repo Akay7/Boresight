@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
@@ -50,6 +50,7 @@ from boresight.solve import (
     SolveResult,
     solve,
 )
+from boresight.zeroing import SightFrame, Zero
 
 # Resolved relative to this module, not the working directory, and kept
 # inside the package so it ships in the wheel. As a bare relative path
@@ -153,7 +154,8 @@ class FrameDebug:
 class FrameResult:
     outcome: FrameOutcome
 
-    # Unclamped, in screen millimetres. Kept alongside the emitted
+    # Unclamped, in screen millimetres, and corrected when the call was
+    # given a zero (see `zeroing.py`). Kept alongside the emitted
     # position so an off-panel aim stays visible: once clamped, an aim
     # 800mm past the edge and an aim exactly at the edge are the same
     # two numbers.
@@ -178,6 +180,10 @@ class FrameResult:
     # never "nothing to say" -- a frame that detected nothing still
     # produces a FrameDebug, with an empty marker list.
     debug: FrameDebug | None = None
+
+    # The solved frame's geometry, for a zeroing shot aimed with it.
+    # Carries a matrix, so it takes no part in equality.
+    sight: SightFrame | None = field(default=None, compare=False)
 
     @property
     def emitted(self) -> bool:
@@ -261,6 +267,7 @@ class AimPipeline:
         backend: CursorBackend | None = None,
         detector: Detector | None = None,
         lens: LensModel | None = None,
+        zero: Zero | None = None,
     ) -> FrameResult:
         """Solve one frame and emit its position.
 
@@ -276,6 +283,10 @@ class AimPipeline:
         undistorted with it before solving (`lens.py`); the frame itself
         never is. Per call for the same reason as `backend`: sessions
         sharing this pipeline have different cameras.
+
+        `zero` is the calling session's correction for where its barrel
+        points relative to its camera. Per call for the same reason:
+        every session has its own gun.
         """
         height, width = frame.shape[:2]
         image_size_px = (int(width), int(height))
@@ -345,7 +356,15 @@ class AimPipeline:
             # findHomography declined -- degenerate correspondences.
             return FrameResult(outcome=FrameOutcome.SOLVE_FAILED, debug=seen, **counts)
 
-        aim_x_mm, aim_y_mm = result.aim_point_mm
+        # Measured from the centre the solve aimed through, so a zero
+        # and a lens calibration compose: both live in undistorted pixels.
+        sight = SightFrame(
+            result.homography, image_size_px, self._map.screen_size_mm, aim_px
+        )
+        # Before normalizing and clamping: an off-panel raw aim that the
+        # correction brings back onto the panel must not be lost.
+        aim_point_mm = result.aim_point_mm if zero is None else zero.aim_mm(sight)
+        aim_x_mm, aim_y_mm = aim_point_mm
         screen_width_mm, screen_height_mm = self._map.screen_size_mm
         raw = (aim_x_mm / screen_width_mm, aim_y_mm / screen_height_mm)
         position = (_clamp_unit(raw[0]), _clamp_unit(raw[1]))
@@ -354,7 +373,7 @@ class AimPipeline:
 
         return FrameResult(
             outcome=FrameOutcome.SOLVED,
-            aim_point_mm=result.aim_point_mm,
+            aim_point_mm=aim_point_mm,
             position=position,
             clamped=position != raw,
             aim_point_inside_hull=result.aim_point_inside_hull,
@@ -364,6 +383,7 @@ class AimPipeline:
                 if seen is None
                 else self._solved_debug(seen, result, position, lens)
             ),
+            sight=sight,
             **counts,
         )
 
