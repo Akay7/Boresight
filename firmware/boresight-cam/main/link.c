@@ -54,6 +54,11 @@ typedef enum {
 static EventGroupHandle_t s_events;
 static SemaphoreHandle_t s_lock;
 static esp_websocket_client_handle_t s_client; /* guarded by s_lock */
+/* The header stamp of the last frame sent on this connection, which a
+ * trigger press names. Guarded by s_lock; reset per connection, since a
+ * frame the previous session sent is nothing the new one has seen. */
+static bool s_frame_sent;
+static double s_last_frame_ms;
 static volatile bool s_streaming;
 static volatile uint32_t s_session_id;
 static volatile failure_t s_failure;
@@ -273,8 +278,34 @@ esp_err_t link_send_frame(double client_ms, const uint8_t *jpeg, size_t length,
             xEventGroupSetBits(s_events, ENDED_BIT);
             result = ESP_FAIL;
         } else {
+            s_frame_sent = true;
+            s_last_frame_ms = client_ms;
             result = ESP_OK;
         }
+    }
+    xSemaphoreGive(s_lock);
+    return result;
+}
+
+esp_err_t link_send_trigger_down(uint32_t timeout_ms)
+{
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    esp_err_t result = ESP_ERR_INVALID_STATE;
+    if (s_streaming && s_client != NULL) {
+        /* Formatted under the same lock the frame send holds, so the frame
+         * named is one this connection really sent. Before any frame, or
+         * if the stamp will not format, the plain `down` fires in place. */
+        char named[80];
+        const char *text = BP_TRIGGER_DOWN_MESSAGE;
+        if (s_frame_sent &&
+            bp_format_trigger_down(named, sizeof named, s_last_frame_ms) > 0) {
+            text = named;
+        }
+        int sent = esp_websocket_client_send_text(s_client, text, (int)strlen(text),
+                                                  pdMS_TO_TICKS(timeout_ms));
+        result = sent < 0 ? ESP_FAIL : ESP_OK;
     }
     xSemaphoreGive(s_lock);
     return result;
@@ -315,6 +346,7 @@ static void run_session(esp_websocket_client_handle_t client)
         ESP_LOGW(TAG, "hello was not sent");
     }
     s_session_id++;
+    s_frame_sent = false;
     s_streaming = true;
     xSemaphoreGive(s_lock);
 

@@ -28,6 +28,18 @@ extern "C" {
 
 void bp_pack_header(double client_ms, uint8_t out[BP_HEADER_SIZE]);
 
+/* The server times aim smoothing by the interval between two frames'
+ * stamps, so a frame is stamped when it was captured, not when it was
+ * sent. `driver_ms` is the camera driver's capture time and `now_ms` the
+ * same clock now, both in milliseconds; the driver's time is used when it
+ * is plausible -- positive, not in the future, and no more than
+ * BP_CAPTURE_MAX_AGE_MS old -- and `now_ms` otherwise, so a driver that
+ * does not stamp its frames, or stamps them from another clock, degrades
+ * to stamping at grab rather than to nonsense. */
+#define BP_CAPTURE_MAX_AGE_MS 1000.0
+
+double bp_capture_ms(double driver_ms, double now_ms);
+
 /* --- Control messages ---------------------------------------------------
  *
  * JSON text messages on the same socket. Each formatter returns the
@@ -42,6 +54,12 @@ void bp_pack_header(double client_ms, uint8_t out[BP_HEADER_SIZE]);
 extern const char BP_TRIGGER_MESSAGE[];
 extern const char BP_TRIGGER_DOWN_MESSAGE[];
 extern const char BP_TRIGGER_UP_MESSAGE[];
+
+/* A `down` naming the frame it was aimed with, by that frame's header
+ * timestamp, so the server fires at that frame's aim rather than at its
+ * smoothed cursor. A server that predates `frame_ms` ignores it, and a
+ * timestamp that is not finite is refused (-1): send the plain `down`. */
+int bp_format_trigger_down(char *out, size_t size, double frame_ms);
 
 int bp_format_hello(char *out, size_t size, const char *version, int width,
                     int height);

@@ -511,6 +511,15 @@ def test_the_command_line_exits_rather_than_serving(monkeypatch) -> None:
     assert caught.value.code == 2
 
 
+def test_importing_the_server_builds_no_app() -> None:
+    """An app built at import has the default config -- no token -- and
+    `uvicorn boresight.server:app --host 0.0.0.0` would serve it without
+    `main()` ever validating anything."""
+    from boresight import server
+
+    assert not hasattr(server, "app")
+
+
 def test_the_overlay_margin_flag_reaches_create_app(monkeypatch) -> None:
     from boresight import server
 

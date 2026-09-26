@@ -48,6 +48,23 @@ static void test_header_keeps_sub_millisecond_precision(void)
     CHECK(memcmp(header, expected, BP_HEADER_SIZE) == 0);
 }
 
+static void test_a_plausible_driver_capture_time_is_used(void)
+{
+    CHECK(bp_capture_ms(9960.0, 10000.0) == 9960.0);
+    CHECK(bp_capture_ms(10000.0, 10000.0) == 10000.0);
+}
+
+static void test_an_implausible_driver_capture_time_falls_back_to_now(void)
+{
+    /* Not stamped at all, from another clock (in the future or long
+     * past), or not a number: stamped at grab instead. */
+    CHECK(bp_capture_ms(0.0, 10000.0) == 10000.0);
+    CHECK(bp_capture_ms(10000.5, 10000.0) == 10000.0);
+    CHECK(bp_capture_ms(10000.0 - BP_CAPTURE_MAX_AGE_MS - 1.0, 10000.0) == 10000.0);
+    CHECK(bp_capture_ms(1.7e12, 10000.0) == 10000.0);
+    CHECK(bp_capture_ms(0.0 / 0.0, 10000.0) == 10000.0);
+}
+
 /* --- Control messages -------------------------------------------------- */
 
 static void test_hello_names_the_client_version_and_size(void)
@@ -90,6 +107,20 @@ static void test_rtt_and_trigger_messages(void)
     CHECK(strcmp(BP_TRIGGER_DOWN_MESSAGE, "{\"type\":\"trigger\",\"state\":\"down\"}") ==
           0);
     CHECK(strcmp(BP_TRIGGER_UP_MESSAGE, "{\"type\":\"trigger\",\"state\":\"up\"}") == 0);
+}
+
+static void test_a_down_names_its_frame(void)
+{
+    char buffer[80];
+    char tiny[16];
+
+    /* The header's stamp, to the microsecond, as the server reads it. */
+    CHECK(bp_format_trigger_down(buffer, sizeof buffer, 86400000.125) > 0);
+    CHECK(strcmp(buffer, "{\"type\":\"trigger\",\"state\":\"down\","
+                         "\"frame_ms\":86400000.125}") == 0);
+    CHECK(bp_format_trigger_down(buffer, sizeof buffer, 0.0 / 0.0) == -1);
+    CHECK(bp_format_trigger_down(buffer, sizeof buffer, 1.0 / 0.0) == -1);
+    CHECK(bp_format_trigger_down(tiny, sizeof tiny, 1234.5) == -1);
 }
 
 /* --- Debouncer --------------------------------------------------------- */
@@ -346,10 +377,13 @@ int main(void)
     test_jpeg_dimensions_of_a_real_fixture_frame();
     test_header_matches_the_server_codec();
     test_header_keeps_sub_millisecond_precision();
+    test_a_plausible_driver_capture_time_is_used();
+    test_an_implausible_driver_capture_time_falls_back_to_now();
     test_hello_names_the_client_version_and_size();
     test_hello_without_a_known_size_omits_it();
     test_hello_refuses_what_it_cannot_encode();
     test_rtt_and_trigger_messages();
+    test_a_down_names_its_frame();
     test_a_clean_press_is_one_event();
     test_bounce_on_both_edges_is_one_event();
     test_a_long_hold_is_one_event();

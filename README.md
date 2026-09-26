@@ -292,6 +292,19 @@ never stay stuck down: the server lets go when the holding session ends,
 and when it sends nothing at all for 2 seconds. No separate USB HID
 device is needed for v1.
 
+The `down` also carries `frame_ms`: the timestamp of the latest frame the
+phone sent. The cursor on screen is the *smoothed* aim, which trails a
+fast swing, so a shot fired "where the cursor is" lands behind where the
+player was pointing. Instead the server keeps the last second of each
+session's unsmoothed aim points by frame timestamp (`shot.py`), waits
+until the named frame has been processed (tens of milliseconds, at most
+250 ms), moves the cursor to that frame's raw aim point, presses there,
+and lets smoothing carry on from the next frame. If that frame (and
+anything within 100 ms of it) did not solve, the shot fires where the
+cursor is, as does any trigger without `frame_ms` — older clients are
+unaffected. Trigger messages keep their order, so a quick tap whose
+`down` is still waiting for its frame is still a press, then a release.
+
 Two paths for the aim coordinate, selectable by config flag.
 
 **Direct injection.** Windows `SendInput` with
@@ -572,16 +585,37 @@ wraps it around a `CursorBackend`: `move_absolute` runs its input
 through the filter before forwarding it, `click` passes straight
 through. It lives at that seam rather than inside `pipeline.py` on
 purpose — `AimPipeline` stays exactly as stateless as the section above
-describes, and one `SmoothingCursorBackend`, built once by
-`MarkerSourceController`, keeps the same filter state across a
-marker-source switch instead of resetting it every time the pipeline is
-rebuilt.
+describes. Each streaming session gets its own `SmoothingCursorBackend`
+(inside a `SessionPipeline`, from `MarkerSourceController`), so two
+cameras are never blended into one filter, and a session keeps the same
+filter state across a marker-source switch instead of resetting it every
+time the solver is rebuilt.
 
 The tradeoff is the point: a steady aim is smoothed heavily (frame-to-
 frame detection noise stops reading as visible dribble), while a fast,
 sustained swing to a new target is smoothed much less, so it does not
 feel laggy. Both follow from the same speed-adaptive cutoff — see the
 module docstring for the formula.
+
+### Timed by the camera, not the network
+
+The filter's notion of time between two frames is the difference of
+their capture timestamps — the 8-byte header each frame already carries
+(see "Wire protocol") — not when they happened to reach the server. Wi-Fi
+and queueing jitter would otherwise become a wrong interval, and the
+filter would turn it into aim jitter. The phone stamps a frame when the
+camera captured it (`requestVideoFrameCallback` metadata where the
+browser has it, otherwise the moment it is drawn from the video, never
+after JPEG encoding), and the ESP32-CAM uses the camera driver's frame
+timestamp.
+
+`stream.CaptureClock` does the conversion, once per session: client
+timestamps are only differenced against the same client's previous
+one, never compared with the server's clock or another session's. A
+timestamp that cannot be a real frame interval — repeated, backwards,
+more than a second after the last one, or not a number — is replaced by
+the server's own interval for that one frame (clamped to 1 ms–1 s), so a
+misbehaving clock can neither stall the filter nor blow it up.
 
 `POST /cursor/move` is unaffected: the route keeps the raw, unwrapped
 backend from `app.state.cursor_backend`, so an explicit requested
@@ -590,7 +624,7 @@ aim-derived movement last left the filter.
 
 ### Tuning: less lag or less jitter
 
-`MarkerSourceController` builds the filter with `min_cutoff=0.5,
+Each session's filter is built with `min_cutoff=0.5,
 beta=1.0` — tuned by feel, not measurement, so what feels right depends
 on your own camera's noise floor and how fast you swing. Two env vars
 override either without a code change (read once, at server startup):
@@ -626,11 +660,34 @@ back. Re-sending an unchanged position through the one-euro filter
 converges to that same position regardless of elapsed time, so holding
 cannot itself introduce a jump — only fresh device traffic. Once the
 window lapses with no new solve, holding stops and the cursor is
-allowed to go idle. `MarkerSourceController` builds a fresh
-`HoldingPipeline` per marker source, so a switch does not carry a held
-position from the old source into the new one. The wire report and
+allowed to go idle. Each session has its own `HoldingPipeline`,
+rebuilt whenever the marker source changes, so a switch does not carry a
+held position from the old source into the new one. The wire report and
 debug overlay are unaffected either way — a held frame is still
 reported exactly as the unsolved frame it is.
+
+### One shooter at a time
+
+There is one cursor and there can be several cameras. One session owns
+the cursor at a time (`shooter.py`), and only its aim — solved frames,
+dropout holds and shots — moves it:
+
+- pulling the trigger takes the cursor, from anyone;
+- otherwise a free cursor goes to the first session whose frame solves,
+  so a player already aiming is not interrupted by someone walking into
+  view of the markers;
+- the owner keeps it for as long as its aim keeps arriving, and loses
+  it after 1 second without any (0.75 s of dropout hold plus 1 s, if it
+  lost the markers), or at once when it disconnects.
+
+Everyone else's frames are still solved, smoothed by their own filter
+and reported back as usual; their moves just stop at the gate, so a
+handover jumps to the new owner's own smoothed aim instead of blending
+two streams. Each stats message carries `"cursor": "yours" | "other" |
+"free"`, which the phone shows as its "Cursor" row and which `GET
+/sessions` lists for a device with no screen. The server logs `cursor
+now follows <client>` at every handover. The trigger button itself is
+still shared: holds from several sessions keep it down together.
 
 ## The phone client
 
@@ -789,8 +846,10 @@ sends the header and the JPEG as two, to avoid copying the JPEG — and is
 reassembled before the server sees it; the bytes are identical.
 
 Text messages on the same socket carry JSON — telemetry from the server,
-control from the client. The trigger will land there without needing a
-second connection or any change to frame handling.
+control from the client. The trigger lands there without needing a
+second connection or any change to frame handling, and names the frame
+it was aimed with by that frame's header timestamp (`frame_ms`), which
+is why the timestamp has to be one the server has seen verbatim.
 
 JPEG rather than a video codec: `MediaRecorder` produces chunks whose
 boundaries do not align to frames, so the server would have to demux a
@@ -800,9 +859,13 @@ fixtures already are, so a fixture file is a wire payload, and the
 end-to-end test streams the checked-in frames down a real socket and
 asserts the cursor track is *identical* to replaying them from disk.
 
-The timestamp is echoed back untouched. The server cannot compute
-round-trip time itself — the two clocks share no epoch — so the phone
-subtracts against its own monotonic clock and reports the result back.
+The timestamp is the moment of capture, and is echoed back untouched.
+The server cannot compute round-trip time itself — the two clocks share
+no epoch — so the phone subtracts against its own monotonic clock and
+reports the result back. Because the stamp is taken at capture, that
+figure includes encoding: it is capture-to-report latency, what the
+player actually feels. The server also differences consecutive stamps
+to time aim smoothing (see "Aim smoothing").
 
 ### Frames that arrive too fast are dropped, newest first
 
@@ -971,7 +1034,9 @@ never retried. One that fails halfway through leaves half a message on
 the wire, which cannot be taken back, so the device reconnects.
 
 The trigger is debounced (10 ms) and sends one `trigger` `down` on press
-and one `up` on release, so holding it holds the button and drags. Contact
+and one `up` on release, so holding it holds the button and drags. The
+`down` names the last frame sent on the connection (`frame_ms`), so the
+server fires at that frame's aim rather than at the smoothed cursor. Contact
 bounce sends nothing extra. Each message waits at most for the frame send
 already in progress, so never longer than the send timeout. A press while
 disconnected is discarded rather than sent later, when the cursor would be
@@ -1249,6 +1314,8 @@ a defect invisible to a test suite that always runs from a checkout.
           qt_backend.py       # the always-on-top, input-transparent window
         inject.py             # uinput backend (+ future SendInput); SmoothingCursorBackend
         one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
+        shot.py               # firing at the named frame's unsmoothed aim
+        shooter.py            # which session's aim drives the cursor
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/

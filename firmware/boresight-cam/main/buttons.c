@@ -91,8 +91,7 @@ static void press(button_t *button)
          * reached the server, and an `up` it did not need is ignored,
          * while a missing one would leave the button down. */
         button->down_session = link_session_id();
-        if (link_send_text(BP_TRIGGER_DOWN_MESSAGE,
-                           CONFIG_BORESIGHT_SEND_TIMEOUT_MS + 50) != ESP_OK) {
+        if (link_send_trigger_down(CONFIG_BORESIGHT_SEND_TIMEOUT_MS + 50) != ESP_OK) {
             ESP_LOGW(TAG, "%s press was not delivered", button->name);
         }
         break;

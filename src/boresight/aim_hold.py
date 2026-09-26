@@ -24,7 +24,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from boresight.inject import CursorBackend
+from boresight.inject import CursorBackend, stamped
 from boresight.pipeline import AimPipeline, FrameOutcome, FrameResult
 
 # How long to keep re-sending the last solved position after the frames
@@ -59,8 +59,20 @@ class HoldingPipeline:
         self._last_position: tuple[float, float] | None = None
         self._last_time: float | None = None
 
-    def process_frame(self, frame: np.ndarray, *, debug: bool = False) -> FrameResult:
-        result = self._pipeline.process_frame(frame, debug=debug)
+    def process_frame(
+        self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
+    ) -> FrameResult:
+        """Solve `frame`, or hold the last solve through its dropout.
+
+        `t` is when the frame was captured, in the aim filter's seconds
+        (see `stream.CaptureClock`). Both the solved move and a held
+        re-send are timed by it, so the filter sees one consistent
+        timeline. The hold window itself stays on this object's own
+        clock: it is about how long the server has gone without a solve,
+        not about the camera.
+        """
+        backend = stamped(self._backend, t)
+        result = self._pipeline.process_frame(frame, debug=debug, backend=backend)
         now = self._clock()
 
         if result.outcome is FrameOutcome.SOLVED:
@@ -77,6 +89,6 @@ class HoldingPipeline:
             # exactly the value it is already holding), modulo
             # floating-point rounding far below anything visible -- so
             # this cannot introduce a jump, only fresh device traffic.
-            self._backend.move_absolute(*self._last_position)
+            backend.move_absolute(*self._last_position)
 
         return result

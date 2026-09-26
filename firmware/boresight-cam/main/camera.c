@@ -2,6 +2,7 @@
 #include "driver/gpio.h"
 #include "esp_camera.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "camera";
@@ -120,6 +121,13 @@ bool camera_grab(camera_frame_t *frame)
     }
     frame->data = buffer->buf;
     frame->length = buffer->len;
+    /* The driver stamps each frame from esp_timer as it is captured. With
+     * CAMERA_GRAB_LATEST that can be most of a frame period before this
+     * grab, and the server smooths aim by capture intervals. */
+    double driver_ms = (double)buffer->timestamp.tv_sec * 1000.0 +
+                       (double)buffer->timestamp.tv_usec / 1000.0;
+    frame->captured_ms =
+        bp_capture_ms(driver_ms, (double)esp_timer_get_time() / 1000.0);
     frame->handle = buffer;
     return true;
 }

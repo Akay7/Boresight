@@ -13,6 +13,7 @@ from boresight.aim_hold import HoldingPipeline
 from boresight.detect import DetectedMarker
 from boresight.inject import FakeCursorBackend, SmoothingCursorBackend
 from boresight.marker_map import MarkerMap, load_marker_map
+from boresight.one_euro import OneEuroFilter
 from boresight.pipeline import DEFAULT_CONFIG_PATH, AimPipeline, FrameOutcome
 
 IMAGE_SIZE = (1280, 720)
@@ -145,4 +146,25 @@ def test_holding_is_a_no_op_through_a_real_smoothing_filter(
 
     # Exact algebraically; allow for floating-point rounding in the
     # filter's own arithmetic, which is not exact bit-for-bit.
+    assert raw.calls[0] == pytest.approx(raw.calls[1], abs=1e-9)
+
+
+def test_solved_and_held_moves_are_timed_by_the_frame(marker_map: MarkerMap) -> None:
+    """With a `t`, the smoothing filter sees frame time for the solve and
+    for the held re-send alike -- never its own clock."""
+
+    def unused_clock() -> float:
+        raise AssertionError("the filter's clock was read for a stamped frame")
+
+    raw = FakeCursorBackend()
+    backend = SmoothingCursorBackend(raw, filter=OneEuroFilter(clock=unused_clock))
+    inner = _pipeline(
+        marker_map, backend, [_detections(marker_map, PANEL_CENTRE_MM), []]
+    )
+    holding = HoldingPipeline(inner, backend, hold_s=10.0, clock=lambda: 0.0)
+
+    holding.process_frame(_frame(), t=5.0)
+    holding.process_frame(_frame(), t=5.05)
+
+    assert len(raw.calls) == 2
     assert raw.calls[0] == pytest.approx(raw.calls[1], abs=1e-9)

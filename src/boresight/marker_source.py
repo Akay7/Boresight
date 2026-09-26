@@ -9,18 +9,16 @@ the reference; the old instance is discarded. The swap is a single
 assignment, so a frame gets either the old pipeline or the new one and
 never a half-changed one.
 
-The cursor backend passed in at construction is wrapped, once, in a
-`SmoothingCursorBackend` -- and that one wrapped instance, not the raw
-backend, is what every built `AimPipeline` gets. Its filter state
-therefore lives as long as this controller does, not as long as
-whichever pipeline happens to be active, so a marker-source switch
-(which discards the old pipeline) does not discontinue smoothing.
-
-Each `AimPipeline` is itself wrapped again, in a `HoldingPipeline`
-(`aim_hold.py`), rebuilt fresh on every switch: it keeps re-sending the
-last solved position to the (smoothing-wrapped) backend through a brief
-run of unsolved frames, so an ordinary short dropout does not read as
-the OS cursor going idle.
+Smoothing and the dropout hold are per session, not per controller:
+several cameras can stream at once, and one filter fed by all of them
+blends their aim into a point none of them is aiming at. Each session
+asks `session_pipeline()` for a `SessionPipeline` of its own: a
+`SmoothingCursorBackend` whose filter lives as long as the session, so
+a marker-source switch does not discontinue smoothing, and a
+`HoldingPipeline` (`aim_hold.py`) over whichever `AimPipeline` is
+current, rebuilt when a switch replaces it, so a held position never
+crosses from one source into another. The controller itself holds only
+the stateless solver.
 
 The overlay is a child process for a reason beyond convenience. Its
 window is input-transparent, takes no keyboard focus and has no title
@@ -58,6 +56,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
+
 from boresight.aim_hold import HoldingPipeline
 from boresight.inject import CursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
@@ -65,7 +65,7 @@ from boresight.marker_map import MarkerMap
 from boresight.one_euro import OneEuroFilter
 from boresight.overlay.layout import overlay_layout
 from boresight.overlay.qt_backend import GEOMETRY_EVENT
-from boresight.pipeline import AimPipeline
+from boresight.pipeline import AimPipeline, FrameResult
 
 # How long to wait for the overlay to report its geometry. Generous:
 # starting Qt and opening a display is not instant. Bounded because an
@@ -193,6 +193,32 @@ def _overlay_environment() -> dict[str, str]:
     return environment
 
 
+class SessionPipeline:
+    """One session's aim: its own smoothing and its own dropout hold.
+
+    The filter is this object's for its whole life, so a marker-source
+    switch does not discontinue smoothing. The `HoldingPipeline` is
+    rebuilt whenever the controller's current `AimPipeline` is replaced,
+    so a position held from the old source never reaches the new one.
+    Only this session's frames feed either.
+    """
+
+    def __init__(self, controller: MarkerSourceController, cursor: CursorBackend):
+        self._controller = controller
+        self._backend = SmoothingCursorBackend(cursor, filter=_aim_filter())
+        self._solver: AimPipeline | None = None
+        self._holding: HoldingPipeline | None = None
+
+    def process_frame(
+        self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
+    ) -> FrameResult:
+        solver = self._controller.pipeline
+        if solver is not self._solver or self._holding is None:
+            self._solver = solver
+            self._holding = HoldingPipeline(solver, self._backend)
+        return self._holding.process_frame(frame, debug=debug, t=t)
+
+
 class MarkerSourceController:
     """Which markers the solver is using, and the overlay behind them."""
 
@@ -204,14 +230,10 @@ class MarkerSourceController:
         launcher=subprocess.Popen,
         overlay_extra_margin_px: int = 0,
     ) -> None:
-        # Wrapped once, here, rather than per pipeline build: the filter
-        # inside must survive a marker-source switch, which rebuilds the
-        # pipeline but should not discontinue smoothing. `backend`
-        # itself (e.g. `app.state.cursor_backend`) stays unwrapped for
-        # whoever else holds a reference to it -- the manual
-        # `/cursor/move` route in particular, which an explicit request
-        # should reach exactly, not through this filter.
-        self._backend = SmoothingCursorBackend(backend, filter=_aim_filter())
+        # Unwrapped: smoothing belongs to each session (see
+        # `session_pipeline`). This is only the pipeline's default
+        # emitter, which a session always overrides per frame.
+        self._backend = backend
         self._printed_layout = printed_layout
         self._display = display
         self._launcher = launcher
@@ -219,9 +241,7 @@ class MarkerSourceController:
 
         self._source = MarkerSource.PRINTED
         self._layout = printed_layout
-        self._pipeline = HoldingPipeline(
-            AimPipeline(printed_layout, self._backend), self._backend
-        )
+        self._pipeline = AimPipeline(printed_layout, self._backend)
         self._process: subprocess.Popen | None = None
         self._stdout: _PipeDrain | None = None
         self._stderr: _PipeDrain | None = None
@@ -241,18 +261,18 @@ class MarkerSourceController:
     # --- What the serving path reads ---------------------------------
 
     @property
-    def pipeline(self) -> HoldingPipeline:
-        """The pipeline to solve the next frame with.
+    def pipeline(self) -> AimPipeline:
+        """The stateless solver for the current marker source.
 
         Read per frame rather than captured when a session opens, so a
-        switch reaches a phone that is already streaming. Wrapped in a
-        `HoldingPipeline` so a brief run of unsolved frames keeps the
-        cursor backend alive instead of going silent; see `aim_hold.py`.
-        A switch discarding the old wrapper is correct, not incidental
-        -- the previous source's held position has no bearing on the
-        new one.
+        switch reaches a phone that is already streaming. Sessions solve
+        through their own `SessionPipeline`, which reads this.
         """
         return self._pipeline
+
+    def session_pipeline(self, cursor: CursorBackend) -> SessionPipeline:
+        """A new session's own smoothing and hold, emitting to `cursor`."""
+        return SessionPipeline(self, cursor)
 
     @property
     def source(self) -> MarkerSource:
@@ -406,14 +426,11 @@ class MarkerSourceController:
 
     def _use(self, layout: MarkerMap, source: MarkerSource) -> None:
         # A new pipeline, not a mutated one: AimPipeline promises it
-        # holds no mutable state and this keeps that true. The
-        # HoldingPipeline wrapping it is new too, deliberately: its
-        # held position belongs to the source being left, not the one
-        # about to be used.
+        # holds no mutable state and this keeps that true. Each
+        # session's `SessionPipeline` notices the new object and drops
+        # its held position, which belongs to the source being left.
         self._layout = layout
-        self._pipeline = HoldingPipeline(
-            AimPipeline(layout, self._backend), self._backend
-        )
+        self._pipeline = AimPipeline(layout, self._backend)
         self._source = source
 
     # --- The child process --------------------------------------------
