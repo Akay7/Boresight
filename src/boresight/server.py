@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
-from boresight.inject import CursorBackend, TriggerHold, UinputCursorBackend
+from boresight.inject import CursorBackend, TriggerHold, default_cursor_backend
 from boresight.layout_source import (
     DEFAULT_SPEC,
     LayoutSourceError,
@@ -150,7 +150,7 @@ def _default_marker_map() -> MarkerMap:
 
 
 def create_app(
-    backend_factory: Callable[[], CursorBackend] = UinputCursorBackend,
+    backend_factory: Callable[[], CursorBackend] = default_cursor_backend,
     marker_map_factory: Callable[[], MarkerMap] = _default_marker_map,
     config: ServerConfig | None = None,
     display: int | None = None,
