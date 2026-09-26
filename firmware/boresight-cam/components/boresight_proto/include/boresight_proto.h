@@ -47,6 +47,13 @@ int bp_format_hello(char *out, size_t size, const char *version, int width,
                     int height);
 int bp_format_rtt(char *out, size_t size, double ms);
 
+/* --- JPEG ----------------------------------------------------------------
+ *
+ * Pixel size from the first baseline, extended or progressive frame header.
+ * False if the data is not a JPEG or ends before one. */
+bool bp_jpeg_dimensions(const uint8_t *data, size_t length, int *width,
+                        int *height);
+
 /* --- Button debouncing --------------------------------------------------
  *
  * Integrating debouncer: the input must read the same level for

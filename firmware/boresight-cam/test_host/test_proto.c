@@ -288,8 +288,62 @@ static void test_led_patterns_are_distinguishable(void)
     }
 }
 
+/* --- JPEG ------------------------------------------------------------- */
+
+static void test_jpeg_dimensions_from_a_frame_header(void)
+{
+    /* SOI, an 18-byte APP0, then SOF0 for 800 wide by 600 high. */
+    const uint8_t jpeg[] = {
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00, 0x01,
+        0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xC0, 0x00, 0x11,
+        0x08, 0x02, 0x58, 0x03, 0x20, 0x03, 0x01, 0x22, 0x00, 0x02, 0x11, 0x01,
+        0x03, 0x11, 0x01,
+    };
+    int width = 0;
+    int height = 0;
+
+    CHECK(bp_jpeg_dimensions(jpeg, sizeof jpeg, &width, &height));
+    CHECK(width == 800 && height == 600);
+
+    /* Cut off inside the frame header. */
+    CHECK(!bp_jpeg_dimensions(jpeg, 26, &width, &height));
+}
+
+static void test_jpeg_dimensions_refuse_what_is_not_a_jpeg(void)
+{
+    /* The start of a Git LFS pointer file. */
+    const char pointer[] = "version https://git-lfs.github.com/spec/v1\n";
+    int width = 0;
+    int height = 0;
+
+    CHECK(!bp_jpeg_dimensions((const uint8_t *)pointer, sizeof pointer - 1, &width,
+                              &height));
+    CHECK(!bp_jpeg_dimensions((const uint8_t *)"", 0, &width, &height));
+}
+
+static void test_jpeg_dimensions_of_a_real_fixture_frame(void)
+{
+    /* The phone fixture: a stable, checked-in 1280x720 frame. */
+    FILE *file = fopen(FIXTURE_FRAME, "rb");
+    CHECK(file != NULL);
+    if (file == NULL) {
+        return;
+    }
+    static uint8_t data[512 * 1024];
+    size_t length = fread(data, 1, sizeof data, file);
+    fclose(file);
+    int width = 0;
+    int height = 0;
+
+    CHECK(bp_jpeg_dimensions(data, length, &width, &height));
+    CHECK(width == 1280 && height == 720);
+}
+
 int main(void)
 {
+    test_jpeg_dimensions_from_a_frame_header();
+    test_jpeg_dimensions_refuse_what_is_not_a_jpeg();
+    test_jpeg_dimensions_of_a_real_fixture_frame();
     test_header_matches_the_server_codec();
     test_header_keeps_sub_millisecond_precision();
     test_hello_names_the_client_version_and_size();

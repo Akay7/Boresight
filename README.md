@@ -928,7 +928,7 @@ The status LED is the only display on the gun:
 
 Everything else is on the server. Its log names the device:
 
-    client identified: esp32-cam 192.168.1.37:52110 (version 0.1.0, frames 800x600)
+    client identified: esp32-cam 192.168.1.37:52110 (version 0.1.0, frames 1024x768)
 
 and `GET /sessions` lists every connected client with the same telemetry
 the phone displays — frame counts, drops, round-trip time, the last
@@ -962,6 +962,49 @@ If a phone has turned the debug view on, new sessions inherit it and the
 server's per-frame reports grow to kilobytes. The device ignores reports
 that large rather than assemble them, so its LED and round-trip reports
 pause until debug is off again; the serial log says so.
+
+### Resolution
+
+The default is 1024×768. Detection needs roughly 25 px across a marker,
+and with the stock lens at about 3 m an 80 mm marker is ~25 px at
+1024×768 but ~18 px at 800×600. Measured on the Blender scene rendered as
+the ESP32-CAM sees it (`tests/fixtures/esp32cam_video/`):
+
+| Resolution | Marker width | Frames extrapolated | Aim error, max |
+| --- | --- | --- | --- |
+| 800×600 | 18 px | 12 of 20 | 276 mm |
+| 1024×768 (default) | 25 px | 0 | 2.9 mm |
+| 1280×720 | 31 px | 0 | 2.2 mm |
+| 1600×1200 | 39 px | 0 | 1.8 mm |
+
+The price is frame rate: above 800×600 the OV2640 switches to a slower
+full-array mode, roughly halving it. 800×600 is worth choosing in
+`menuconfig` only with bigger markers (about 110–120 mm at 3 m) or closer
+play; 1280×720 adds margin but crops the top and bottom of the view. The
+scene models neither motion blur nor rolling shutter, both of which
+favour the faster mode, and no frame rate has been measured on a board.
+
+### Without a board
+
+The firmware builds and runs with nothing installed but Docker:
+
+    firmware/boresight-cam/tools/idf.sh device build
+    firmware/boresight-cam/tools/idf.sh emulator build
+    firmware/boresight-cam/tools/run-emulator.sh
+
+The emulator is Espressif's open-source QEMU. It has no camera sensor or
+Wi-Fi radio, so the emulator build substitutes rendered frames of the
+Blender scene as the ESP32-CAM sees it, QEMU's emulated Ethernet, and
+console commands (`press`, `release`, `click`) for the trigger pin.
+Everything above those is the code a board runs: the frame socket,
+fragmented sends, `hello`, `rtt`, the debouncer, trigger hold,
+reconnecting and token refusal. An opt-in pytest suite boots it against
+the real server:
+
+    BORESIGHT_EMULATOR_TESTS=1 uv run pytest tests/test_firmware_emulator.py
+
+It says nothing about the sensor, Wi-Fi, the LED or timing. See
+`firmware/boresight-cam/README.md` for the details.
 
 ## On-screen markers
 
@@ -1197,6 +1240,7 @@ a defect invisible to a test suite that always runs from a checkout.
           components/
             boresight_proto/  # wire format, debouncer, LED patterns -- no ESP-IDF
           test_host/          # host tests for boresight_proto (CMake + CTest)
+          tools/              # Docker build and QEMU runner, no ESP-IDF install
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
       tests/
         fixtures/             # rendered frame sequences (Git LFS)

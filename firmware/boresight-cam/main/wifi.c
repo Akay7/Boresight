@@ -54,7 +54,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 }
 
-esp_err_t wifi_start(void)
+esp_err_t network_start(void)
 {
     s_events = xEventGroupCreate();
     if (s_events == NULL) {
@@ -92,7 +92,7 @@ esp_err_t wifi_start(void)
     return ESP_OK;
 }
 
-bool wifi_wait_connected(TickType_t timeout)
+bool network_wait_connected(TickType_t timeout)
 {
     return (xEventGroupWaitBits(s_events, CONNECTED_BIT, pdFALSE, pdTRUE, timeout) &
             CONNECTED_BIT) != 0;

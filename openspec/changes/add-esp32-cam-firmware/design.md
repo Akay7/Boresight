@@ -133,10 +133,14 @@ timestamp is `esp_timer_get_time() / 1000.0` as an IEEE-754 double,
 shifted out byte by byte in little-endian order rather than `memcpy`'d,
 so the host tests prove the exact bytes the board sends.
 
-Default resolution is SVGA (800×600) at quality 12, capped at 20 fps —
-a guess, exactly as the phone's `CONFIG` defaults were, to be replaced
-by telemetry. HD (1280×720) matches the fixtures but OV2640 JPEG at HD
-is expected to run near 10 fps.
+Default resolution is XGA (1024×768) at quality 12, capped at 20 fps.
+It started as SVGA (800×600), but the device fixture rendered in
+`add-esp32-cam-emulator` showed 80 mm markers at about 3 m only ~18 px
+wide at SVGA, with most frames extrapolated; XGA is the smallest size
+that solved every frame. Sizes above SVGA use the OV2640's slower
+full-array mode, roughly halving the frame rate, so SVGA stays an option
+for larger markers or closer play. Quality and the frame rate actually
+achieved are still guesses, to be replaced by telemetry from a board.
 
 ### Buttons: GPIO interrupt → debouncer → dedicated task
 

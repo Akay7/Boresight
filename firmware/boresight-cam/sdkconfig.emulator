@@ -1,0 +1,21 @@
+# Emulator profile, layered over sdkconfig.defaults by `tools/idf.sh emulator`.
+# Its resulting sdkconfig lives in build-emulator/, never in the project
+# root, so it cannot touch the device configuration. No secrets: the server
+# it talks to is a loopback-only test server.
+CONFIG_BORESIGHT_EMULATOR=y
+CONFIG_ETH_USE_OPENETH=y
+
+# No sensor frame buffers to hold, and one less emulated device to rely on.
+# CONFIG_SPIRAM is not set
+
+# The embedded frames need more room than the single-app layout gives.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_emulator.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# The machine running QEMU is 10.0.2.2 from inside it. Port 7391, not the
+# default 7331, so a development server left running does not answer.
+CONFIG_BORESIGHT_SERVER_HOST="10.0.2.2"
+CONFIG_BORESIGHT_SERVER_PORT=7391
+CONFIG_BORESIGHT_TOKEN="emulator-token"
+# CONFIG_BORESIGHT_TLS is not set

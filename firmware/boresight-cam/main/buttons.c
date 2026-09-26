@@ -44,17 +44,37 @@ static button_t s_buttons[] = {
 
 static TaskHandle_t s_task;
 
+#if CONFIG_BORESIGHT_EMULATOR
+/* The level each button would read, set from the console. Only the pin
+ * read is replaced; everything the level feeds is the real code. */
+static volatile bool s_injected[BUTTON_COUNT];
+
+void buttons_inject(size_t index, bool pressed)
+{
+    if (index >= BUTTON_COUNT || s_task == NULL) {
+        return;
+    }
+    s_injected[index] = pressed;
+    /* What the edge interrupt does on a board. */
+    xTaskNotifyGive(s_task);
+}
+#endif
+
 static void IRAM_ATTR on_edge(void *arg)
 {
     (void)arg;
     BaseType_t woken = pdFALSE;
-    xTaskNotifyGiveFromISR(s_task, &woken);
+    vTaskNotifyGiveFromISR(s_task, &woken);
     portYIELD_FROM_ISR(woken);
 }
 
 static bool is_pressed(const button_t *button)
 {
+#if CONFIG_BORESIGHT_EMULATOR
+    return s_injected[button - s_buttons];
+#else
     return gpio_get_level(button->gpio) == 0; /* active-low */
+#endif
 }
 
 static void press(button_t *button)

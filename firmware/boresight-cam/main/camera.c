@@ -29,12 +29,12 @@ static framesize_t configured_frame_size(void)
 {
 #if CONFIG_BORESIGHT_FRAME_SIZE_VGA
     return FRAMESIZE_VGA;
-#elif CONFIG_BORESIGHT_FRAME_SIZE_XGA
-    return FRAMESIZE_XGA;
+#elif CONFIG_BORESIGHT_FRAME_SIZE_SVGA
+    return FRAMESIZE_SVGA;
 #elif CONFIG_BORESIGHT_FRAME_SIZE_HD
     return FRAMESIZE_HD;
 #else
-    return FRAMESIZE_SVGA;
+    return FRAMESIZE_XGA;
 #endif
 }
 
@@ -110,4 +110,22 @@ esp_err_t camera_start(int *width, int *height)
                       "detection in a dim room will suffer");
     }
     return ESP_OK;
+}
+
+bool camera_grab(camera_frame_t *frame)
+{
+    camera_fb_t *buffer = esp_camera_fb_get();
+    if (buffer == NULL) {
+        return false;
+    }
+    frame->data = buffer->buf;
+    frame->length = buffer->len;
+    frame->handle = buffer;
+    return true;
+}
+
+void camera_release(camera_frame_t *frame)
+{
+    esp_camera_fb_return((camera_fb_t *)frame->handle);
+    frame->handle = NULL;
 }

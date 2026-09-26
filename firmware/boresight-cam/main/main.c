@@ -10,8 +10,9 @@
 #include <string.h>
 
 #include "boresight_cam.h"
+#include <stdio.h>
+
 #include "esp_app_desc.h"
-#include "esp_camera.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -21,6 +22,14 @@
 #include "sdkconfig.h"
 
 static const char *TAG = "boresight";
+
+#if CONFIG_BORESIGHT_EMULATOR
+/* On every version this image reports, so a session on the server can
+ * never be mistaken for a board. */
+#define VERSION_SUFFIX "+emulator"
+#else
+#define VERSION_SUFFIX ""
+#endif
 
 /* Same cadence as the server's own session log line. */
 #define LOG_INTERVAL_MS 5000u
@@ -60,11 +69,13 @@ static bool configuration_complete(void)
      * would break building a fresh checkout at all, so it is checked here,
      * where the log says exactly what is missing. */
     bool complete = true;
+#if !CONFIG_BORESIGHT_EMULATOR
     if (strlen(CONFIG_BORESIGHT_WIFI_SSID) == 0) {
         ESP_LOGE(TAG, "not configured: Wi-Fi SSID "
                       "(idf.py menuconfig -> Boresight camera -> Network)");
         complete = false;
     }
+#endif
     if (strlen(CONFIG_BORESIGHT_SERVER_HOST) == 0) {
         ESP_LOGE(TAG, "not configured: server address "
                       "(the \"host\" line the server prints at startup)");
@@ -104,15 +115,15 @@ static void capture_task(void *arg)
             continue;
         }
 
-        /* The driver runs in CAMERA_GRAB_LATEST mode, so this is the newest
-         * frame and nothing older is waiting behind it -- the device-side
+        /* The newest frame, with nothing older waiting behind it: the
+         * sensor's driver runs in CAMERA_GRAB_LATEST mode -- the device-side
          * equivalent of the server's newest-wins slot. */
-        camera_fb_t *frame = esp_camera_fb_get();
-        if (frame == NULL) {
+        camera_frame_t frame;
+        if (!camera_grab(&frame)) {
             skipped++;
         } else {
             double client_ms = (double)esp_timer_get_time() / 1000.0;
-            if (link_send_frame(client_ms, frame->buf, frame->len,
+            if (link_send_frame(client_ms, frame.data, frame.length,
                                 CONFIG_BORESIGHT_SEND_TIMEOUT_MS) == ESP_OK) {
                 sent++;
             } else {
@@ -120,7 +131,7 @@ static void capture_task(void *arg)
                  * exists. */
                 skipped++;
             }
-            esp_camera_fb_return(frame);
+            camera_release(&frame);
         }
 
         uint32_t now = boresight_now_ms();
@@ -146,10 +157,17 @@ static void capture_task(void *arg)
 
 void app_main(void)
 {
-    const esp_app_desc_t *app = esp_app_get_description();
+    static char version[48];
+    snprintf(version, sizeof version, "%s%s", esp_app_get_description()->version,
+             VERSION_SUFFIX);
     esp_reset_reason_t reason = esp_reset_reason();
-    ESP_LOGI(TAG, "Boresight camera %s, reset reason: %s", app->version,
+    ESP_LOGI(TAG, "Boresight camera %s, reset reason: %s", version,
              reset_reason_name(reason));
+#if CONFIG_BORESIGHT_EMULATOR
+    ESP_LOGW(TAG, "EMULATOR BUILD: recorded frames for a camera, emulated "
+                  "Ethernet for Wi-Fi, console commands for buttons. This "
+                  "image does not run on an ESP32-CAM.");
+#endif
     if (reason == ESP_RST_BROWNOUT) {
         /* The camera and the Wi-Fi radio draw current in bursts. On a weak
          * supply that looks like random reboots unless it is named. */
@@ -191,11 +209,14 @@ void app_main(void)
         halt("the buttons could not be set up");
         return;
     }
-    if (wifi_start() != ESP_OK) {
-        halt("Wi-Fi did not start");
+#if CONFIG_BORESIGHT_EMULATOR
+    console_start();
+#endif
+    if (network_start() != ESP_OK) {
+        halt("the network did not start");
         return;
     }
-    if (link_start(app->version, width, height) != ESP_OK) {
+    if (link_start(version, width, height) != ESP_OK) {
         halt("the server connection could not be set up");
         return;
     }

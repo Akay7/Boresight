@@ -1,15 +1,17 @@
 ## 1. Firmware project scaffold and configuration
 
-- [ ] 1.1 Create `firmware/boresight-cam/` as an ESP-IDF v5.x project
+- [x] 1.1 Create `firmware/boresight-cam/` as an ESP-IDF v5.x project
       (`CMakeLists.txt`, `main/`, `main/idf_component.yml` pulling
       `espressif/esp32-camera` and `espressif/esp_websocket_client`,
       `sdkconfig.defaults` with PSRAM enabled and target `esp32`); verify
       `idf.py set-target esp32 && idf.py build` succeeds
-- [ ] 1.2 Add `main/Kconfig.projbuild` with Wi-Fi SSID/password, server
+      (Built with `tools/idf.sh device build`, the same idf.py in the pinned ESP-IDF container; see add-esp32-cam-emulator.)
+- [x] 1.2 Add `main/Kconfig.projbuild` with Wi-Fi SSID/password, server
       host/port, token, TLS toggle, resolution, JPEG quality, fps cap,
       send timeout, exposure, gain, trigger GPIO (default 13) and
       debounce ms; verify the options appear under `idf.py menuconfig`
-- [ ] 1.3 Embed `main/server_cert.pem` when TLS is on, failing the build
+      (Checked in the generated `sdkconfig` rather than by opening menuconfig interactively.)
+- [x] 1.3 Embed `main/server_cert.pem` when TLS is on, failing the build
       with a message naming the file when it is missing, and needing
       nothing when TLS is off; verify the build passes with TLS off and no
       certificate file present
@@ -17,9 +19,10 @@
       `sdkconfig.old`, `managed_components/` and `main/server_cert.pem`
       to `.gitignore`; verify `git status` shows none of them after a
       configured build
-- [ ] 1.5 Boot-time config check: empty SSID or host logs the missing
+- [x] 1.5 Boot-time config check: empty SSID or host logs the missing
       setting and enters the error LED state; verify by building with an
       empty SSID and reading the serial log (`idf.py monitor`)
+      (Verified by booting the unconfigured device image in QEMU: missing SSID and host logged, `state: error`. The LED pattern itself is still for bring-up.)
 
 ## 2. Platform-independent protocol component
 
@@ -52,19 +55,21 @@
       quality; disable AEC/AGC and apply exposure and gain; log applied
       settings and the reset reason; verify on hardware from the serial
       log
-- [ ] 3.3 WebSocket connection to `ws(s)://host:port/ws/frames?token=…`
+- [x] 3.3 WebSocket connection to `ws(s)://host:port/ws/frames?token=…`
       with the embedded certificate as the only trust anchor under TLS
       and built-in auto-reconnect disabled; send `hello` (kind
       `esp32-cam`, version, frame size) on connect; verify against a
       local server that `GET /sessions` lists an `esp32-cam` session
+      (Verified in QEMU against a local server; see add-esp32-cam-emulator.)
 - [ ] 3.4 Capture task: grab, pack header, send header + JPEG as one
       binary message via partial sends with the configured timeout, count
       skips, sleep to the fps cap; verify on hardware that the server's
       `received` rate stays at or below the cap and `/sessions` shows
       `processed` increasing with markers in view
-- [ ] 3.5 Refused-token handling (401/403 handshake or 1008 close): error LED, 30 s back-off, no
+- [x] 3.5 Refused-token handling (401/403 handshake or 1008 close): error LED, 30 s back-off, no
       tight retry loop; verify by flashing a wrong token and observing the
       server logs show at most one refused attempt per back-off interval
+      (Verified in QEMU: 403 reported, error state, no second attempt in 25 s — after fixing the bug the emulator found.)
 - [ ] 3.6 TLS refusal: verify that with a different certificate embedded
       the handshake fails, the server logs no accepted socket, and the
       error LED pattern shows
@@ -78,13 +83,15 @@
       start with the error pattern
 - [ ] 4.2 Add a link session generation counter and send `down`/`up` from `buttons.c`, sending `up` only for a `down` delivered on the current connection; verify with `idf.py build` and on the device (hold drags, press while disconnected is not replayed) (implemented, not yet built or tried on hardware)
       Supersedes the original one-`trigger`-per-press task; on hardware, 10 presses raise `triggers` in `/sessions` by exactly 10, a 5 s hold by 1, and presses while the server is down are not delivered after reconnect
+      (Hold and no-replay verified in QEMU through the real debouncer and send path; the GPIO read and a real hold still need a board.)
 
 ## 5. Firmware: telemetry and status LED
 
-- [ ] 5.1 Parse `stats` text messages (`client_ms`, `outcome`,
+- [x] 5.1 Parse `stats` text messages (`client_ms`, `outcome`,
       `triggers`) with cJSON, discarding messages larger than the receive
       buffer; send `rtt` at most once per second; verify `/sessions`
       shows a non-zero `round_trip_ms` for the device session
+      (Verified in QEMU: `/sessions` shows the device's round-trip time.)
 - [ ] 5.2 LED task on GPIO33 (active-low) implementing the five patterns
       from design.md, treating stats older than 1 s as unsolved; verify on
       hardware by covering the lens (unsolved pattern) and pointing at

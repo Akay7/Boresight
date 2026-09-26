@@ -14,6 +14,7 @@ native/*/build/
 # configuration -- which holds the Wi-Fi password and token -- plus the
 # server certificate copied in for TLS pinning. Never committed.
 firmware/*/build/
+firmware/*/build-emulator/
 firmware/*/build-host/
 firmware/*/managed_components/
 firmware/*/dependencies.lock

@@ -161,32 +161,36 @@ static void on_data(const esp_websocket_event_data_t *data)
 static void note_error(const esp_websocket_event_data_t *data)
 {
     const esp_websocket_error_codes_t *error = &data->error_handle;
-    if (error->error_type == WEBSOCKET_ERROR_TYPE_HANDSHAKE) {
+    /* Keyed on the status itself, not on error_type: the client reports a
+     * refused handshake as a transport failure that carries the HTTP status
+     * (found in emulation, where a 403 was otherwise retried as a blip). */
+    int status = error->esp_ws_handshake_status_code;
+    if (status == 401 || status == 403) {
         /* The server refuses a bad token before accepting the socket, which
          * reaches the client as an HTTP status, not a close code. */
-        int status = error->esp_ws_handshake_status_code;
-        if (status == 401 || status == 403) {
-            ESP_LOGE(TAG, "server refused the connection (HTTP %d): check the token",
-                     status);
-            s_failure = FAILURE_REJECTED;
-        } else {
-            ESP_LOGW(TAG, "handshake failed (HTTP %d): is this the Boresight "
-                          "server and port?",
-                     status);
-        }
-    } else if (error->error_type == WEBSOCKET_ERROR_TYPE_TCP_TRANSPORT) {
-        if (error->esp_tls_cert_verify_flags != 0 ||
-            error->esp_tls_stack_err == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
-            ESP_LOGE(TAG, "the server's certificate is not the one built into this "
-                          "firmware (verify flags 0x%x); re-copy "
-                          ".boresight/cert.pem and rebuild",
-                     error->esp_tls_cert_verify_flags);
-            s_failure = FAILURE_CERTIFICATE;
-        } else {
-            ESP_LOGW(TAG, "transport error: %s (errno %d)",
-                     esp_err_to_name(error->esp_tls_last_esp_err),
-                     error->esp_transport_sock_errno);
-        }
+        ESP_LOGE(TAG, "server refused the connection (HTTP %d): check the token",
+                 status);
+        s_failure = FAILURE_REJECTED;
+#if CONFIG_BORESIGHT_TLS
+    } else if (error->esp_tls_stack_err == MBEDTLS_ERR_X509_CERT_VERIFY_FAILED) {
+        /* Only the TLS stack's own verdict. The verify-flags field is not
+         * meaningful outside a TLS failure: on a plain connection reset it
+         * held 0x3ffc1ff0 (found in emulation), which read as a certificate
+         * mismatch and turned every server restart into a 30 s error. */
+        ESP_LOGE(TAG, "the server's certificate is not the one built into this "
+                      "firmware (verify flags 0x%x); re-copy "
+                      ".boresight/cert.pem and rebuild",
+                 error->esp_tls_cert_verify_flags);
+        s_failure = FAILURE_CERTIFICATE;
+#endif
+    } else if (status != 0) {
+        ESP_LOGW(TAG, "handshake failed (HTTP %d): is this the Boresight "
+                      "server and port?",
+                 status);
+    } else {
+        ESP_LOGW(TAG, "socket error (type %d): %s (errno %d)", (int)error->error_type,
+                 esp_err_to_name(error->esp_tls_last_esp_err),
+                 error->esp_transport_sock_errno);
     }
 }
 
@@ -347,9 +351,9 @@ static void link_task(void *arg)
     };
 
     for (;;) {
-        if (!wifi_wait_connected(0)) {
+        if (!network_wait_connected(0)) {
             status_led_set_link(BP_LINK_JOINING_WIFI);
-            wifi_wait_connected(portMAX_DELAY);
+            network_wait_connected(portMAX_DELAY);
         }
         status_led_set_link(BP_LINK_CONNECTING);
         xEventGroupClearBits(s_events, CONNECTED_BIT | ENDED_BIT);

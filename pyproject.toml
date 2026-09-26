@@ -47,6 +47,9 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
+markers = [
+    "emulator: boots the ESP32-CAM firmware in QEMU; opt-in, see tests/test_firmware_emulator.py",
+]
 filterwarnings = [
     "error::DeprecationWarning",
     "error::PendingDeprecationWarning",

@@ -152,3 +152,47 @@ bool bp_led_on(bp_led_pattern_t pattern, uint32_t now_ms)
         return now_ms % 1000u < 80u;
     }
 }
+
+/* --- JPEG --------------------------------------------------------------- */
+
+bool bp_jpeg_dimensions(const uint8_t *data, size_t length, int *width,
+                        int *height)
+{
+    if (length < 4 || data[0] != 0xFF || data[1] != 0xD8) {
+        return false;
+    }
+    size_t i = 2;
+    while (i + 4 <= length) {
+        if (data[i] != 0xFF) {
+            return false;
+        }
+        uint8_t marker = data[i + 1];
+        if (marker == 0xFF) { /* fill byte */
+            i++;
+            continue;
+        }
+        if (marker == 0xD9 || marker == 0xDA) {
+            /* End of image, or scan data, before any frame header. */
+            return false;
+        }
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+            i += 2; /* markers without a length */
+            continue;
+        }
+        size_t segment = ((size_t)data[i + 2] << 8) | data[i + 3];
+        if (segment < 2 || i + 2 + segment > length) {
+            return false;
+        }
+        if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2) {
+            /* FF Cn, length, precision, height, width */
+            if (segment < 7) {
+                return false;
+            }
+            *height = (data[i + 5] << 8) | data[i + 6];
+            *width = (data[i + 7] << 8) | data[i + 8];
+            return *width > 0 && *height > 0;
+        }
+        i += 2 + segment;
+    }
+    return false;
+}
