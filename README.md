@@ -705,6 +705,25 @@ two streams. Each stats message carries `"cursor": "yours" | "other" |
 now follows <client>` at every handover. The trigger button itself is
 still shared: holds from several sessions keep it down together.
 
+### Zeroing the gun
+
+The cursor goes where the *camera* points. A camera mounted 1° off the
+barrel is ~3.5 cm off at 2 m, and games hide the cursor, so zero the gun
+once: tap **Zero** on the phone, then aim through the sights at each
+target and pull the trigger. With on-screen markers the overlay draws
+the targets (four corners, then the centre); with printed markers,
+shoot the four corners of the picture. Shots during zeroing never click
+the game. The last target is optional: take it from a metre closer or
+farther and the camera-to-barrel offset (parallax) is fitted too;
+otherwise that offset is exact only at the distance you zeroed from.
+
+The correction is a fixed image-space offset for the mount's tilt,
+which holds at any distance and angle, rather than a screen-space warp
+that is right only where you stood (`zeroing.py`). It is stored per
+phone in `.boresight/zeroing.json` and reloaded on connect; **Reset**
+forgets it. Re-zero after remounting the phone or changing its camera
+resolution.
+
 ## The phone client
 
 The phone loads a page in its browser, which captures from the rear
@@ -1327,6 +1346,7 @@ a defect invisible to a test suite that always runs from a checkout.
         one_euro.py           # the 1-euro filter SmoothingCursorBackend wraps
         shot.py               # firing at the named frame's unsmoothed aim
         shooter.py            # which session's aim drives the cursor
+        zeroing.py            # shoot targets to correct camera-to-barrel aim
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
