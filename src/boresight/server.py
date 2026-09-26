@@ -881,7 +881,10 @@ def _device_details(config: ServerConfig, certfile: Path | None) -> str:
     return "\n".join(lines) + "\n"
 
 
-app = create_app()
+# Deliberately no module-level `app = create_app()`: one built at import
+# has the default config, with no token, and `uvicorn
+# boresight.server:app --host 0.0.0.0` would serve it without `main()`
+# ever validating anything. Run `python -m boresight.server`.
 
 
 def main(argv: list[str] | None = None) -> int:
