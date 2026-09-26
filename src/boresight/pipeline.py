@@ -451,9 +451,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         backend: CursorBackend = FakeCursorBackend()
     else:
-        from boresight.inject import UinputCursorBackend
+        from boresight.inject import default_cursor_backend
 
-        backend = UinputCursorBackend()
+        backend = default_cursor_backend()
 
     results = replay(args.frames_dir, AimPipeline(marker_map, backend))
 

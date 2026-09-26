@@ -17,7 +17,10 @@ alternative shape of the same thing.
 
 from __future__ import annotations
 
+import math
 import os
+import sys
+from dataclasses import dataclass
 from typing import Protocol
 
 from boresight.one_euro import OneEuroFilter
@@ -76,6 +79,78 @@ class CursorBackendUnavailable(RuntimeError):
     """Raised when a cursor backend cannot be initialized (e.g. no
     permission to open /dev/uinput, or the uinput kernel module is
     unavailable)."""
+
+
+@dataclass(frozen=True)
+class Rect:
+    """A desktop rectangle: pixels on Windows, points on macOS."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+    def point(self, x: float, y: float) -> tuple[float, float]:
+        """Where normalized `(x, y)` falls inside this rectangle.
+
+        1.0 is the last pixel rather than one past it, matching the
+        uinput backend, where 1.0 is the top of the axis range.
+        """
+        return (
+            self.x + x * (self.width - 1),
+            self.y + y * (self.height - 1),
+        )
+
+
+# Confines the cursor to one monitor of a multi-monitor desktop, on the
+# backends that address the whole desktop (Windows, macOS). uinput has
+# no equivalent: there the compositor maps the tablet.
+CURSOR_RECT_ENV = "BORESIGHT_CURSOR_RECT"
+
+
+def cursor_rect_override(environ: dict[str, str] | None = None) -> Rect | None:
+    """`BORESIGHT_CURSOR_RECT` as a `Rect`, or None when it is unset.
+
+    Checked when the backend starts, so a typo fails the server there
+    rather than sending the cursor somewhere unexpected.
+    """
+    raw = (os.environ if environ is None else environ).get(CURSOR_RECT_ENV)
+    if not raw:
+        return None
+    try:
+        x, y, width, height = (float(part) for part in raw.split(","))
+    except ValueError:
+        x = y = width = height = 0.0
+    finite = all(math.isfinite(value) for value in (x, y, width, height))
+    if not finite or width < 1 or height < 1:
+        raise CursorBackendUnavailable(
+            f"{CURSOR_RECT_ENV}={raw!r} is not a display area. Expected "
+            "x,y,width,height in desktop coordinates, e.g. 1920,0,1280,1024."
+        )
+    return Rect(x, y, width, height)
+
+
+def default_cursor_backend(platform: str | None = None) -> CursorBackend:
+    """The cursor backend for the platform this runs on.
+
+    Each platform module is imported only here, so none of them -- nor
+    anything they load -- is needed to import the server elsewhere.
+    """
+    platform = sys.platform if platform is None else platform
+    if platform.startswith("linux"):
+        return UinputCursorBackend()
+    if platform == "win32":
+        from boresight.inject_win32 import Win32CursorBackend
+
+        return Win32CursorBackend()
+    if platform == "darwin":
+        from boresight.inject_darwin import QuartzCursorBackend
+
+        return QuartzCursorBackend()
+    raise CursorBackendUnavailable(
+        f"no cursor backend for {platform}: Boresight injects input on "
+        "Linux (uinput), Windows (SendInput) and macOS (Quartz events)."
+    )
 
 
 class UinputCursorBackend:
