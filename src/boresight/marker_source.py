@@ -66,6 +66,7 @@ from boresight.one_euro import OneEuroFilter
 from boresight.overlay.layout import overlay_layout
 from boresight.overlay.qt_backend import GEOMETRY_EVENT
 from boresight.pipeline import AimPipeline, FrameResult
+from boresight.zeroing import Zero
 
 # How long to wait for the overlay to report its geometry. Generous:
 # starting Qt and opening a display is not instant. Bounded because an
@@ -157,8 +158,10 @@ def _overlay_command(display: int | None, extra_margin_px: int = 0) -> list[str]
     and `extra_margin_px` are set at server startup, not per request,
     and each is rendered by `str()` on an already-parsed number, so
     there is no path from request content to an argument.
+
+    `--commands` makes the overlay read `show_target`'s lines on stdin.
     """
-    command = [sys.executable, "-m", "boresight.overlay"]
+    command = [sys.executable, "-m", "boresight.overlay", "--commands"]
     if display is not None:
         command += ["--display", str(int(display))]
     if extra_margin_px:
@@ -201,6 +204,9 @@ class SessionPipeline:
     rebuilt whenever the controller's current `AimPipeline` is replaced,
     so a position held from the old source never reaches the new one.
     Only this session's frames feed either.
+
+    `zero` is this session's aim correction, set from outside as the
+    session identifies itself or zeroes, and read per frame.
     """
 
     def __init__(self, controller: MarkerSourceController, cursor: CursorBackend):
@@ -208,6 +214,7 @@ class SessionPipeline:
         self._backend = SmoothingCursorBackend(cursor, filter=_aim_filter())
         self._solver: AimPipeline | None = None
         self._holding: HoldingPipeline | None = None
+        self.zero: Zero | None = None
 
     def process_frame(
         self, frame: np.ndarray, *, debug: bool = False, t: float | None = None
@@ -216,7 +223,7 @@ class SessionPipeline:
         if solver is not self._solver or self._holding is None:
             self._solver = solver
             self._holding = HoldingPipeline(solver, self._backend)
-        return self._holding.process_frame(frame, debug=debug, t=t)
+        return self._holding.process_frame(frame, debug=debug, t=t, zero=self.zero)
 
 
 class MarkerSourceController:
@@ -277,6 +284,39 @@ class MarkerSourceController:
     @property
     def source(self) -> MarkerSource:
         return self._source
+
+    @property
+    def overlay_area(self) -> tuple[tuple[int, int], tuple[int, int, int, int]] | None:
+        """`(screen_px, area_px)` of the running overlay, else None."""
+        geometry = self._geometry
+        if self._source is not MarkerSource.SCREEN or geometry is None:
+            return None
+        return geometry.screen_px, geometry.area_px
+
+    def show_target(self, position: tuple[float, float] | None) -> bool:
+        """Draw a zeroing target at normalized `position`, or hide it.
+
+        Whether the overlay was told. Not under the lock, and never
+        raising: a target is best-effort, and an overlay that died or is
+        mid-restart simply misses it -- the next step sends it again.
+        """
+        process, geometry = self._process, self._geometry
+        if process is None or process.stdin is None or geometry is None:
+            return False
+        point = (
+            None
+            if position is None
+            else [
+                round(position[0] * geometry.screen_px[0]),
+                round(position[1] * geometry.screen_px[1]),
+            ]
+        )
+        try:
+            process.stdin.write(json.dumps({"target": point}) + "\n")
+            process.stdin.flush()
+        except (OSError, ValueError):
+            return False
+        return True
 
     def state(self) -> dict:
         """The current state, with the overlay's liveness checked now.
@@ -439,6 +479,7 @@ class MarkerSourceController:
         try:
             process = self._launcher(
                 _overlay_command(self._display, self._overlay_extra_margin_px),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -533,6 +574,11 @@ class MarkerSourceController:
         process = self._process
         self._process = None
         self._geometry = None
+        if process is not None and process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
         if process is None or process.poll() is not None:
             return
 

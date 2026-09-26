@@ -135,6 +135,23 @@
 
     <div id="message"></div>
 
+    <!-- Zeroing: shoot the targets so the cursor lands where the sights
+         point, not where the camera does. Driven by zeroing.js. -->
+    <div class="panel">
+      <div class="row">
+        <span>Zeroing</span><span id="zeroing-state">—</span>
+      </div>
+      <div id="zeroing-prompt" style="padding: 0.2rem 0; white-space: pre-wrap"></div>
+      <div class="row">
+        <span class="choice">
+          <button type="button" id="zeroing-start" class="pick" disabled>Zero</button>
+          <button type="button" id="zeroing-finish" class="pick" disabled>Done</button>
+          <button type="button" id="zeroing-cancel" class="pick" disabled>Cancel</button>
+        </span>
+        <button type="button" id="zeroing-reset" class="pick" disabled>Reset</button>
+      </div>
+    </div>
+
     <div class="panel">
       <div class="row">
         <span>Markers</span>
@@ -201,5 +218,6 @@
          URL set the session cookie, which the browser sends with this
          request and every one after it. -->
     <script src="capture.js"></script>
+    <script src="zeroing.js"></script>
   </body>
 </html>

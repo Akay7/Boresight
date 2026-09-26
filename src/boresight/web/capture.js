@@ -574,6 +574,23 @@ const CAMERA_TIMEOUT_MS = 30000;
 // the same machine over adb.
 const SOCKET_TIMEOUT_MS = 8000;
 
+// A random id kept on this phone, so the server finds this gun's zero
+// again after a reconnect or a restart (see zeroing.js). Null where
+// storage is unavailable: the server then falls back to the kind.
+function clientId() {
+  try {
+    let id = localStorage.getItem("boresight-client-id");
+    if (!id) {
+      const bytes = crypto.getRandomValues(new Uint8Array(8));
+      id = "phone-" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+      localStorage.setItem("boresight-client-id", id);
+    }
+    return id;
+  } catch {
+    return null;
+  }
+}
+
 // The server takes more than one kind of client now; without this its
 // logs and GET /sessions cannot say whether a session is this phone or
 // a camera inside a gun. Sends the size the camera granted, not the one
@@ -582,6 +599,8 @@ function helloMessage() {
   const track = state.stream && state.stream.getVideoTracks()[0];
   const settings = track ? track.getSettings() : {};
   const message = { type: "hello", client: "phone" };
+  const id = clientId();
+  if (id) message.id = id;
   if (Number.isInteger(settings.width) && Number.isInteger(settings.height)) {
     message.frame_size = [settings.width, settings.height];
   }
@@ -656,6 +675,8 @@ function onTelemetry(data) {
     return;
   }
   if (stats.type !== "stats") return;
+  // For the page's other scripts (zeroing.js), unthrottled.
+  document.dispatchEvent(new CustomEvent("boresight:stats", { detail: stats }));
 
   const now = performance.now();
 
