@@ -6,15 +6,21 @@ trigger can drag as well as click, while guaranteeing the server never
 leaves the button stuck down.
 
 ## Requirements
+
 ### Requirement: Trigger press and release messages hold the primary button
 The server SHALL treat `{"type": "trigger", "state": "down"}` on the
-frame WebSocket as pressing and holding the primary button at the
-cursor's current position, and `{"type": "trigger", "state": "up"}` as
-releasing it. Cursor movement produced by frames processed while the
-button is held SHALL move the cursor with the button still down, so the
-OS sees a drag. A `down` from a session already holding, or an `up` from
-a session not holding, SHALL have no effect. A trigger message whose
-`state` is present but neither `down` nor `up` SHALL be ignored.
+frame WebSocket as pressing and holding the primary button — at the
+cursor's current position, or, when the message carries `frame_ms`, at
+the aim point of the frame it names (see trigger-emission) — and
+`{"type": "trigger", "state": "up"}` as releasing it. Cursor movement
+produced by frames processed while the button is held SHALL move the
+cursor with the button still down, so the OS sees a drag. A `down` from
+a session already holding, or an `up` from a session not holding, SHALL
+have no effect. A trigger message whose `state` is present but neither
+`down` nor `up` SHALL be ignored. A session's trigger messages SHALL
+take effect in the order they were sent, so an `up` arriving while that
+session's `down` still waits for its frame SHALL release only after the
+press.
 
 #### Scenario: Press, move, release is a drag
 - **WHEN** a client sends `down`, then frames that move the aim point,
@@ -35,14 +41,23 @@ a session not holding, SHALL have no effect. A trigger message whose
 - **THEN** nothing is pressed, released or clicked, and the session
   continues
 
+#### Scenario: A quick tap waiting for its frame keeps its order
+- **WHEN** a client sends `down` naming a frame not yet processed,
+  immediately followed by `up`
+- **THEN** the button is pressed at that frame's aim point and then
+  released, in that order
+
 ### Requirement: A plain trigger message is still one click
 A trigger message without a `state` field SHALL keep its existing
-meaning: one click at the cursor's current position. Clients that never
-send `state` SHALL behave exactly as before this change.
+meaning: one click, at the cursor's current position or, when the
+message carries `frame_ms`, at the aim point of the frame it names (see
+trigger-emission). Clients that send neither `state` nor `frame_ms`
+SHALL behave exactly as before either field existed.
 
 #### Scenario: A legacy client still clicks
 - **WHEN** a client sends `{"type": "trigger"}`
-- **THEN** the backend clicks once and nothing is left held
+- **THEN** the backend clicks once, where the cursor is, and nothing is
+  left held
 
 ### Requirement: Holds from several sessions share one button
 The primary button SHALL be held while at least one session holds it and

@@ -18,6 +18,7 @@ place alongside printed markers as an alternative rather than a
 replacement.
 
 ## Requirements
+
 ### Requirement: Markers are drawn over the live display
 The system SHALL render the marker layout as tags drawn on top of
 whatever is already shown on the display, without altering, moving or
@@ -156,7 +157,9 @@ SHALL NOT install a graphical toolkit.
 The system SHALL let the marker layout source be selected by
 configuration, and SHALL continue to support a layout loaded from a
 file exactly as before. Choosing an on-screen layout SHALL NOT be
-required in order to use the rest of the system.
+required in order to use the rest of the system. A layout source that
+cannot be understood SHALL be rejected with an error that names the
+accepted forms.
 
 #### Scenario: A printed layout still works
 - **WHEN** the system is configured to use a layout loaded from a file
@@ -166,6 +169,12 @@ required in order to use the rest of the system.
 - **WHEN** the system is configured to use an on-screen layout
 - **THEN** the pipeline solves against the overlay's derived layout
   rather than a file
+
+#### Scenario: A file source with no path
+- **WHEN** the layout source is `file:` with nothing after the colon
+- **THEN** the system rejects it as a layout-source error that says a
+  path is needed (e.g. `file:markers.toml`) or that plain `file` selects
+  the default, rather than failing on a filesystem error
 
 ### Requirement: A manual margin can extend automatic panel avoidance
 The system SHALL accept a configurable extra margin that is subtracted

@@ -1,8 +1,12 @@
 # phone-client Specification
 
 ## Purpose
-TBD - created by archiving change add-phone-video-stream. Update Purpose after archive.
+The browser page the server serves to a phone: camera capture and
+streaming, the on-screen trigger, marker-source and overlay controls,
+and the telemetry that shows whether it is working.
+
 ## Requirements
+
 ### Requirement: The server serves a phone client requiring no installation
 The server SHALL serve a self-contained browser page that turns a phone
 into the barrel camera, requiring nothing installed on the phone beyond
@@ -347,3 +351,67 @@ server.
 #### Scenario: Acknowledged trigger count is displayed
 - **WHEN** the server reports a trigger count in a stats message
 - **THEN** the client updates the displayed count to match
+
+### Requirement: The client identifies itself when its connection opens
+The client SHALL send a `hello` control message identifying itself as a
+phone, with the capture resolution it was granted, each time its frame
+connection opens, including after a reconnect. With more than one kind
+of client able to connect, the server's logs and session listing are
+otherwise unable to say which device a session belongs to.
+
+#### Scenario: Hello is sent on connect
+- **WHEN** the client's frame connection opens
+- **THEN** it sends a `hello` message naming the client kind `phone` and
+  the granted capture resolution before or alongside its first frame
+
+#### Scenario: Hello is re-sent after a reconnect
+- **WHEN** the connection is re-established
+- **THEN** the client sends `hello` again on the new connection
+
+### Requirement: Frame timestamps mark the moment of capture
+The client SHALL stamp each frame with the time the camera captured it,
+taken from the browser's per-video-frame capture metadata where
+available and otherwise from the client's monotonic clock at the moment
+the frame is taken from the video element. The stamp SHALL NOT be taken
+after the frame has been encoded, since encoding time varies from frame
+to frame. The client SHALL NOT send a frame whose capture stamp equals
+that of the frame it sent before, since it is the same picture.
+
+#### Scenario: Encoding time does not enter the timestamp
+- **WHEN** the client captures a frame and JPEG encoding it takes a
+  variable amount of time
+- **THEN** the timestamp sent with the frame is the capture time, and is
+  unaffected by how long encoding took
+
+#### Scenario: The same camera frame is not sent twice
+- **WHEN** the capture timer fires again before the camera has
+  delivered a new frame
+- **THEN** the client sends nothing for that tick
+
+### Requirement: The trigger names the frame it was aimed with
+When the on-screen trigger is pressed, the client SHALL include in its
+`down` message a `frame_ms` field holding the timestamp of the latest
+frame it has sent on the current connection, so the server can fire at
+that frame's aim point rather than at the smoothed cursor. If no frame
+has been sent on the connection yet, the client SHALL omit the field.
+
+#### Scenario: A press names the latest sent frame
+- **WHEN** the client has sent frames and the player presses the
+  trigger
+- **THEN** the `down` message carries the timestamp of the most recent
+  frame sent
+
+#### Scenario: A press before any frame names none
+- **WHEN** the player presses the trigger before any frame has been
+  sent on the connection
+- **THEN** the `down` message carries no `frame_ms`
+
+### Requirement: The phone shows whether it drives the cursor
+The client SHALL display, alongside its other telemetry, whether this
+phone currently drives the cursor, another client does, or nobody does,
+from the `cursor` field of the server's stats messages, so a player
+whose aim is not moving the cursor can see why.
+
+#### Scenario: Another client has the cursor
+- **WHEN** the server's stats say `cursor` is `other`
+- **THEN** the page shows that another device is driving the cursor

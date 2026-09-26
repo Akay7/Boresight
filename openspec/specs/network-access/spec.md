@@ -1,8 +1,12 @@
 # network-access Specification
 
 ## Purpose
-TBD - created by archiving change add-phone-video-stream. Update Purpose after archive.
+Controls how the server is reached from other devices: the bind
+address, the shared token and its cookie, TLS and its certificate, and
+what startup prints so a phone or a device can be pointed at it.
+
 ## Requirements
+
 ### Requirement: The server can be reached from another device on the network
 The server SHALL accept a configurable bind address, and SHALL continue
 to default to loopback. A phone is a separate device and cannot reach
@@ -75,7 +79,11 @@ problem. The failure mode this prevents is severe and silent: an
 unauthenticated endpoint on the local network that moves the operator's
 mouse, reachable by anything that joins the Wi-Fi. Making it impossible
 to configure by accident is worth more than the convenience of allowing
-it.
+it. Importing the server module SHALL NOT build an application, so
+there is no pre-built, unvalidated application for an ASGI server to be
+pointed at by import path; an application is built only by the
+server's own entry point after its configuration has been validated, or
+by an explicit call to the application factory.
 
 #### Scenario: Non-loopback without a token fails at startup
 - **WHEN** the server is started bound to a non-loopback address with no
@@ -88,23 +96,75 @@ it.
 - **THEN** it starts normally, since the exposure the token protects
   against does not exist
 
+#### Scenario: Importing the server builds no application
+- **WHEN** the server module is imported
+- **THEN** no application object exists at module level, so an ASGI
+  server cannot be pointed at one that skipped configuration validation
+
 ### Requirement: The server can serve over TLS
 The server SHALL support serving over TLS with a supplied or generated
 certificate. This is not optional polish: browsers expose camera capture
 only in a secure context, and a LAN IP over plain HTTP is not one, so
 without TLS the phone client cannot access the camera at all. Where a
 certificate is generated rather than supplied, it SHALL be persisted and
-reused across restarts, so the phone's acceptance of it survives.
+reused across restarts, so the phone's acceptance of it survives — but
+only while it is still usable for the address the server now
+advertises. At startup a persisted generated certificate SHALL be
+checked, and SHALL be regenerated when it cannot be read, when its
+subject alternative names do not cover the advertised host (an IP
+address or a hostname), or when it has expired or will expire within a
+renewal window. A regenerated certificate SHALL cover the advertised
+host and SHALL keep a bounded number of the hosts the previous one
+covered, so moving between known networks does not replace it again.
+A regeneration SHALL be reported as a warning stating why it happened,
+that phones must accept the new certificate again, and that the
+certificate's SHA-256 fingerprint changed — naming the old and new
+values — so a device that pins the certificate (the ESP32-CAM) must be
+given the new one. A supplied certificate SHALL never be inspected,
+replaced or regenerated.
 
 #### Scenario: A generated certificate is reused across restarts
 - **WHEN** the server is started with TLS enabled and no certificate has
-  been supplied
+  been supplied, and started again with the same advertised host
 - **THEN** it generates one, persists it, and reuses the same
   certificate on subsequent starts rather than generating a new one
 
+#### Scenario: A certificate for a previous address is regenerated
+- **WHEN** a generated certificate was persisted while the server
+  advertised one address, and the server is started advertising a
+  different address the certificate does not cover
+- **THEN** it generates a new certificate covering the new address,
+  replaces the persisted one, and logs a warning that phones must accept
+  the certificate again and that the fingerprint changed from the old
+  value to the new one, which a pinning device must be updated with
+
+#### Scenario: Returning to a remembered address does not regenerate
+- **WHEN** a certificate was regenerated for a new address after
+  covering an earlier one, and the server is started advertising the
+  earlier address again
+- **THEN** the persisted certificate still covers it and is reused
+  unchanged
+
+#### Scenario: A hostname is covered by name
+- **WHEN** the server advertises a hostname rather than an IP address
+- **THEN** a generated certificate covers that hostname, and a persisted
+  certificate that does not name it is regenerated
+
+#### Scenario: An expiring certificate is regenerated
+- **WHEN** the persisted generated certificate has expired or is within
+  the renewal window of its expiry
+- **THEN** it is regenerated with a warning, even though it covers the
+  advertised host
+
+#### Scenario: An unreadable certificate is regenerated
+- **WHEN** the persisted certificate file cannot be parsed as a
+  certificate
+- **THEN** it is regenerated with a warning rather than failing startup
+
 #### Scenario: A supplied certificate is used as given
 - **WHEN** the server is started with a certificate and key supplied
-- **THEN** it serves TLS using them and generates nothing
+- **THEN** it serves TLS using them and generates nothing, whatever
+  address the certificate covers and whenever it expires
 
 ### Requirement: Startup reports the address the phone should open
 The server SHALL print, at startup, the complete URL a phone should
@@ -188,3 +248,28 @@ disclosure, to the operator at the console.
 - **WHEN** a request carries a token value that is not the configured
   token and the server logs it
 - **THEN** that value is likewise replaced with the placeholder
+
+### Requirement: Startup reports what a headless client must be configured with
+In addition to the phone URL, the server SHALL print at startup the
+connection details a client without a browser has to be configured
+with: the reachable address, the port, the frame socket path, whether
+TLS is on, and the token if one is configured. When TLS is on, it SHALL
+also print the path of the certificate in use and its SHA-256
+fingerprint, so the certificate embedded in a device can be checked
+against the one the server actually serves.
+
+#### Scenario: Plain-text connection details are printed
+- **WHEN** the server starts bound to a network-reachable address with a
+  token and without TLS
+- **THEN** it prints the address, port, frame socket path and token, and
+  states that TLS is off
+
+#### Scenario: The certificate fingerprint is printed under TLS
+- **WHEN** the server starts with TLS enabled
+- **THEN** it prints the certificate's path and SHA-256 fingerprint
+  alongside the connection details
+
+#### Scenario: The fingerprint is stable across restarts
+- **WHEN** the server is restarted with TLS enabled and a generated
+  certificate already persisted
+- **THEN** the printed fingerprint is identical to the previous start's

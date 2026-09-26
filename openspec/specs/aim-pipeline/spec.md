@@ -1,7 +1,10 @@
 # aim-pipeline Specification
 
 ## Purpose
-TBD - created by archiving change add-aim-pipeline. Update Purpose after archive.
+Turns one captured frame into a cursor position: detects the markers,
+pairs them with the marker map, solves the aim point, normalizes and
+clamps it, and emits it, statelessly, with optional debug geometry and
+a replay entry point for recorded sequences.
 ## Requirements
 ### Requirement: A single operation turns a frame into a cursor position
 The system SHALL provide one per-frame operation that takes a captured

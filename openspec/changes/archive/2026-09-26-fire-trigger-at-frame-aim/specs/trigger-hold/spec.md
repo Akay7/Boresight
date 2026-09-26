@@ -39,3 +39,15 @@ press.
   immediately followed by `up`
 - **THEN** the button is pressed at that frame's aim point and then
   released, in that order
+
+### Requirement: A plain trigger message is still one click
+A trigger message without a `state` field SHALL keep its existing
+meaning: one click, at the cursor's current position or, when the
+message carries `frame_ms`, at the aim point of the frame it names (see
+trigger-emission). Clients that send neither `state` nor `frame_ms`
+SHALL behave exactly as before either field existed.
+
+#### Scenario: A legacy client still clicks
+- **WHEN** a client sends `{"type": "trigger"}`
+- **THEN** the backend clicks once, where the cursor is, and nothing is
+  left held

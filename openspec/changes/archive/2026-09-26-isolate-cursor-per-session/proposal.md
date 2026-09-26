@@ -57,3 +57,16 @@ fight a player.
 - Supersedes the pending `add-aim-smoothing` and
   `add-aim-hold-on-dropout` design choice of one controller-wide filter
   and hold: both become per session.
+
+## Spec reconciliation (added at archive time)
+
+`add-aim-smoothing` and `add-aim-hold-on-dropout` were archived just
+before this change, so their requirements are now in `openspec/specs/`.
+This change's deltas therefore also modify `aim-hold` ("A brief dropout
+re-sends the last solved position": the hold is per session and reaches
+the cursor only through ownership) and `video-ingest` ("Streamed camera
+frames drive the aim pipeline" and "Streaming produces the same result
+as replaying the same frames": a streamed frame's move goes through the
+session's smoothing and ownership, and streaming is compared with
+replay on the solved positions reported, which is what
+`tests/test_stream_e2e.py` asserts).

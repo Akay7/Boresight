@@ -57,3 +57,19 @@ it just cannot tell which frame the shot belongs to.
 - Supersedes, for clients that send `frame_ms`, the pending
   `add-aim-smoothing` requirement "A trigger press fires at the smoothed
   position".
+
+## Spec reconciliation (added at archive time)
+
+`add-aim-smoothing`, archived just before this change, carried "A
+trigger press fires at the smoothed position". This change's
+`aim-smoothing` delta removes it and adds "A shot bypasses smoothing
+only when it names its frame", so the merged specs no longer say both
+that every shot fires at the smoothed cursor and that a named shot
+fires at its frame's unsmoothed aim.
+
+The review of the merged specs after archiving also found trigger-hold's
+"A plain trigger message is still one click" still saying such a click
+always fires where the cursor is. Its delta above now modifies it to
+allow for `frame_ms`, and the same text was applied to
+`openspec/specs/trigger-hold/spec.md` directly, since this change had
+already been archived.

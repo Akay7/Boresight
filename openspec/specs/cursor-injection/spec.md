@@ -1,7 +1,9 @@
 # cursor-injection Specification
 
 ## Purpose
-TBD - created by archiving change init-server-cursor-injection. Update Purpose after archive.
+Moves the OS cursor to an absolute position and presses, holds and
+releases its primary button, behind a backend interface that tests can
+replace and that fails fast when the device cannot be opened.
 ## Requirements
 ### Requirement: HTTP endpoint moves the OS cursor to an absolute position
 The FastAPI server SHALL expose an HTTP endpoint that accepts a target
