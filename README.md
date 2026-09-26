@@ -667,6 +667,17 @@ The certificate is self-signed, so the phone shows a warning the first
 time. It is generated once into `.boresight/` and reused, so accepting
 it is a one-time cost rather than a per-restart one.
 
+It is reused only while it still fits, though. At startup the server
+checks that the certificate covers the address it is about to print and
+is not within 30 days of expiry; if the PC's address changed (a new
+DHCP lease, another network) it generates a new one and logs a warning
+with the old and new SHA-256 fingerprints. Phones then show the warning
+once more, and an ESP32-CAM built with the old certificate needs the new
+one copied in and a reflash (see below). The new certificate keeps the
+last few addresses it covered, so moving back and forth between known
+networks does not replace it again. A `--certfile`/`--keyfile` you
+supply is never checked or replaced.
+
 ### Opening the port in the firewall
 
 Only for the Wi-Fi path. The USB path above needs no firewall change at
@@ -901,15 +912,18 @@ what stands in front of your mouse.
 With `--tls`, enable **Connect over TLS** in `menuconfig` and copy the
 server's certificate into the firmware before building:
 
-    cp .boresight/cert.pem firmware/boresight-cam/main/server_cert.pem
+    cp .boresight/server.crt firmware/boresight-cam/main/server_cert.pem
 
 The device trusts that certificate and no other: a different server
 fails the handshake before the token is sent. The server prints the
 certificate's SHA-256 under `sha256` at startup and the device logs the
 same figure at boot, so a certificate regenerated since the device was
 flashed shows up as two lines that do not match, rather than as a
-connection that just fails. One `--tls` server serves a phone and a
-device at the same time.
+connection that just fails. The server regenerates its certificate when
+the PC's address changes to one it has not covered before, and says so
+at startup; copy it in and reflash again then (a DHCP reservation for
+the PC avoids that). One `--tls` server serves a phone and a device at
+the same time.
 
 TLS costs the classic ESP32 a multi-second handshake and some heap; that
 is a one-off per connection, not per frame.

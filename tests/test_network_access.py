@@ -606,6 +606,202 @@ def test_a_supplied_certificate_is_used_as_given(tmp_path: Path) -> None:
     assert not (tmp_path / "unused").exists()
 
 
+def _san(certfile: Path) -> list[str]:
+    from cryptography import x509
+
+    certificate = x509.load_pem_x509_certificate(certfile.read_bytes())
+    names = certificate.extensions.get_extension_for_class(
+        x509.SubjectAlternativeName
+    ).value
+    return [str(name.value) for name in names]
+
+
+def _tls(host: str, cert_dir: Path) -> ServerConfig:
+    return ServerConfig(host=host, token=TOKEN, tls=True, cert_dir=cert_dir)
+
+
+def test_a_certificate_for_a_previous_address_is_regenerated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The PC's DHCP lease changed: the old certificate no longer matches
+    the URL being printed, and the phone would reject it however often
+    it was accepted before."""
+    from boresight.netaccess import certificate_fingerprint
+
+    certfile, _key = resolve_certificate(_tls("192.168.1.20", tmp_path))
+    old = certificate_fingerprint(certfile)
+
+    with caplog.at_level(logging.WARNING, logger="boresight"):
+        resolve_certificate(_tls("192.168.1.30", tmp_path))
+
+    new = certificate_fingerprint(certfile)
+    assert new != old
+    assert "192.168.1.30" in _san(certfile)
+    message = caplog.text
+    assert "does not cover 192.168.1.30" in message
+    assert "accept the certificate again" in message
+    assert old in message and new in message
+    assert "ESP32-CAM" in message
+
+
+def test_returning_to_a_remembered_address_does_not_regenerate(
+    tmp_path: Path,
+) -> None:
+    """Home, office, home: one regeneration per network, not per move."""
+    resolve_certificate(_tls("192.168.1.20", tmp_path))
+    certfile, _key = resolve_certificate(_tls("10.0.0.5", tmp_path))
+    remembered = certfile.read_bytes()
+
+    resolve_certificate(_tls("192.168.1.20", tmp_path))
+    resolve_certificate(_tls("10.0.0.5", tmp_path))
+
+    assert certfile.read_bytes() == remembered
+    assert _san(certfile)[:2] == ["10.0.0.5", "192.168.1.20"]
+
+
+def test_remembered_addresses_are_bounded(tmp_path: Path) -> None:
+    from boresight.netaccess import CERT_MAX_HOSTS
+
+    for last_octet in range(1, CERT_MAX_HOSTS + 3):
+        certfile, _key = resolve_certificate(_tls(f"10.0.0.{last_octet}", tmp_path))
+
+    san = _san(certfile)
+    newest = CERT_MAX_HOSTS + 2
+    assert san[0] == f"10.0.0.{newest}"
+    assert "10.0.0.1" not in san  # the oldest fell off first
+    assert len(san) == CERT_MAX_HOSTS + 2  # plus localhost and 127.0.0.1
+    assert {"localhost", "127.0.0.1"} <= set(san)
+
+
+def test_a_hostname_is_covered_by_name(tmp_path: Path) -> None:
+    certfile, _key = resolve_certificate(_tls("gamepc.local", tmp_path))
+    first = certfile.read_bytes()
+    assert "gamepc.local" in _san(certfile)
+
+    resolve_certificate(_tls("GamePC.local", tmp_path))  # names ignore case
+    assert certfile.read_bytes() == first
+
+    resolve_certificate(_tls("other.local", tmp_path))
+    assert "other.local" in _san(certfile)
+
+
+def test_an_expiring_certificate_is_regenerated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from boresight.netaccess import (
+        CERT_NAME,
+        CERT_RENEW_BEFORE_DAYS,
+        KEY_NAME,
+        _write_self_signed,
+    )
+
+    certfile, keyfile = tmp_path / CERT_NAME, tmp_path / KEY_NAME
+    _write_self_signed(
+        certfile, keyfile, ["192.168.1.20"], valid_days=CERT_RENEW_BEFORE_DAYS - 1
+    )
+    expiring = certfile.read_bytes()
+
+    with caplog.at_level(logging.WARNING, logger="boresight"):
+        resolve_certificate(_tls("192.168.1.20", tmp_path))
+
+    assert certfile.read_bytes() != expiring
+    assert "expires on" in caplog.text
+    assert "192.168.1.20" in _san(certfile)
+
+
+def test_an_expired_certificate_is_regenerated(tmp_path: Path) -> None:
+    from boresight.netaccess import CERT_NAME, KEY_NAME, _write_self_signed
+
+    certfile, keyfile = tmp_path / CERT_NAME, tmp_path / KEY_NAME
+    _write_self_signed(certfile, keyfile, ["192.168.1.20"], valid_days=0)
+    expired = certfile.read_bytes()
+
+    resolve_certificate(_tls("192.168.1.20", tmp_path))
+
+    assert certfile.read_bytes() != expired
+
+
+def test_an_unreadable_certificate_is_regenerated(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A truncated write must cost a regeneration, not a traceback."""
+    from boresight.netaccess import CERT_NAME, KEY_NAME
+
+    (tmp_path / CERT_NAME).write_text("-----BEGIN CERTIFICATE-----\ntrunc")
+    (tmp_path / KEY_NAME).write_text("junk")
+
+    with caplog.at_level(logging.WARNING, logger="boresight"):
+        certfile, _key = resolve_certificate(_tls("192.168.1.20", tmp_path))
+
+    assert "192.168.1.20" in _san(certfile)
+    assert "could not be read" in caplog.text
+
+
+def test_a_certificate_from_before_this_check_is_kept_when_it_fits(
+    tmp_path: Path,
+) -> None:
+    """Certificates already on disk put localhost first; that layout
+    must still read as covering its address."""
+    import datetime as dt
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    from boresight.netaccess import CERT_NAME, KEY_NAME
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "192.168.1.20")])
+    now = dt.datetime.now(dt.UTC)
+    san = [
+        x509.DNSName("localhost"),
+        x509.IPAddress(ipaddress.ip_address("192.168.1.20")),
+        x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+    ]
+    legacy = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + dt.timedelta(days=825))
+        .add_extension(x509.SubjectAlternativeName(san), critical=False)
+        .sign(key, hashes.SHA256())
+    ).public_bytes(serialization.Encoding.PEM)
+    (tmp_path / CERT_NAME).write_bytes(legacy)
+    (tmp_path / KEY_NAME).write_bytes(b"key")
+
+    certfile, _key = resolve_certificate(_tls("192.168.1.20", tmp_path))
+
+    assert certfile.read_bytes() == legacy
+
+
+def test_a_supplied_certificate_is_never_regenerated(tmp_path: Path) -> None:
+    """Even one for another address, or long expired: it is the
+    operator's, and the server has no business replacing it."""
+    from boresight.netaccess import _write_self_signed
+
+    certfile = tmp_path / "mine.crt"
+    keyfile = tmp_path / "mine.key"
+    _write_self_signed(certfile, keyfile, ["10.9.9.9"], valid_days=0)
+    supplied = certfile.read_bytes()
+    config = ServerConfig(
+        host="192.168.1.20",
+        token=TOKEN,
+        tls=True,
+        certfile=certfile,
+        keyfile=keyfile,
+        cert_dir=tmp_path / "unused",
+    )
+
+    assert resolve_certificate(config) == (certfile, keyfile)
+    assert certfile.read_bytes() == supplied
+    assert not (tmp_path / "unused").exists()
+
+
 # --- The phone-facing URL --------------------------------------------
 
 
