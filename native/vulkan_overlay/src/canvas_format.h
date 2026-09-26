@@ -75,6 +75,17 @@ typedef struct {
  * frames remain valid" requirement this exists to uphold. */
 int bsov_load(const char *path, bsov_canvas_t *out);
 
+/* Returns 1 if `canvas` may be drawn into an image of `width` x
+ * `height` -- the swapchain extent -- and 0 otherwise. It must be
+ * exactly that size (a canvas for any other size is a stale layout,
+ * and neither clamped nor scaled), hold pixels, and have every rect
+ * inside the extent by the same overflow-free rule `bsov_load` applies
+ * against the canvas. That last check is redundant after `bsov_load`
+ * and deliberate: this states, in terms of the image being written,
+ * the one property that makes each rect a valid vkCmdCopyImage region,
+ * so it holds for any canvas handed to it. NULL returns 0. */
+int bsov_fits_extent(const bsov_canvas_t *canvas, uint32_t width, uint32_t height);
+
 /* Frees the buffers `bsov_load` allocated. Safe to call on a
  * zero-initialized (never-loaded) canvas. */
 void bsov_free(bsov_canvas_t *canvas);

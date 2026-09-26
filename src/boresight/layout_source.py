@@ -43,10 +43,15 @@ def resolve_layout(spec: str = DEFAULT_SPEC) -> MarkerMap:
         return load_marker_map(DEFAULT_CONFIG_PATH)
 
     if spec.startswith("file:"):
-        path = Path(spec[len("file:") :])
-        if not path:
-            raise LayoutSourceError("file: needs a path, e.g. file:config/mine.toml")
-        return load_marker_map(path)
+        # Check the text, not a Path: Path("") is Path("."), which is
+        # truthy and would then fail as "Is a directory".
+        path_text = spec[len("file:") :].strip()
+        if not path_text:
+            raise LayoutSourceError(
+                "file: needs a path, e.g. file:markers.toml, "
+                "or use plain 'file' for the default"
+            )
+        return load_marker_map(Path(path_text))
 
     screen = _SCREEN.match(spec)
     if screen:

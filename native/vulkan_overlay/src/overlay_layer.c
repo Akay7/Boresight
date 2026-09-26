@@ -494,6 +494,21 @@ static bool try_setup_overlay(device_data_t *dd, swapchain_state_t *sc) {
         return false;
     }
 
+    /* Every rect below becomes a VkImageCopy into a swapchain image of
+     * sc->extent; this is the check that makes each one in bounds.
+     * bsov_load already bounds rects by the canvas, which the size
+     * check above equates with the extent, so this cannot fail today
+     * -- it is here so that guarantee lives in one tested place. */
+    if (!bsov_fits_extent(&canvas, sc->extent.width, sc->extent.height)) {
+        log_line(
+            "a marker rectangle in '%s' lies outside this swapchain's "
+            "%ux%u images; skipping the overlay for this swapchain.",
+            canvas_path, sc->extent.width, sc->extent.height
+        );
+        bsov_free(&canvas);
+        return false;
+    }
+
     VkPhysicalDeviceMemoryProperties mem_props;
     dd->instance->GetPhysicalDeviceMemoryProperties(dd->physical_device, &mem_props);
 
