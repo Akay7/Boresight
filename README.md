@@ -972,8 +972,10 @@ The server keeps each session's last 10 seconds of frames in memory
 a device with no screen — writes them, byte for byte, to
 `.boresight/recordings/<timestamp>/` with a fixture-style
 `manifest.json` (plus client timestamps, triggers and each frame's live
-result, and the session's lens and zero for reference) and the
-`markers.toml` in use. It replays like any fixture:
+result, and the session's lens and zero) and the `markers.toml` in
+use. It replays like any fixture, with the session's lens and zero
+applied so the track matches what was seen live (`--no-calibration`
+replays the raw camera aim):
 
     uv run python -m boresight.pipeline .boresight/recordings/<timestamp> --dry-run
 
