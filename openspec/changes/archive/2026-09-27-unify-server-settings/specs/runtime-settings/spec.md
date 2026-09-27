@@ -1,12 +1,4 @@
-# runtime-settings Specification
-
-## Purpose
-Lets the aim tuning and the operator's view preferences be adjusted
-while the server runs and kept across restarts in a settings file, with
-a predictable precedence between command-line flags, environment
-variables, that file and the built-in defaults.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Settings are read from a settings file
 The server SHALL read its settings from a TOML settings file, at
@@ -84,54 +76,6 @@ naming it.
 - **THEN** the server exits at startup with an error naming
   `BORESIGHT_REL_SCALE`
 
-### Requirement: Current settings can be read over the API
-The server SHALL answer `GET /settings` with the tuning values in
-effect, the view preferences in effect, each tuning value's allowed
-range, which settings are pinned by a flag or environment variable
-(naming it), whether the cursor backend supports a relative-motion
-scale, and the settings file path. Like every endpoint, it SHALL
-require the token when one is configured.
-
-#### Scenario: Reading settings reports ranges and pins
-- **WHEN** the server was started with `BORESIGHT_AIM_BETA=3.0` and a
-  client reads the settings
-- **THEN** the response carries a beta of 3.0, the allowed range for
-  every tuning value, and marks beta as pinned by `BORESIGHT_AIM_BETA`
-
-#### Scenario: Settings are not readable without the token
-- **WHEN** a token is configured and a client reads the settings
-  without presenting it
-- **THEN** the request is refused
-
-### Requirement: Tuning can be changed while the server runs
-The server SHALL accept a change to any subset of the tuning values on
-`POST /settings/tuning` and SHALL validate each against its allowed
-range on the server, refusing the whole request, and changing nothing,
-if any value is not a number or is outside its range. An accepted
-change SHALL take effect without a restart or reconnect: for every
-session, including those already streaming, from its next processed
-frame, and for the relative-motion scale, from the next cursor move.
-Changes arriving concurrently SHALL each be applied whole, never
-interleaved field by field. The response SHALL carry the settings now
-in effect. The allowed ranges SHALL be: `min_cutoff` 0.01–10 Hz,
-`beta` 0–10, `hold_s` 0–5 seconds, `rel_scale` 0–10000.
-
-#### Scenario: A running session picks up a new filter parameter
-- **WHEN** a session is streaming and a client changes `min_cutoff`
-- **THEN** the session's next processed frame is smoothed with the new
-  value, the session's existing smoothing state is kept, and its
-  connection is not interrupted
-
-#### Scenario: A partial change leaves the rest alone
-- **WHEN** a client posts only a new `hold_s`
-- **THEN** `hold_s` changes and every other tuning value keeps its
-  value
-
-#### Scenario: An out-of-range value is rejected
-- **WHEN** a client posts `beta = 50`
-- **THEN** the request is refused as invalid and no tuning value
-  changes
-
 ### Requirement: Settings in effect can be saved to the file
 On `POST /settings/save` the server SHALL write the tuning values and
 view preferences currently in effect to the settings file, creating its
@@ -173,50 +117,3 @@ leave the previous file intact.
 - **WHEN** the new file cannot be written
 - **THEN** the save is reported as failed and the previous file is
   unchanged
-
-### Requirement: Persisted view preferences are restored at startup
-At startup the server SHALL apply the saved view preferences: new
-sessions SHALL inherit the saved debug overlay setting, the overlay
-margin SHALL be the saved one, and where the saved marker source is
-on-screen, the server SHALL select on-screen markers without delaying
-startup. A selection that fails SHALL leave printed markers active and
-be logged, exactly as a failed selection from a client would.
-
-#### Scenario: On-screen markers come back after a restart
-- **WHEN** the file saves `view.marker_source = "screen"` and the
-  server starts where the overlay can run
-- **THEN** on-screen markers become active without any client selecting
-  them
-
-#### Scenario: A restore that fails leaves printed markers
-- **WHEN** the file saves `view.marker_source = "screen"` and the
-  overlay cannot start
-- **THEN** the server keeps serving with printed markers active and the
-  failure is logged
-
-### Requirement: The display is a view preference that can change live
-The view preferences SHALL include `display`, the chosen display's name
-(empty for the primary display), settable in the file, with `--display`,
-and over the API. `GET /displays` SHALL list the machine's displays with
-each one's name, desktop rectangle and whether it is primary, and the
-one in effect. `POST /display` SHALL apply a display to the cursor and
-the overlay without a restart; a display that cannot be applied SHALL be
-refused with a reason and change nothing. A display named in the file or
-flag that cannot be applied at startup SHALL stop the server with that
-reason. The chosen display SHALL be saved with the other view
-preferences.
-
-#### Scenario: Listing displays
-- **WHEN** a client requests `GET /displays` on a machine with two
-  monitors
-- **THEN** both are listed with name, rectangle and primary flag, and
-  the one in effect is named
-
-#### Scenario: Changing the display live
-- **WHEN** a client posts a listed display name to `/display`
-- **THEN** the cursor and any on-screen markers move to that display and
-  the response names it as in effect
-
-#### Scenario: The choice is saved
-- **WHEN** a client changes the display and saves settings
-- **THEN** the file's `view.display` holds that name

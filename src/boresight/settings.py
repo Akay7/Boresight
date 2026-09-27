@@ -1,15 +1,21 @@
 """Runtime settings: what they are, where they come from, and saving them.
 
-Two tables, both range-checked by one pydantic model each, so a value is
-validated the same way whether it came from the settings file, an
-environment variable, a command-line flag or the phone:
+Every setting the server takes, one table per concern, each range-checked
+by one pydantic model, so a value is validated the same way whether it
+came from the settings file, an environment variable, a command-line
+flag or the phone:
+
+- `[server]`, `[markers]`, `[detection]` and `[recording]` are read at
+  startup only: the address, token and TLS, the marker layout, the
+  tracker's thresholds and the recording window. Edited by hand.
 
 - `[tuning]` shapes how aim feels: the one-euro filter's `min_cutoff`
   and `beta` (`one_euro.py`), the dropout hold window (`aim_hold.py`)
   and the relative-motion scale (`inject.py`). All tuned by feel, which
   is why they can be changed while the server runs.
 - `[view]` is what the phone would otherwise lose on a restart: the
-  debug overlay default, the marker source and the overlay margin.
+  debug overlay default, the marker source, the overlay margin and the
+  display the gun aims at.
 
 Each value is resolved once, at startup, in decreasing precedence:
 command-line flag, environment variable, settings file, built-in
@@ -37,6 +43,16 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from boresight.detect import (
+    COARSE_BACKOFF_FRAMES,
+    COARSE_MIN_SIDE_PX,
+    FULL_PASS_EVERY_FRAMES,
+    TrackerOptions,
+)
+from boresight.layout_source import DEFAULT_SPEC
+from boresight.netaccess import DEFAULT_HOST, DEFAULT_PORT
+from boresight.recording import DEFAULT_RECORD_MAX_BYTES, DEFAULT_RECORD_SECONDS
 
 STATE_DIR = Path(".boresight")
 DEFAULT_SETTINGS_PATH = STATE_DIR / "config.toml"
@@ -100,18 +116,76 @@ class ViewPreferences(BaseModel):
     debug: bool = False
     marker_source: Literal["printed", "screen"] = "printed"
     overlay_extra_margin_px: int = Field(0, ge=0, le=OVERLAY_MARGIN_MAX_PX)
+    # The display the gun aims at, by output name; empty for the
+    # primary display (`displays.py`).
+    display: str = Field("", max_length=128)
+
+
+class ServerOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    host: str = DEFAULT_HOST
+    port: int = Field(DEFAULT_PORT, ge=1, le=65535)
+    # A secret, like the TLS key beside this file in `.boresight/`.
+    token: str | None = Field(None, min_length=1)
+    token_auto: bool = False
+    tls: bool = False
+    # Paths as written; relative ones resolve against the working
+    # directory, as they would on the command line.
+    certfile: str | None = None
+    keyfile: str | None = None
+    qr: bool = True
+
+
+class MarkerOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    # 'file', 'file:<path>' or 'screen:<W>x<H>' (`layout_source.py`).
+    layout: str = DEFAULT_SPEC
+
+
+class DetectionOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    # Off: every frame gets the full-resolution search.
+    tracked: bool = True
+    coarse_min_side_px: float = Field(COARSE_MIN_SIDE_PX, ge=1.0, le=10000.0)
+    full_pass_every: int = Field(FULL_PASS_EVERY_FRAMES, ge=1, le=10000)
+    backoff_frames: int = Field(COARSE_BACKOFF_FRAMES, ge=0, le=10000)
+
+    def tracker(self) -> TrackerOptions | None:
+        if not self.tracked:
+            return None
+        return TrackerOptions(
+            min_side_px=self.coarse_min_side_px,
+            full_pass_every=self.full_pass_every,
+            backoff_frames=self.backoff_frames,
+        )
+
+
+class RecordingOptions(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    # Zero disables recording.
+    seconds: float = Field(DEFAULT_RECORD_SECONDS, ge=0.0, le=3600.0)
+    max_mb: float = Field(DEFAULT_RECORD_MAX_BYTES / (1024 * 1024), ge=0.0, le=65536.0)
 
 
 class Settings(BaseModel):
     # Unknown top-level tables are someone else's.
     model_config = ConfigDict(frozen=True, extra="ignore")
 
+    server: ServerOptions = Field(default_factory=ServerOptions)
+    markers: MarkerOptions = Field(default_factory=MarkerOptions)
+    detection: DetectionOptions = Field(default_factory=DetectionOptions)
+    recording: RecordingOptions = Field(default_factory=RecordingOptions)
     tuning: Tuning = Field(default_factory=Tuning)
     view: ViewPreferences = Field(default_factory=ViewPreferences)
 
 
-# Where a value can be pinned from, by dotted key. The overlay margin has
-# a flag and never had an environment variable.
+# Where a value can be pinned from, by dotted key. Only the tuning
+# values ever had environment variables; every setting that was a
+# command-line option still is one.
 ENV_VARS: dict[str, str] = {
     "tuning.min_cutoff": "BORESIGHT_AIM_MIN_CUTOFF",
     "tuning.beta": "BORESIGHT_AIM_BETA",
@@ -124,6 +198,19 @@ CLI_FLAGS: dict[str, str] = {
     "tuning.hold_s": "--aim-hold-s",
     "tuning.rel_scale": "--rel-scale",
     "view.overlay_extra_margin_px": "--overlay-extra-margin-px",
+    "view.display": "--display",
+    "server.host": "--host",
+    "server.port": "--port",
+    "server.token": "--token",
+    "server.token_auto": "--token-auto",
+    "server.tls": "--tls",
+    "server.certfile": "--certfile",
+    "server.keyfile": "--keyfile",
+    "server.qr": "--qr",
+    "markers.layout": "--markers",
+    "detection.tracked": "--tracked-detection",
+    "recording.seconds": "--record-seconds",
+    "recording.max_mb": "--record-max-mb",
 }
 
 
@@ -172,7 +259,7 @@ def resolve_settings(
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
             raise SettingsError(f"settings file {path}: {error}") from error
     data = {
-        table: file_data[table] for table in ("tuning", "view") if table in file_data
+        table: file_data[table] for table in Settings.model_fields if table in file_data
     }
     for table, value in data.items():
         if not isinstance(value, dict):

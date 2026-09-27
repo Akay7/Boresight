@@ -20,6 +20,7 @@ from boresight.inject import FakeCursorBackend
 from boresight.marker_source import MarkerSource, MarkerSourceController
 from boresight.netaccess import ServerConfig
 from boresight.server import FRAME_SOCKET_PATH, create_app
+from boresight.settings import LiveSettings, Settings, ViewPreferences
 from boresight.stream import pack_frame
 
 VIDEO_DIR = Path(__file__).parent / "fixtures" / "synthetic_video"
@@ -230,15 +231,17 @@ def test_request_content_never_reaches_the_child_command(backend) -> None:
         ]
 
 
-def test_the_display_index_comes_from_startup_not_the_request(backend) -> None:
-    app = create_app(backend_factory=lambda: backend, display=1)
+def test_the_startup_display_reaches_the_cursor_and_the_overlay(backend) -> None:
+    settings = LiveSettings(Settings(view=ViewPreferences(display="FAKE-2")))
+    app = create_app(backend_factory=lambda: backend, settings=settings)
     launch = _launcher(REPORTS)
 
     with TestClient(app) as client:
         client.app.state.markers._launcher = launch  # noqa: SLF001
         client.post("/markers/source", json={"source": "screen"})
 
-    assert launch.started[0][-2:] == ["--display", "1"]
+    assert backend.display.name == "FAKE-2"
+    assert launch.started[0][-1] == "--display=FAKE-2"
 
 
 def test_the_default_launcher_is_the_real_one() -> None:

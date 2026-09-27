@@ -319,10 +319,8 @@ pointer on Linux, `SendInput` with `MOUSEEVENTF_ABSOLUTE |
 MOUSEEVENTF_VIRTUALDESK` on Windows (`inject_win32.py`), and Quartz
 `CGEvent`s on macOS (`inject_darwin.py`), both over plain `ctypes`.
 The Windows and macOS backends are unit-tested against fakes but not
-yet run on real hardware. On those two the cursor maps onto the primary
-display; on a multi-monitor desktop set `BORESIGHT_CURSOR_RECT=x,y,w,h`
-(pixels on Windows, points on macOS, in desktop coordinates) to the
-monitor the markers surround. macOS needs the Accessibility permission
+yet run on real hardware. The cursor maps onto the primary display
+unless you [choose another](#choosing-the-display). macOS needs the Accessibility permission
 for the terminal (or Python) that starts the server; without it the
 server refuses to start and says where to grant it. Zero added latency,
 works with emulators. Some fullscreen-exclusive titles ignore synthetic events —
@@ -653,6 +651,66 @@ backend from `app.state.cursor_backend`, so an explicit requested
 coordinate always lands exactly, never smoothed toward wherever
 aim-derived movement last left the filter.
 
+### The settings file
+
+Every option lives in `.boresight/config.toml` (another path with
+`--config`); a flag given on the command line overrides its key for
+that run, and `uv run boresight --help` lists them by table. Everything
+is optional:
+
+```toml
+[server]
+host = "0.0.0.0"        # --host
+port = 7331             # --port
+token = "..."           # --token; a secret, like the TLS key beside it
+token_auto = false      # --token-auto / --no-token-auto
+tls = true              # --tls / --no-tls
+qr = true               # --qr / --no-qr
+# certfile, keyfile     # --certfile, --keyfile
+
+[markers]
+layout = "file"         # --markers: file, file:<path>, screen:<W>x<H>
+
+[detection]
+tracked = true          # --tracked-detection / --full-frame-detection
+coarse_min_side_px = 36 # half-size search only while markers are this big
+full_pass_every = 10    # a full search at least this often, in frames
+backoff_frames = 10     # full searches after a half-size miss
+
+[recording]
+seconds = 10            # --record-seconds; 0 disables
+max_mb = 64             # --record-max-mb
+
+[view]
+display = "HDMI-A-1"    # --display; see "Choosing the display"
+
+[tuning]                # below; changed live from the phone
+```
+
+A bad value, in the file or a flag, stops the server with a message
+naming it. The phone saves only `[tuning]` and `[view]`; the other
+tables are yours and are kept as written (comments are not). Lens and
+zeroing results are measurements rather than settings and live beside
+it in `lenses.json` and `zeroing.json`.
+
+### Choosing the display
+
+On a desk with several monitors, pick the one the gun aims at in the
+phone's **Aim tuning** panel, or with `view.display` / `--display`. It
+applies to the cursor and the on-screen markers together, takes effect
+at once, and is saved with the other settings. Displays go by output
+name (`GET /displays` lists them: `HDMI-A-1`, `\\.\DISPLAY2`, a number on
+macOS); none chosen means the primary one.
+
+Windows and macOS map the cursor onto that monitor directly. On Linux
+the compositor decides where the cursor device lands, so Boresight asks
+it to pin the `boresight-cursor` tablet to the output: through KWin on
+KDE Plasma (which may save it in `~/.config/kcminputrc`, as System
+Settings would) and with `xinput map-to-output` on X11. Other Wayland
+desktops (GNOME, sway, …) have no interface for this; map the
+`boresight-cursor` tablet in their own tablet settings instead. With no
+display chosen, nothing is pinned.
+
 ### Tuning: less lag or less jitter
 
 Tuned by feel, not measurement, so the phone's **Aim tuning** panel
@@ -684,8 +742,8 @@ leaves the file's own value alone.
 The file also keeps the phone's `[view]` choices — marker source,
 overlay margin, debug overlay — which otherwise reset on a restart;
 saved on-screen markers are started again in the background at startup.
-It is machine-written (comments are not kept); tables the server does
-not know are left as they are. Over HTTP: `GET /settings`, `POST
+Saving rewrites the file (comments are not kept); every other table is
+left as it was. Over HTTP: `GET /settings`, `POST
 /settings/tuning` (any subset, range-checked, 422 otherwise) and `POST
 /settings/save`, all behind the token like everything else.
 
@@ -972,8 +1030,10 @@ The server keeps each session's last 10 seconds of frames in memory
 a device with no screen — writes them, byte for byte, to
 `.boresight/recordings/<timestamp>/` with a fixture-style
 `manifest.json` (plus client timestamps, triggers and each frame's live
-result, and the session's lens and zero for reference) and the
-`markers.toml` in use. It replays like any fixture:
+result, and the session's lens and zero) and the `markers.toml` in
+use. It replays like any fixture, with the session's lens and zero
+applied so the track matches what was seen live (`--no-calibration`
+replays the raw camera aim):
 
     uv run python -m boresight.pipeline .boresight/recordings/<timestamp> --dry-run
 

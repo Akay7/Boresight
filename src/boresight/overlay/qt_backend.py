@@ -179,8 +179,23 @@ def _area_px(geometry, available, extra_margin_px: int) -> tuple[int, int, int, 
     )
 
 
+def _pick_screen(screens, primary, display: int | str | None):
+    """The screen named or numbered `display`, or `primary` for None."""
+    if display is None or display == "":
+        return primary
+    if isinstance(display, int):
+        if 0 <= display < len(screens):
+            return screens[display]
+        raise SystemExit(f"no display {display}; this machine reports {len(screens)}")
+    for screen in screens:
+        if screen.name() == display:
+            return screen
+    names = ", ".join(screen.name() for screen in screens)
+    raise SystemExit(f"no display {display!r}; this machine has: {names}")
+
+
 def run(
-    screen_index: int | None = None,
+    display: int | str | None = None,
     tag_px: int | None = None,
     inset_px: int | None = None,
     report_only: bool = False,
@@ -189,9 +204,9 @@ def run(
 ) -> int:
     """Show the overlay and run the Qt event loop until interrupted.
 
-    `screen_index` of None means the primary display, which is what a
-    single-monitor machine wants and what a multi-monitor one most
-    likely wants.
+    `display` is a screen's output name (`QScreen.name()`, the same
+    name the server lists and pins the cursor to) or its index; None
+    means the primary display.
 
     `report_only` reports the geometry that would be used and exits
     without mapping a window -- enough for a parent to learn the display
@@ -215,15 +230,7 @@ def run(
     QtCore, QtGui, QtWidgets = require_toolkit()
 
     app = QtWidgets.QApplication([])
-    screens = app.screens()
-    if screen_index is None:
-        screen = app.primaryScreen()
-    elif 0 <= screen_index < len(screens):
-        screen = screens[screen_index]
-    else:
-        raise SystemExit(
-            f"no display {screen_index}; this machine reports {len(screens)}"
-        )
+    screen = _pick_screen(app.screens(), app.primaryScreen(), display)
     geometry = screen.geometry()
     screen_px = (geometry.width(), geometry.height())
 

@@ -40,7 +40,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from boresight.detect import Detector, MarkerTracker, detect_markers
+from boresight.detect import Detector, MarkerTracker, TrackerOptions, detect_markers
 from boresight.inject import CursorBackend
 from boresight.lens import LensModel
 from boresight.marker_map import MarkerMap
@@ -226,6 +226,15 @@ def _to_image_px(homography: np.ndarray, points_mm: Sequence[Point]) -> list[Poi
     return [(float(x), float(y)) for x, y in projected[:, 0, :]]
 
 
+def tracker_options(tracking: TrackerOptions | bool | None) -> TrackerOptions | None:
+    """`True` is the default options and `False` no tracking at all."""
+    if tracking is True:
+        return TrackerOptions()
+    if tracking is False:
+        return None
+    return tracking
+
+
 class AimPipeline:
     """Detection, marker lookup, solving, and emission for one frame.
 
@@ -240,12 +249,13 @@ class AimPipeline:
         marker_map: MarkerMap,
         backend: CursorBackend,
         detector: Detector = detect_markers,
-        tracking: bool = True,
+        tracking: TrackerOptions | bool | None = True,
     ) -> None:
         self._map = marker_map
         self._backend = backend
         self._detect = detector
-        self._tracking = tracking
+        # None: every frame gets the full search. True is the defaults.
+        self._tracking = tracker_options(tracking)
 
     def session_detector(self) -> Detector:
         """A new detector for one session to pass to `process_frame`.
@@ -255,8 +265,13 @@ class AimPipeline:
         test's stub has no image to track, and the tracker would bypass
         it on every frame its own search trusted.
         """
-        if self._tracking and self._detect is detect_markers:
-            return MarkerTracker()
+        if self._tracking is not None and self._detect is detect_markers:
+            options = self._tracking
+            return MarkerTracker(
+                min_side_px=options.min_side_px,
+                full_pass_every=options.full_pass_every,
+                backoff_frames=options.backoff_frames,
+            )
         return self._detect
 
     @property
@@ -445,7 +460,48 @@ class AimPipeline:
         )
 
 
-def replay(frames_dir: str | Path, pipeline: AimPipeline) -> list[FrameResult]:
+@dataclass(frozen=True)
+class ReplayCalibration:
+    """The lens and zero a recorded session aimed with, if any.
+
+    `skipped` names whatever the manifest held but could not be read,
+    so a caller can say what the replay left out.
+    """
+
+    lens: LensModel | None = None
+    zero: Zero | None = None
+    skipped: tuple[str, ...] = ()
+
+
+def replay_calibration(manifest: dict) -> ReplayCalibration:
+    """The calibration stored in a recording's manifest.
+
+    Fixture sequences carry no `recording` block and get none. A stored
+    value that does not parse is skipped, not fatal: replay is for
+    debugging, and a hand-edited manifest should still play.
+    """
+    recording = manifest.get("recording")
+    session = recording.get("session") if isinstance(recording, dict) else None
+    if not isinstance(session, dict):
+        return ReplayCalibration()
+    lens = zero = None
+    skipped = []
+    if session.get("lens") is not None:
+        try:
+            lens = LensModel.from_dict(session["lens"])
+        except (KeyError, TypeError, ValueError):
+            skipped.append("lens")
+    if session.get("zero") is not None:
+        try:
+            zero = Zero.from_dict(session["zero"])
+        except (TypeError, ValueError):
+            skipped.append("zero")
+    return ReplayCalibration(lens, zero, tuple(skipped))
+
+
+def replay(
+    frames_dir: str | Path, pipeline: AimPipeline, *, calibrated: bool = True
+) -> list[FrameResult]:
     """Run a recorded frame sequence through the pipeline, in order.
 
     Takes a built pipeline rather than a bare backend so the marker map
@@ -457,10 +513,14 @@ def replay(frames_dir: str | Path, pipeline: AimPipeline) -> list[FrameResult]:
     A sequence is one session's worth of frames, so it is detected
     through one session detector and read straight to greyscale, as the
     server decodes a stream -- replaying a stream's frames must give
-    what streaming them gave.
+    what streaming them gave. For the same reason a recording's own lens
+    and zero are applied as the session applied them: the zero to every
+    frame, the lens only to frames of the size it was calibrated at.
+    `calibrated=False` replays without either, for comparison.
     """
     frames_dir = Path(frames_dir)
     manifest = json.loads((frames_dir / "manifest.json").read_text())
+    calibration = replay_calibration(manifest) if calibrated else ReplayCalibration()
 
     detector = pipeline.session_detector()
     results = []
@@ -469,7 +529,15 @@ def replay(frames_dir: str | Path, pipeline: AimPipeline) -> list[FrameResult]:
         frame = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if frame is None:
             raise FileNotFoundError(f"could not read frame {path}")
-        results.append(pipeline.process_frame(frame, detector=detector))
+        height, width = frame.shape[:2]
+        lens = calibration.lens
+        if lens is not None and tuple(lens.image_size) != (width, height):
+            lens = None
+        results.append(
+            pipeline.process_frame(
+                frame, detector=detector, lens=lens, zero=calibration.zero
+            )
+        )
     return results
 
 
@@ -494,6 +562,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="marker layout TOML (default: the directory's own markers.toml "
         f"if it has one, as a saved recording does, else {DEFAULT_CONFIG_PATH})",
+    )
+    parser.add_argument(
+        "--no-calibration",
+        action="store_true",
+        help="ignore the lens and zero a recording was made with, and "
+        "replay the raw camera aim",
     )
     parser.add_argument(
         "--dry-run",
@@ -522,7 +596,22 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         backend = default_cursor_backend()
 
-    results = replay(args.frames_dir, AimPipeline(marker_map, backend))
+    calibrated = not args.no_calibration
+    if calibrated:
+        manifest = json.loads((Path(args.frames_dir) / "manifest.json").read_text())
+        calibration = replay_calibration(manifest)
+        applied = [
+            name
+            for name, value in (("lens", calibration.lens), ("zero", calibration.zero))
+            if value is not None
+        ]
+        if applied:
+            print(f"applying the recording's {' and '.join(applied)}")
+        for name in calibration.skipped:
+            print(f"skipping the recording's {name}: it could not be read")
+    results = replay(
+        args.frames_dir, AimPipeline(marker_map, backend), calibrated=calibrated
+    )
 
     for index, result in enumerate(results, start=1):
         if result.outcome is FrameOutcome.SOLVED:

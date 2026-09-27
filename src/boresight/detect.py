@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -71,6 +72,19 @@ FULL_PASS_EVERY_FRAMES = 10
 # images the coarse pass keeps failing on then costs one wasted coarse
 # pass per this many frames rather than one per frame.
 COARSE_BACKOFF_FRAMES = 10
+
+
+@dataclass(frozen=True)
+class TrackerOptions:
+    """How a session's `MarkerTracker` decides between its two passes.
+
+    The settings file's `[detection]` table, so a camera the defaults
+    suit badly can be tuned without editing code.
+    """
+
+    min_side_px: float = COARSE_MIN_SIDE_PX
+    full_pass_every: int = FULL_PASS_EVERY_FRAMES
+    backoff_frames: int = COARSE_BACKOFF_FRAMES
 
 
 class DetectedMarker:

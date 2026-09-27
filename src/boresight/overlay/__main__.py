@@ -9,6 +9,10 @@ from collections.abc import Sequence
 from boresight.overlay.backend import OverlayUnavailableError
 
 
+def _display(value: str) -> int | str:
+    return int(value) if value.isdigit() else value
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m boresight.overlay",
@@ -24,9 +28,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--display",
-        type=int,
+        type=_display,
         default=None,
-        help="display index (default: the primary display)",
+        help="display name, as the server lists it (e.g. HDMI-A-1), or "
+        "index (default: the primary display)",
     )
     parser.add_argument(
         "--tag-px",

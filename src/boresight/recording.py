@@ -341,8 +341,8 @@ def save_recording(
             "omitted_frames": omitted,
             "client": snapshot.client or None,
             "marker_source": marker_source,
-            # The session's lens and zero when saved. Context for a
-            # reader: `pipeline.replay()` does not apply them yet.
+            # The session's lens and zero when saved, which
+            # `pipeline.replay()` applies so the replay aims as live did.
             "session": session,
             "layout_file": "markers.toml",
         },

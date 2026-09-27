@@ -21,8 +21,10 @@ from boresight.inject import (
     DEFAULT_REL_SCALE,
     CursorBackendUnavailable,
     Rect,
-    cursor_rect_override,
 )
+
+# More than any desk will have; CGGetActiveDisplayList fills up to this.
+MAX_DISPLAYS = 32
 
 # CGEventType
 kCGEventLeftMouseDown = 1
@@ -67,6 +69,8 @@ class QuartzApi(Protocol):
     def can_post_events(self) -> bool: ...
     def request_post_events(self) -> None: ...
     def main_display_bounds(self) -> Rect: ...
+    # (display ID, bounds in global points, main) for each active display.
+    def displays(self) -> list[tuple[int, Rect, bool]]: ...
     def cursor_location(self) -> tuple[float, float]: ...
     def post_mouse_event(
         self, event_type: int, x: float, y: float, fields: dict[int, int]
@@ -111,6 +115,12 @@ class CoreGraphicsApi:
         cg.CGMainDisplayID.restype = ctypes.c_uint32
         cg.CGDisplayBounds.argtypes = [ctypes.c_uint32]
         cg.CGDisplayBounds.restype = CGRect
+        cg.CGGetActiveDisplayList.argtypes = [
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32),
+        ]
+        cg.CGGetActiveDisplayList.restype = ctypes.c_int32
         cf.CFRelease.argtypes = [ctypes.c_void_p]
         cf.CFRelease.restype = None
         self._cg = cg
@@ -140,10 +150,24 @@ class CoreGraphicsApi:
             request()
 
     def main_display_bounds(self) -> Rect:
-        bounds = self._cg.CGDisplayBounds(self._cg.CGMainDisplayID())
+        return self._bounds(self._cg.CGMainDisplayID())
+
+    def _bounds(self, display_id: int) -> Rect:
+        bounds = self._cg.CGDisplayBounds(display_id)
         return Rect(
             bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height
         )
+
+    def displays(self) -> list[tuple[int, Rect, bool]]:
+        ids = (ctypes.c_uint32 * MAX_DISPLAYS)()
+        count = ctypes.c_uint32(0)
+        if self._cg.CGGetActiveDisplayList(MAX_DISPLAYS, ids, ctypes.byref(count)):
+            return []
+        main = self._cg.CGMainDisplayID()
+        return [
+            (ids[index], self._bounds(ids[index]), ids[index] == main)
+            for index in range(count.value)
+        ]
 
     def cursor_location(self) -> tuple[float, float]:
         event = self._cg.CGEventCreate(None)
@@ -185,8 +209,6 @@ class QuartzCursorBackend:
         if not self._api.can_post_events():
             self._api.request_post_events()
             raise CursorBackendUnavailable(ACCESSIBILITY_HINT)
-        if target is None:
-            target = cursor_rect_override()
         # Global display coordinates, in points: the main display's
         # top-left is the origin, and others sit at their arranged
         # offsets, negative ones included.
@@ -197,6 +219,19 @@ class QuartzCursorBackend:
         # press or release is posted there.
         self._location: tuple[float, float] | None = None
         self._held = False
+
+    def displays(self) -> list:
+        from boresight.displays import Display
+
+        # macOS has no output names; the display ID is stable while the
+        # display stays connected, which is what a choice needs.
+        return [
+            Display(str(display_id), rect, main)
+            for display_id, rect, main in self._api.displays()
+        ]
+
+    def show_on(self, display) -> None:
+        self._target = display.rect
 
     @property
     def rel_scale(self) -> float:
