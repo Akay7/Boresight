@@ -18,7 +18,6 @@ from boresight import inject
 from boresight.inject import (
     CursorBackendUnavailable,
     Rect,
-    cursor_rect_override,
     default_cursor_backend,
 )
 from boresight.inject_darwin import (
@@ -50,11 +49,6 @@ from boresight.inject_win32 import (
 ABSOLUTE_MOVE = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
 
 
-@pytest.fixture(autouse=True)
-def no_environment_overrides(monkeypatch):
-    monkeypatch.delenv("BORESIGHT_CURSOR_RECT", raising=False)
-
-
 PRIMARY = Rect(0, 0, 1920, 1080)
 MAIN_DISPLAY = Rect(0, 0, 1440, 900)
 
@@ -71,21 +65,6 @@ def test_rect_maps_the_unit_square_onto_first_and_last_pixel() -> None:
     rect = Rect(100, 50, 1920, 1080)
     assert rect.point(0.0, 0.0) == (100, 50)
     assert rect.point(1.0, 1.0) == (100 + 1919, 50 + 1079)
-
-
-def test_cursor_rect_unset_is_none() -> None:
-    assert cursor_rect_override({}) is None
-
-
-def test_cursor_rect_parses_x_y_width_height() -> None:
-    rect = cursor_rect_override({"BORESIGHT_CURSOR_RECT": "-1280,0,1280,1024"})
-    assert rect == Rect(-1280, 0, 1280, 1024)
-
-
-@pytest.mark.parametrize("raw", ["wide", "1,2,3", "0,0,0,100", "0,0,nan,100"])
-def test_a_malformed_cursor_rect_names_the_expected_form(raw: str) -> None:
-    with pytest.raises(CursorBackendUnavailable, match="x,y,width,height"):
-        cursor_rect_override({"BORESIGHT_CURSOR_RECT": raw})
 
 
 @pytest.mark.parametrize(
@@ -141,6 +120,12 @@ class FakeWin32Api:
     def virtual_screen(self) -> Rect:
         self.metrics_read_before_dpi |= not self.dpi_aware
         return self.desktop
+
+    def monitors(self) -> list[tuple[str, Rect, bool]]:
+        return [
+            ("\\\\.\\DISPLAY1", self.primary, True),
+            ("\\\\.\\DISPLAY2", Rect(-1280, 0, 1280, 1024), False),
+        ]
 
     def send_input(self, inputs) -> int:
         for item in inputs:
@@ -211,12 +196,11 @@ def test_the_primary_monitor_is_the_default_target_on_a_wider_desktop() -> None:
     assert windows_pixel(y1, 0, 1080) == 1079
 
 
-def test_a_configured_rect_reaches_a_monitor_left_of_the_primary(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("BORESIGHT_CURSOR_RECT", "-1280,0,1280,1024")
+def test_a_chosen_monitor_left_of_the_primary_is_reached() -> None:
     api = FakeWin32Api(desktop=Rect(-1280, 0, 3200, 1080))
     backend = Win32CursorBackend(api)
+    left = next(d for d in backend.displays() if d.name == "\\\\.\\DISPLAY2")
+    backend.show_on(left)
 
     backend.move_absolute(0.0, 0.0)
     backend.move_absolute(1.0, 0.5)
@@ -341,6 +325,9 @@ class FakeQuartzApi:
     def main_display_bounds(self) -> Rect:
         return self.display
 
+    def displays(self) -> list[tuple[int, Rect, bool]]:
+        return [(1, self.display, True), (2, Rect(-1920, -200, 1920, 1080), False)]
+
     def cursor_location(self) -> tuple[float, float]:
         return self.cursor
 
@@ -382,10 +369,10 @@ def test_a_mac_move_lands_in_global_points_of_the_main_display() -> None:
     ]
 
 
-def test_a_configured_rect_places_a_secondary_display(monkeypatch) -> None:
-    monkeypatch.setenv("BORESIGHT_CURSOR_RECT", "-1920,-200,1920,1080")
+def test_a_chosen_display_places_a_secondary_display() -> None:
     api = FakeQuartzApi()
     backend = QuartzCursorBackend(api)
+    backend.show_on(next(d for d in backend.displays() if d.name == "2"))
 
     backend.move_absolute(0.0, 0.0)
 

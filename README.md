@@ -319,10 +319,8 @@ pointer on Linux, `SendInput` with `MOUSEEVENTF_ABSOLUTE |
 MOUSEEVENTF_VIRTUALDESK` on Windows (`inject_win32.py`), and Quartz
 `CGEvent`s on macOS (`inject_darwin.py`), both over plain `ctypes`.
 The Windows and macOS backends are unit-tested against fakes but not
-yet run on real hardware. On those two the cursor maps onto the primary
-display; on a multi-monitor desktop set `BORESIGHT_CURSOR_RECT=x,y,w,h`
-(pixels on Windows, points on macOS, in desktop coordinates) to the
-monitor the markers surround. macOS needs the Accessibility permission
+yet run on real hardware. The cursor maps onto the primary display
+unless you [choose another](#choosing-the-display). macOS needs the Accessibility permission
 for the terminal (or Python) that starts the server; without it the
 server refuses to start and says where to grant it. Zero added latency,
 works with emulators. Some fullscreen-exclusive titles ignore synthetic events —
@@ -683,8 +681,10 @@ backoff_frames = 10     # full searches after a half-size miss
 seconds = 10            # --record-seconds; 0 disables
 max_mb = 64             # --record-max-mb
 
+[view]
+display = "HDMI-A-1"    # --display; see "Choosing the display"
+
 [tuning]                # below; changed live from the phone
-[view]                  # below; the phone's saved choices
 ```
 
 A bad value, in the file or a flag, stops the server with a message
@@ -692,6 +692,24 @@ naming it. The phone saves only `[tuning]` and `[view]`; the other
 tables are yours and are kept as written (comments are not). Lens and
 zeroing results are measurements rather than settings and live beside
 it in `lenses.json` and `zeroing.json`.
+
+### Choosing the display
+
+On a desk with several monitors, pick the one the gun aims at in the
+phone's **Aim tuning** panel, or with `view.display` / `--display`. It
+applies to the cursor and the on-screen markers together, takes effect
+at once, and is saved with the other settings. Displays go by output
+name (`GET /displays` lists them: `HDMI-A-1`, `\\.\DISPLAY2`, a number on
+macOS); none chosen means the primary one.
+
+Windows and macOS map the cursor onto that monitor directly. On Linux
+the compositor decides where the cursor device lands, so Boresight asks
+it to pin the `boresight-cursor` tablet to the output: through KWin on
+KDE Plasma (which may save it in `~/.config/kcminputrc`, as System
+Settings would) and with `xinput map-to-output` on X11. Other Wayland
+desktops (GNOME, sway, …) have no interface for this; map the
+`boresight-cursor` tablet in their own tablet settings instead. With no
+display chosen, nothing is pinned.
 
 ### Tuning: less lag or less jitter
 

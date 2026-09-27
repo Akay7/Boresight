@@ -1200,6 +1200,72 @@ tuningEls.save.addEventListener("click", async () => {
 
 loadTuning();
 
+// --- Display ----------------------------------------------------------
+
+// Which of the PC's displays the cursor and on-screen markers use
+// (GET /displays, POST /display). Shows what the server reports after a
+// choice, as the controls above do, so a refused one snaps back.
+//
+// Self-contained: nothing above this section refers to it.
+
+const displayEls = {
+  select: document.getElementById("display-select"),
+  note: document.getElementById("display-note"),
+};
+
+function displayLabel(display) {
+  const size = `${Math.round(display.width)}x${Math.round(display.height)}`;
+  return `${display.name} (${size}${display.primary ? ", primary" : ""})`;
+}
+
+function showDisplays(state) {
+  const select = displayEls.select;
+  select.textContent = "";
+  const primary = document.createElement("option");
+  primary.value = "";
+  primary.textContent = "Primary display";
+  select.append(primary);
+  for (const display of state.displays || []) {
+    const option = document.createElement("option");
+    option.value = display.name;
+    option.textContent = displayLabel(display);
+    select.append(option);
+  }
+  select.value = state.selected || "";
+  displayEls.note.textContent = state.detail || "";
+}
+
+async function loadDisplays() {
+  try {
+    const response = await fetch(sameOriginUrl("displays"));
+    if (response.ok) showDisplays(await response.json());
+  } catch {
+    // A real connection problem shows itself when streaming starts.
+  }
+}
+
+displayEls.select.addEventListener("change", async () => {
+  const name = displayEls.select.value;
+  displayEls.select.disabled = true;
+  try {
+    const response = await fetch(sameOriginUrl("display"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const body = await response.json();
+    showDisplays(body);
+    if (!response.ok) show("error", tuningError(body, "could not change the display"));
+  } catch (error) {
+    show("error", `Could not change the display: ${error.message}`);
+    loadDisplays();
+  } finally {
+    displayEls.select.disabled = false;
+  }
+});
+
+loadDisplays();
+
 // --- Recording --------------------------------------------------------
 
 // The server keeps each session's last few seconds of frames; this asks

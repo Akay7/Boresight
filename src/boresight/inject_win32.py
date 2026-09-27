@@ -22,7 +22,6 @@ from boresight.inject import (
     DEFAULT_REL_SCALE,
     CursorBackendUnavailable,
     Rect,
-    cursor_rect_override,
 )
 
 log = logging.getLogger(__name__)
@@ -48,6 +47,27 @@ SM_CYVIRTUALSCREEN = 79
 # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, a pseudo-handle.
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 PROCESS_PER_MONITOR_DPI_AWARE = 2
+
+MONITORINFOF_PRIMARY = 0x00000001
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint32),
+        ("rcMonitor", RECT),
+        ("rcWork", RECT),
+        ("dwFlags", ctypes.c_uint32),
+        ("szDevice", ctypes.c_wchar * 32),
+    ]
 
 
 # Explicit widths rather than ctypes.wintypes: its LONG and DWORD are
@@ -107,6 +127,8 @@ class Win32Api(Protocol):
     def make_dpi_aware(self) -> None: ...
     def primary_screen(self) -> Rect: ...
     def virtual_screen(self) -> Rect: ...
+    # (device name, desktop rectangle, primary) for each monitor.
+    def monitors(self) -> list[tuple[str, Rect, bool]]: ...
     def send_input(self, inputs: Sequence[INPUT]) -> int: ...
 
 
@@ -167,6 +189,39 @@ class User32Api:
             self._metric(SM_CYVIRTUALSCREEN),
         )
 
+    def monitors(self) -> list[tuple[str, Rect, bool]]:
+        found: list[tuple[str, Rect, bool]] = []
+        # Windows-only, so built here rather than at import.
+        callback_type = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.POINTER(RECT),
+            ctypes.c_void_p,
+        )
+
+        def visit(monitor, _dc, _rect, _data) -> int:
+            info = MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+            if self._user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                area = info.rcMonitor
+                found.append(
+                    (
+                        info.szDevice,
+                        Rect(
+                            area.left,
+                            area.top,
+                            area.right - area.left,
+                            area.bottom - area.top,
+                        ),
+                        bool(info.dwFlags & MONITORINFOF_PRIMARY),
+                    )
+                )
+            return 1  # keep enumerating
+
+        self._user32.EnumDisplayMonitors(None, None, callback_type(visit), 0)
+        return found
+
     def send_input(self, inputs: Sequence[INPUT]) -> int:
         array = (INPUT * len(inputs))(*inputs)
         return self._user32.SendInput(len(inputs), array, ctypes.sizeof(INPUT))
@@ -192,13 +247,22 @@ class Win32CursorBackend:
                 "Windows reports no desktop to move the cursor on. Run "
                 "the server in the logged-in user's session."
             )
-        if target is None:
-            target = cursor_rect_override()
+        # The primary monitor until a display is chosen (`show_on`).
         self._target = target if target is not None else self._api.primary_screen()
         self._rel_scale = rel_scale
         self._last_position: tuple[float, float] | None = None
         self._held = False
         self._warned_blocked = False
+
+    def displays(self) -> list:
+        from boresight.displays import Display
+
+        return [
+            Display(name, rect, primary) for name, rect, primary in self._api.monitors()
+        ]
+
+    def show_on(self, display) -> None:
+        self._target = display.rect
 
     def _absolute(self, x: float, y: float) -> tuple[int, int]:
         px, py = self._target.point(x, y)

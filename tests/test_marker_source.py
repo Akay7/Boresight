@@ -252,13 +252,15 @@ def test_the_overlay_command_is_fixed() -> None:
     ]
 
 
-def test_a_display_index_is_forced_through_int() -> None:
-    """The only caller-supplied value in the command, and it cannot
-    carry anything but a number."""
-    assert _overlay_command(2)[-2:] == ["--display", "2"]
-
-    with pytest.raises((ValueError, TypeError)):
-        _overlay_command("1; rm -rf /")
+def test_a_display_stays_one_argument_that_is_never_an_option() -> None:
+    """The only caller-supplied value in the command: whatever it holds,
+    it is one argv element (no shell reads it) glued to its flag, so
+    it cannot become a second argument or an option of its own."""
+    assert _overlay_command("HDMI-A-1")[-1] == "--display=HDMI-A-1"
+    assert _overlay_command(2)[-1] == "--display=2"
+    assert _overlay_command("1; rm -rf /")[-1] == "--display=1; rm -rf /"
+    assert _overlay_command("--report-only")[-1] == "--display=--report-only"
+    assert "--display=" not in " ".join(_overlay_command(None))
 
 
 def test_the_controllers_extra_margin_reaches_the_spawned_overlay() -> None:

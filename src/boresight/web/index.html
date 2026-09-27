@@ -132,6 +132,7 @@
       .tune input[type="range"] { width: 100%; margin: 0.25rem 0 0; }
       .tune .pinned { color: var(--warn); font-size: 0.8rem; }
       #tuning-note { color: var(--dim); font-size: 0.8rem; margin: 0.25rem 0 0; }
+      #display-select { width: 100%; margin: 0.25rem 0 0; }
     </style>
   </head>
   <body>
@@ -203,11 +204,16 @@
          each slider its range. -->
     <details class="panel" id="tuning">
       <summary>Aim tuning</summary>
+      <div class="tune">
+        <label for="display-select"><span>Display the gun aims at</span></label>
+        <select id="display-select"></select>
+        <div class="pinned" id="display-note"></div>
+      </div>
       <div id="tuning-rows"></div>
       <button type="button" id="tuning-save">Save settings</button>
       <p id="tuning-note">
-        Changes apply at once. Save keeps them, with the marker, margin
-        and overlay choices above, across a server restart.
+        Changes apply at once. Save keeps them, with the display and the
+        marker, margin and overlay choices above, across a server restart.
       </p>
     </details>
 

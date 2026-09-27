@@ -21,6 +21,7 @@ from starlette.requests import HTTPConnection
 
 from boresight.calibration import CalibrationCapture
 from boresight.detect import TrackerOptions
+from boresight.displays import DisplayError
 from boresight.inject import CursorBackend, TriggerHold, default_cursor_backend
 from boresight.layout_source import (
     LayoutSourceError,
@@ -56,6 +57,7 @@ from boresight.recording import (
 )
 from boresight.settings import LiveSettings, Settings, ViewPreferences
 from boresight.settings_routes import (
+    apply_display,
     apply_rel_scale,
     restore_marker_source,
 )
@@ -183,7 +185,6 @@ def create_app(
     backend_factory: Callable[[], CursorBackend] = default_cursor_backend,
     marker_map_factory: Callable[[], MarkerMap] = _default_marker_map,
     config: ServerConfig | None = None,
-    display: int | None = None,
     overlay_extra_margin_px: int = 0,
     tracked_detection: TrackerOptions | bool | None = True,
     settings: LiveSettings | None = None,
@@ -220,11 +221,25 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.cursor_backend = backend_factory()
+        app.state.display = ""
+        if saved_view.display:
+            # Only a display that was chosen: with none, the cursor keeps
+            # whatever mapping the platform gives it, and nothing is
+            # written to the desktop's settings on the user's behalf.
+            try:
+                apply_display(app, saved_view.display)
+            except DisplayError as error:
+                close = getattr(app.state.cursor_backend, "close", None)
+                if close is not None:
+                    close()
+                raise RuntimeError(
+                    f"cannot use display {saved_view.display!r}: {error}"
+                ) from None
         app.state.marker_map = marker_map_factory()
         app.state.markers = MarkerSourceController(
             app.state.cursor_backend,
             app.state.marker_map,
-            display=display,
+            display=saved_view.display,
             overlay_extra_margin_px=saved_view.overlay_extra_margin_px,
             tracked_detection=tracked_detection,
             tuning=lambda: live_settings.tuning,
@@ -1333,6 +1348,14 @@ def main(argv: list[str] | None = None) -> int:
         "`python -m boresight.overlay` (default: file)",
     )
     markers.add_argument(
+        "--display",
+        default=None,
+        metavar="NAME",
+        help="the display the gun aims at, for the cursor and on-screen "
+        "markers alike, by output name as GET /displays lists it "
+        "(e.g. HDMI-A-1; default: the primary display)",
+    )
+    markers.add_argument(
         "--overlay-extra-margin-px",
         type=int,
         default=None,
@@ -1436,6 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
                 "tuning.hold_s": args.aim_hold_s,
                 "tuning.rel_scale": args.rel_scale,
                 "view.overlay_extra_margin_px": args.overlay_extra_margin_px,
+                "view.display": args.display,
                 "recording.seconds": args.record_seconds,
                 "recording.max_mb": args.record_max_mb,
             },

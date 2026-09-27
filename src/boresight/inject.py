@@ -17,8 +17,6 @@ alternative shape of the same thing.
 
 from __future__ import annotations
 
-import math
-import os
 import sys
 from dataclasses import dataclass
 from typing import Protocol
@@ -90,34 +88,6 @@ class Rect:
             self.x + x * (self.width - 1),
             self.y + y * (self.height - 1),
         )
-
-
-# Confines the cursor to one monitor of a multi-monitor desktop, on the
-# backends that address the whole desktop (Windows, macOS). uinput has
-# no equivalent: there the compositor maps the tablet.
-CURSOR_RECT_ENV = "BORESIGHT_CURSOR_RECT"
-
-
-def cursor_rect_override(environ: dict[str, str] | None = None) -> Rect | None:
-    """`BORESIGHT_CURSOR_RECT` as a `Rect`, or None when it is unset.
-
-    Checked when the backend starts, so a typo fails the server there
-    rather than sending the cursor somewhere unexpected.
-    """
-    raw = (os.environ if environ is None else environ).get(CURSOR_RECT_ENV)
-    if not raw:
-        return None
-    try:
-        x, y, width, height = (float(part) for part in raw.split(","))
-    except ValueError:
-        x = y = width = height = 0.0
-    finite = all(math.isfinite(value) for value in (x, y, width, height))
-    if not finite or width < 1 or height < 1:
-        raise CursorBackendUnavailable(
-            f"{CURSOR_RECT_ENV}={raw!r} is not a display area. Expected "
-            "x,y,width,height in desktop coordinates, e.g. 1920,0,1280,1024."
-        )
-    return Rect(x, y, width, height)
 
 
 def default_cursor_backend(platform: str | None = None) -> CursorBackend:
@@ -354,6 +324,19 @@ class UinputCursorBackend:
         self._device.syn()
         self._held = False
 
+    def displays(self) -> list:
+        from boresight.displays import list_linux_displays
+
+        return list_linux_displays()
+
+    def show_on(self, display) -> None:
+        # The device's range is always the whole unit square; which
+        # screen it lands on is the compositor's to decide, so it is
+        # asked to pin this device to the chosen output.
+        from boresight.displays import pin_linux_device
+
+        pin_linux_device(display.name)
+
     def close(self) -> None:
         # Lift the tip and leave proximity before going away, so the pen
         # is neither left pressed nor left hovering from the
@@ -453,6 +436,8 @@ class FakeCursorBackend:
         self.clicks: int = 0
         self.presses: int = 0
         self.releases: int = 0
+        # The display last chosen with `show_on`, if any.
+        self.display = None
 
     @property
     def held(self) -> bool:
@@ -469,6 +454,17 @@ class FakeCursorBackend:
 
     def release(self) -> None:
         self.releases += 1
+
+    def displays(self) -> list:
+        from boresight.displays import Display
+
+        return [
+            Display("FAKE-1", Rect(0, 0, 1920, 1080), primary=True),
+            Display("FAKE-2", Rect(1920, 0, 1280, 1024)),
+        ]
+
+    def show_on(self, display) -> None:
+        self.display = display
 
 
 class TriggerHold:

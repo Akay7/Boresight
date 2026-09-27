@@ -14,7 +14,8 @@ flag or the phone:
   and the relative-motion scale (`inject.py`). All tuned by feel, which
   is why they can be changed while the server runs.
 - `[view]` is what the phone would otherwise lose on a restart: the
-  debug overlay default, the marker source and the overlay margin.
+  debug overlay default, the marker source, the overlay margin and the
+  display the gun aims at.
 
 Each value is resolved once, at startup, in decreasing precedence:
 command-line flag, environment variable, settings file, built-in
@@ -115,6 +116,9 @@ class ViewPreferences(BaseModel):
     debug: bool = False
     marker_source: Literal["printed", "screen"] = "printed"
     overlay_extra_margin_px: int = Field(0, ge=0, le=OVERLAY_MARGIN_MAX_PX)
+    # The display the gun aims at, by output name; empty for the
+    # primary display (`displays.py`).
+    display: str = Field("", max_length=128)
 
 
 class ServerOptions(BaseModel):
@@ -194,6 +198,7 @@ CLI_FLAGS: dict[str, str] = {
     "tuning.hold_s": "--aim-hold-s",
     "tuning.rel_scale": "--rel-scale",
     "view.overlay_extra_margin_px": "--overlay-extra-margin-px",
+    "view.display": "--display",
     "server.host": "--host",
     "server.port": "--port",
     "server.token": "--token",

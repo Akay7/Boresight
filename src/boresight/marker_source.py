@@ -139,19 +139,20 @@ class OverlayGeometry:
         }
 
 
-def _overlay_command(display: int | None, extra_margin_px: int = 0) -> list[str]:
+def _overlay_command(display: int | str | None, extra_margin_px: int = 0) -> list[str]:
     """The command used to start the overlay.
 
-    Fixed. Nothing from a request reaches this list -- both `display`
-    and `extra_margin_px` are set at server startup, not per request,
-    and each is rendered by `str()` on an already-parsed number, so
-    there is no path from request content to an argument.
+    An argument list, never a shell line. `extra_margin_px` is rendered
+    by `str()` on an already-parsed number. `display` can come from a
+    request, but only as the name of a display the server listed (see
+    `displays.choose`), and it is passed as `--display=NAME` so a name
+    can never be read as an option of its own.
 
     `--commands` makes the overlay read `show_target`'s lines on stdin.
     """
     command = [sys.executable, "-m", "boresight.overlay", "--commands"]
-    if display is not None:
-        command += ["--display", str(int(display))]
+    if display is not None and display != "":
+        command.append(f"--display={display}")
     if extra_margin_px:
         command += ["--extra-margin-px", str(int(extra_margin_px))]
     return command
@@ -251,7 +252,7 @@ class MarkerSourceController:
         self,
         backend: CursorBackend,
         printed_layout: MarkerMap,
-        display: int | None = None,
+        display: int | str | None = None,
         launcher=subprocess.Popen,
         overlay_extra_margin_px: int = 0,
         tracked_detection: TrackerOptions | bool | None = True,
@@ -396,6 +397,25 @@ class MarkerSourceController:
         }
 
     # --- Selecting ----------------------------------------------------
+
+    @property
+    def display(self) -> int | str | None:
+        return self._display
+
+    def set_display(self, display: str) -> dict:
+        """Place on-screen markers on `display` from now on.
+
+        Like `set_overlay_extra_margin_px`: an active overlay is
+        restarted there at once, failing the way `select()` does, and
+        with printed markers the choice waits for the next selection.
+        """
+        with self._switching_locked():
+            self._reap_locked()
+            unchanged = display == (self._display or "")
+            self._display = display or None
+            if self._source is MarkerSource.SCREEN and not unchanged:
+                return self._start_screen_markers_locked()
+            return self._snapshot()
 
     def set_overlay_extra_margin_px(self, value: int) -> dict:
         """Set the overlay's manual panel-avoidance margin.
@@ -731,7 +751,10 @@ def _explain_exit(process, stderr: _PipeDrain) -> str:
 
 
 def printed_controller(
-    backend: CursorBackend, spec: str = "file", display: int | None = None, **kwargs
+    backend: CursorBackend,
+    spec: str = "file",
+    display: int | str | None = None,
+    **kwargs,
 ) -> MarkerSourceController:
     """A controller starting on the printed layout named by `spec`."""
     return MarkerSourceController(backend, resolve_layout(spec), display, **kwargs)

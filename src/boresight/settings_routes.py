@@ -18,11 +18,14 @@ import threading
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
+from boresight.displays import Display, DisplayError, choose
 from boresight.inject import CursorBackend
 from boresight.marker_source import (
     MarkerSource,
     MarkerSourceController,
+    MarkerSourceError,
 )
 from boresight.settings import (
     SettingsError,
@@ -74,6 +77,24 @@ def restore_marker_source(controller: MarkerSourceController, source: str) -> No
     threading.Thread(target=restore, name="restore-markers", daemon=True).start()
 
 
+def apply_display(app: FastAPI, name: str) -> Display:
+    """Put the cursor on the display called `name` ("" for the primary).
+
+    Raises DisplayError, changing nothing, if the backend cannot list or
+    reach displays or has none by that name. The overlay is moved
+    separately (`MarkerSourceController.set_display`), since a failure
+    there leaves printed markers active rather than refusing the choice.
+    """
+    backend = app.state.cursor_backend
+    if not hasattr(backend, "displays"):
+        raise DisplayError("this cursor backend cannot be placed on a display")
+    display = choose(backend.displays(), name)
+    backend.show_on(display)
+    app.state.display = name
+    logger.info("cursor on display %s", display.name)
+    return display
+
+
 def current_view(app: FastAPI) -> ViewPreferences:
     """The view preferences in effect, read from whoever owns each."""
     markers = app.state.markers
@@ -81,6 +102,7 @@ def current_view(app: FastAPI) -> ViewPreferences:
         debug=app.state.settings.debug,
         marker_source=markers.source.value,
         overlay_extra_margin_px=markers.overlay_extra_margin_px,
+        display=app.state.display,
     )
 
 
@@ -125,6 +147,46 @@ def update_tuning(update: TuningUpdate, request: Request) -> dict:
             tuning.rel_scale,
         )
     return _state(app)
+
+
+class DisplayRequest(BaseModel):
+    # A name the server listed, or "" for the primary display.
+    name: str = Field(max_length=128)
+
+
+def _displays(app: FastAPI) -> dict:
+    backend = app.state.cursor_backend
+    state = {"selected": app.state.display, "displays": []}
+    if not hasattr(backend, "displays"):
+        return {**state, "detail": "this cursor backend has no displays"}
+    try:
+        state["displays"] = [display.as_dict() for display in backend.displays()]
+    except DisplayError as error:
+        return {**state, "detail": str(error)}
+    return state
+
+
+@router.get("/displays")
+def read_displays(request: Request) -> dict:
+    return _displays(request.app)
+
+
+@router.post("/display")
+def set_display(selection: DisplayRequest, request: Request):
+    app = request.app
+    try:
+        apply_display(app, selection.name)
+    except DisplayError as error:
+        # 409, as for a marker source the server cannot switch to: the
+        # request was fine, the machine cannot do it. Nothing changed.
+        return JSONResponse({"detail": str(error), **_displays(app)}, status_code=409)
+    try:
+        app.state.markers.set_display(selection.name)
+    except MarkerSourceError as error:
+        # The cursor moved; the overlay did not restart there, so printed
+        # markers are active, as after any failed switch to the screen.
+        return JSONResponse({"detail": str(error), **_displays(app)}, status_code=409)
+    return _displays(app)
 
 
 @router.post("/settings/save")

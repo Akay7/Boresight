@@ -70,6 +70,7 @@ def test_settings_can_be_read_with_ranges_and_pins(tmp_path: Path) -> None:
         "debug": False,
         "marker_source": "printed",
         "overlay_extra_margin_px": 0,
+        "display": "",
     }
     assert set(state["limits"]) == set(TUNING_RANGES)
     assert state["limits"]["beta"]["max"] == TUNING_RANGES["beta"][1]
