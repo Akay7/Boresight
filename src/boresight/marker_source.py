@@ -60,7 +60,7 @@ from pathlib import Path
 import numpy as np
 
 from boresight.aim_hold import HoldingPipeline
-from boresight.detect import Detector
+from boresight.detect import Detector, TrackerOptions
 from boresight.inject import CursorBackend, SmoothingCursorBackend
 from boresight.layout_source import resolve_layout
 from boresight.lens import LensModel
@@ -254,7 +254,7 @@ class MarkerSourceController:
         display: int | None = None,
         launcher=subprocess.Popen,
         overlay_extra_margin_px: int = 0,
-        tracked_detection: bool = True,
+        tracked_detection: TrackerOptions | bool | None = True,
         tuning: Callable[[], Tuning] | None = None,
     ) -> None:
         # Unwrapped: smoothing belongs to each session (see

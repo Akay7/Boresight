@@ -653,6 +653,46 @@ backend from `app.state.cursor_backend`, so an explicit requested
 coordinate always lands exactly, never smoothed toward wherever
 aim-derived movement last left the filter.
 
+### The settings file
+
+Every option lives in `.boresight/config.toml` (another path with
+`--config`); a flag given on the command line overrides its key for
+that run, and `uv run boresight --help` lists them by table. Everything
+is optional:
+
+```toml
+[server]
+host = "0.0.0.0"        # --host
+port = 7331             # --port
+token = "..."           # --token; a secret, like the TLS key beside it
+token_auto = false      # --token-auto / --no-token-auto
+tls = true              # --tls / --no-tls
+qr = true               # --qr / --no-qr
+# certfile, keyfile     # --certfile, --keyfile
+
+[markers]
+layout = "file"         # --markers: file, file:<path>, screen:<W>x<H>
+
+[detection]
+tracked = true          # --tracked-detection / --full-frame-detection
+coarse_min_side_px = 36 # half-size search only while markers are this big
+full_pass_every = 10    # a full search at least this often, in frames
+backoff_frames = 10     # full searches after a half-size miss
+
+[recording]
+seconds = 10            # --record-seconds; 0 disables
+max_mb = 64             # --record-max-mb
+
+[tuning]                # below; changed live from the phone
+[view]                  # below; the phone's saved choices
+```
+
+A bad value, in the file or a flag, stops the server with a message
+naming it. The phone saves only `[tuning]` and `[view]`; the other
+tables are yours and are kept as written (comments are not). Lens and
+zeroing results are measurements rather than settings and live beside
+it in `lenses.json` and `zeroing.json`.
+
 ### Tuning: less lag or less jitter
 
 Tuned by feel, not measurement, so the phone's **Aim tuning** panel
@@ -684,8 +724,8 @@ leaves the file's own value alone.
 The file also keeps the phone's `[view]` choices — marker source,
 overlay margin, debug overlay — which otherwise reset on a restart;
 saved on-screen markers are started again in the background at startup.
-It is machine-written (comments are not kept); tables the server does
-not know are left as they are. Over HTTP: `GET /settings`, `POST
+Saving rewrites the file (comments are not kept); every other table is
+left as it was. Over HTTP: `GET /settings`, `POST
 /settings/tuning` (any subset, range-checked, 422 otherwise) and `POST
 /settings/save`, all behind the token like everything else.
 

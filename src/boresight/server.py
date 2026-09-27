@@ -20,9 +20,9 @@ from pydantic import BaseModel, Field
 from starlette.requests import HTTPConnection
 
 from boresight.calibration import CalibrationCapture
+from boresight.detect import TrackerOptions
 from boresight.inject import CursorBackend, TriggerHold, default_cursor_backend
 from boresight.layout_source import (
-    DEFAULT_SPEC,
     LayoutSourceError,
     marker_map_factory,
 )
@@ -185,7 +185,7 @@ def create_app(
     config: ServerConfig | None = None,
     display: int | None = None,
     overlay_extra_margin_px: int = 0,
-    tracked_detection: bool = True,
+    tracked_detection: TrackerOptions | bool | None = True,
     settings: LiveSettings | None = None,
     lens_store_factory: Callable[[], LensStore] = lambda: LensStore(None),
     zeroing_path: Path | None = None,
@@ -1266,8 +1266,6 @@ def main(argv: list[str] | None = None) -> int:
 
     from boresight import terminal_qr
     from boresight.netaccess import (
-        DEFAULT_HOST,
-        DEFAULT_PORT,
         InsecureConfigurationError,
         generate_token,
         is_loopback,
@@ -1279,46 +1277,15 @@ def main(argv: list[str] | None = None) -> int:
         resolve_settings,
     )
 
-    parser = argparse.ArgumentParser(prog="python -m boresight.server")
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument(
-        "--token", default=None, help="shared token clients must present"
+    # Every option is also a key in the settings file (`settings.py`),
+    # and a flag given here overrides it for this run: flag >
+    # BORESIGHT_* environment variable > settings file > default. So
+    # every default below is None, "not given"; the real defaults live
+    # in the settings models alone.
+    parser = argparse.ArgumentParser(
+        prog="python -m boresight.server",
+        description="Each option overrides its key in the settings file.",
     )
-    parser.add_argument(
-        "--token-auto",
-        action="store_true",
-        help="generate a random token and print it with the phone URL",
-    )
-    parser.add_argument(
-        "--tls",
-        action="store_true",
-        help="serve HTTPS. Required for the phone: browsers expose the "
-        "camera only in a secure context, and a LAN IP over plain HTTP "
-        "is not one",
-    )
-    parser.add_argument("--certfile", type=Path, default=None)
-    parser.add_argument("--keyfile", type=Path, default=None)
-    parser.add_argument(
-        "--markers",
-        default=DEFAULT_SPEC,
-        metavar="SOURCE",
-        help="marker layout: 'file', 'file:<path>', or "
-        "'screen:<W>x<H>' for tags drawn on the display by "
-        "`python -m boresight.overlay` (default: %(default)s)",
-    )
-    parser.add_argument(
-        "--overlay-extra-margin-px",
-        type=int,
-        default=None,
-        help="shrink the on-screen overlay's auto-detected available "
-        "area by this much on every side, on top of whatever the "
-        "desktop's own panels already reserve. For a display whose "
-        "panel reservation isn't detected automatically (default: the "
-        "settings file's, else 0; see `python -m boresight.overlay --help`)",
-    )
-    # Settings: flag > BORESIGHT_* environment variable > settings file
-    # > default. See `settings.py`.
     parser.add_argument(
         "--config",
         type=Path,
@@ -1327,8 +1294,75 @@ def main(argv: list[str] | None = None) -> int:
         help="settings file, read at startup and written when settings "
         "are saved from the phone (default: %(default)s)",
     )
+    server = parser.add_argument_group("server", "the [server] table")
+    server.add_argument("--host", default=None, help="default: 127.0.0.1")
+    server.add_argument("--port", type=int, default=None, help="default: 7331")
+    server.add_argument(
+        "--token", default=None, help="shared token clients must present"
+    )
+    server.add_argument(
+        "--token-auto",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="generate a random token and print it with the phone URL",
+    )
+    server.add_argument(
+        "--tls",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="serve HTTPS. Required for the phone: browsers expose the "
+        "camera only in a secure context, and a LAN IP over plain HTTP "
+        "is not one",
+    )
+    server.add_argument("--certfile", default=None)
+    server.add_argument("--keyfile", default=None)
+    server.add_argument(
+        "--qr",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="print the phone URL as a QR code (default: on; it is printed "
+        "only to an interactive terminal large enough for it anyway)",
+    )
+    markers = parser.add_argument_group("markers", "the [markers] and [view] tables")
+    markers.add_argument(
+        "--markers",
+        default=None,
+        metavar="SOURCE",
+        help="marker layout: 'file', 'file:<path>', or "
+        "'screen:<W>x<H>' for tags drawn on the display by "
+        "`python -m boresight.overlay` (default: file)",
+    )
+    markers.add_argument(
+        "--overlay-extra-margin-px",
+        type=int,
+        default=None,
+        help="shrink the on-screen overlay's auto-detected available "
+        "area by this much on every side, on top of whatever the "
+        "desktop's own panels already reserve. For a display whose "
+        "panel reservation isn't detected automatically (default: 0; "
+        "see `python -m boresight.overlay --help`)",
+    )
+    detection = parser.add_argument_group("detection", "the [detection] table")
+    detection.add_argument(
+        "--tracked-detection",
+        dest="tracked_detection",
+        action="store_const",
+        const=True,
+        default=None,
+        help="let each session search a half-size frame while its markers "
+        "stay large and in view (the default)",
+    )
+    detection.add_argument(
+        "--full-frame-detection",
+        dest="tracked_detection",
+        action="store_const",
+        const=False,
+        help="search every frame in full at full resolution instead. "
+        "Slower; for comparison, or if tracking misbehaves with your camera",
+    )
     tuning = parser.add_argument_group(
-        "aim tuning", "each overrides its BORESIGHT_* variable and the settings file"
+        "aim tuning",
+        "the [tuning] table; each also overrides its BORESIGHT_* variable",
     )
     tuning.add_argument(
         "--aim-min-cutoff",
@@ -1356,33 +1390,20 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="relative-motion units per full-screen sweep (0: off, the default)",
     )
-    parser.add_argument(
-        "--no-qr",
-        action="store_true",
-        help="do not print the phone URL as a QR code (it is printed only "
-        "to an interactive terminal large enough for it anyway)",
-    )
-    parser.add_argument(
-        "--full-frame-detection",
-        action="store_true",
-        help="search every frame in full at full resolution, instead of "
-        "letting each session search a half-size frame while its markers "
-        "stay large and in view. Slower; for comparison, or if tracking "
-        "misbehaves with your camera",
-    )
-    parser.add_argument(
+    recording = parser.add_argument_group("recording", "the [recording] table")
+    recording.add_argument(
         "--record-seconds",
         type=float,
-        default=RecordingConfig.seconds,
+        default=None,
         help="keep each session's last N seconds of frames in memory, so "
         "the phone's Save button can write them to .boresight/recordings/ "
-        "as a replayable sequence; 0 disables (default: %(default)s)",
+        "as a replayable sequence; 0 disables (default: 10)",
     )
-    parser.add_argument(
+    recording.add_argument(
         "--record-max-mb",
         type=float,
-        default=RecordingConfig.max_bytes / (1024 * 1024),
-        help="cap on those frames per session, in MiB (default: %(default)s)",
+        default=None,
+        help="cap on those frames per session, in MiB (default: 64)",
     )
     args = parser.parse_args(argv)
 
@@ -1397,31 +1418,45 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        layout_factory = marker_map_factory(args.markers)
-    except (LayoutSourceError, OSError, ValueError) as error:
-        parser.exit(2, f"{error}\n")
-
-    try:
         settings = resolve_settings(
             args.config,
             cli={
+                "server.host": args.host,
+                "server.port": args.port,
+                "server.token": args.token,
+                "server.token_auto": args.token_auto,
+                "server.tls": args.tls,
+                "server.certfile": args.certfile,
+                "server.keyfile": args.keyfile,
+                "server.qr": args.qr,
+                "markers.layout": args.markers,
+                "detection.tracked": args.tracked_detection,
                 "tuning.min_cutoff": args.aim_min_cutoff,
                 "tuning.beta": args.aim_beta,
                 "tuning.hold_s": args.aim_hold_s,
                 "tuning.rel_scale": args.rel_scale,
                 "view.overlay_extra_margin_px": args.overlay_extra_margin_px,
+                "recording.seconds": args.record_seconds,
+                "recording.max_mb": args.record_max_mb,
             },
         )
     except SettingsError as error:
         parser.exit(2, f"{error}\n")
+    options = settings.startup
 
+    try:
+        layout_factory = marker_map_factory(options.markers.layout)
+    except (LayoutSourceError, OSError, ValueError) as error:
+        parser.exit(2, f"{error}\n")
+
+    served = options.server
     config = ServerConfig(
-        host=args.host,
-        port=args.port,
-        token=args.token or (generate_token() if args.token_auto else None),
-        tls=args.tls,
-        certfile=args.certfile,
-        keyfile=args.keyfile,
+        host=served.host,
+        port=served.port,
+        token=served.token or (generate_token() if served.token_auto else None),
+        tls=served.tls,
+        certfile=None if served.certfile is None else Path(served.certfile),
+        keyfile=None if served.keyfile is None else Path(served.keyfile),
     )
     try:
         config.validate()
@@ -1440,7 +1475,7 @@ def main(argv: list[str] | None = None) -> int:
     # has already been running for a while -- or never.
     print(f"\n  Open this on the phone:  {config.phone_url()}\n", flush=True)
     # Printed, never logged, like the line above: see `terminal_qr`.
-    qr = None if args.no_qr else terminal_qr.for_terminal(config.phone_url())
+    qr = terminal_qr.for_terminal(config.phone_url()) if served.qr else None
     if qr is not None:
         print(qr, flush=True)
     print(_device_details(config, certfile), flush=True)
@@ -1462,13 +1497,13 @@ def main(argv: list[str] | None = None) -> int:
         create_app(
             marker_map_factory=layout_factory,
             config=config,
-            tracked_detection=not args.full_frame_detection,
+            tracked_detection=options.detection.tracker(),
             settings=settings,
             lens_store_factory=lambda: lens_store,
             zeroing_path=DEFAULT_ZEROING_PATH,
             recording=RecordingConfig(
-                seconds=max(0.0, args.record_seconds),
-                max_bytes=int(max(0.0, args.record_max_mb) * 1024 * 1024),
+                seconds=options.recording.seconds,
+                max_bytes=int(options.recording.max_mb * 1024 * 1024),
             ),
         ),
         host=config.host,

@@ -40,7 +40,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from boresight.detect import Detector, MarkerTracker, detect_markers
+from boresight.detect import Detector, MarkerTracker, TrackerOptions, detect_markers
 from boresight.inject import CursorBackend
 from boresight.lens import LensModel
 from boresight.marker_map import MarkerMap
@@ -226,6 +226,15 @@ def _to_image_px(homography: np.ndarray, points_mm: Sequence[Point]) -> list[Poi
     return [(float(x), float(y)) for x, y in projected[:, 0, :]]
 
 
+def tracker_options(tracking: TrackerOptions | bool | None) -> TrackerOptions | None:
+    """`True` is the default options and `False` no tracking at all."""
+    if tracking is True:
+        return TrackerOptions()
+    if tracking is False:
+        return None
+    return tracking
+
+
 class AimPipeline:
     """Detection, marker lookup, solving, and emission for one frame.
 
@@ -240,12 +249,13 @@ class AimPipeline:
         marker_map: MarkerMap,
         backend: CursorBackend,
         detector: Detector = detect_markers,
-        tracking: bool = True,
+        tracking: TrackerOptions | bool | None = True,
     ) -> None:
         self._map = marker_map
         self._backend = backend
         self._detect = detector
-        self._tracking = tracking
+        # None: every frame gets the full search. True is the defaults.
+        self._tracking = tracker_options(tracking)
 
     def session_detector(self) -> Detector:
         """A new detector for one session to pass to `process_frame`.
@@ -255,8 +265,13 @@ class AimPipeline:
         test's stub has no image to track, and the tracker would bypass
         it on every frame its own search trusted.
         """
-        if self._tracking and self._detect is detect_markers:
-            return MarkerTracker()
+        if self._tracking is not None and self._detect is detect_markers:
+            options = self._tracking
+            return MarkerTracker(
+                min_side_px=options.min_side_px,
+                full_pass_every=options.full_pass_every,
+                backoff_frames=options.backoff_frames,
+            )
         return self._detect
 
     @property
