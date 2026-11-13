@@ -13,11 +13,19 @@ from typing import Annotated, Literal
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, Request, WebSocket
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from starlette.requests import HTTPConnection
+
+try:
+    from fastapi import Depends, FastAPI, Request, WebSocket
+    from fastapi.responses import JSONResponse
+    from fastapi.staticfiles import StaticFiles
+    from pydantic import BaseModel, Field
+    from starlette.requests import HTTPConnection
+except ModuleNotFoundError as exc:  # the core install has no web stack
+    raise SystemExit(
+        f"The server needs its web dependencies ({exc.name} is missing). "
+        "Install them with: pip install 'boresight[server]'"
+    ) from exc
+
 
 from boresight.calibration import CalibrationCapture
 from boresight.detect import TrackerOptions

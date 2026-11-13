@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [[package]]
@@ -38,22 +38,25 @@ name = "boresight"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "cryptography" },
-    { name = "evdev", marker = "sys_platform == 'linux'" },
-    { name = "fastapi" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
-    { name = "segno" },
-    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.optional-dependencies]
 overlay = [
     { name = "pyside6-essentials" },
 ]
+server = [
+    { name = "cryptography" },
+    { name = "evdev", marker = "sys_platform == 'linux'" },
+    { name = "fastapi" },
+    { name = "segno" },
+    { name = "uvicorn", extra = ["standard"] },
+]
 
 [package.dev-dependencies]
 dev = [
+    { name = "boresight", extra = ["server"] },
     { name = "httpx2" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -62,19 +65,20 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "cryptography", specifier = ">=44.0" },
-    { name = "evdev", marker = "sys_platform == 'linux'", specifier = ">=1.9" },
-    { name = "fastapi", specifier = ">=0.115" },
+    { name = "cryptography", marker = "extra == 'server'", specifier = ">=44.0" },
+    { name = "evdev", marker = "sys_platform == 'linux' and extra == 'server'", specifier = ">=1.9" },
+    { name = "fastapi", marker = "extra == 'server'", specifier = ">=0.115" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "opencv-python-headless", specifier = ">=4.10" },
     { name = "pyside6-essentials", marker = "extra == 'overlay'", specifier = ">=6.8" },
-    { name = "segno", specifier = ">=1.6.6" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
+    { name = "segno", marker = "extra == 'server'", specifier = ">=1.6.6" },
+    { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.32" },
 ]
-provides-extras = ["overlay"]
+provides-extras = ["server", "overlay"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "boresight", extras = ["server"] },
     { name = "httpx2", specifier = ">=2.9.1" },
     { name = "pre-commit", specifier = ">=4.6.1" },
     { name = "pytest", specifier = ">=8.3" },

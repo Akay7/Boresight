@@ -1,0 +1,11 @@
+[Unit]
+Description=Boresight USB mouse gadget
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/boresight-gadget start
+ExecStop=/usr/local/sbin/boresight-gadget stop
+
+[Install]
+WantedBy=multi-user.target

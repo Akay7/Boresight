@@ -4,11 +4,27 @@ version = "0.1.0"
 description = "A computer-vision light gun"
 requires-python = ">=3.12"
 dependencies = [
+    # What the aim pipeline needs and nothing more, so a Raspberry Pi
+    # running `boresight-gun` installs no web stack. Everything the
+    # server adds is the `server` extra below.
+    "opencv-python-headless>=4.10",
+    "numpy>=2.1",
+]
+
+# The same entry points as `python -m boresight.server` and
+# `python -m boresight.overlay`, which keep working.
+[project.scripts]
+boresight = "boresight.server:main"
+boresight-overlay = "boresight.overlay.__main__:main"
+boresight-gun = "boresight.gun.__main__:main"
+
+[project.optional-dependencies]
+# The server: web framework, input injection, and the certificate and QR
+# code the phone path needs. `uv sync` installs it through the dev group.
+server = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "evdev>=1.9; sys_platform == 'linux'",
-    "opencv-python-headless>=4.10",
-    "numpy>=2.1",
     # Generates the self-signed certificate the phone path needs.
     # Browsers expose getUserMedia only in a secure context, so a LAN
     # IP over plain HTTP has no camera API at all. Shelling out to the
@@ -19,14 +35,6 @@ dependencies = [
     # with no dependencies of its own; only its module matrix is used.
     "segno>=1.6.6",
 ]
-
-# The same entry points as `python -m boresight.server` and
-# `python -m boresight.overlay`, which keep working.
-[project.scripts]
-boresight = "boresight.server:main"
-boresight-overlay = "boresight.overlay.__main__:main"
-
-[project.optional-dependencies]
 # The on-screen marker overlay only. Kept out of the core dependencies
 # deliberately: this project uses opencv-python-headless precisely to
 # avoid a GUI stack, and most users run printed markers and never need
@@ -35,6 +43,7 @@ overlay = ["PySide6-Essentials>=6.8"]
 
 [dependency-groups]
 dev = [
+    "boresight[server]",
     "pytest>=8.3",
     "ruff>=0.16.0",
     "pre-commit>=4.6.1",

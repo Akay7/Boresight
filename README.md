@@ -52,6 +52,7 @@ any subset that surrounds the aim point stays within ~18mm.
 | --- | --- |
 | Android phone | Any phone with a modern browser and a rear camera. Doubles as the trigger — no dedicated webcam module or microcontroller needed |
 | *or* ESP32-CAM (AI-Thinker) | OV2640 camera, Wi-Fi and 4 MB PSRAM on one small board. Streams to the same server as the phone; see [The ESP32-CAM client](#the-esp32-cam-client) |
+| *or* Raspberry Pi Zero 2 W + CSI camera | A self-contained gun: the Pi aims with its own camera and plugs into the host as a USB mouse, with no server and no Wi-Fi. See [The Raspberry Pi gun](#the-raspberry-pi-gun) |
 | USB-serial adapter, 3.3 V logic | ESP32-CAM only. The board has no USB port of its own, so flashing goes through one |
 | 5 V supply, at least 1 A | ESP32-CAM only. The camera and radio draw current in bursts, and a weak supply shows up as brown-out resets |
 | NES Zapper shell | Gut the phototransistor board. With the phone, the trigger microswitch goes unused since the trigger is on-screen; with an ESP32-CAM it is wired to GPIO13 and becomes the trigger |
@@ -64,7 +65,9 @@ problem as any other sensor here — pin exposure via the browser's
 ### Dedicated hardware
 
 Camera and trigger don't have to be a phone. The ESP32-CAM path is
-built — see [The ESP32-CAM client](#the-esp32-cam-client); the ESP32-S3
+built — see [The ESP32-CAM client](#the-esp32-cam-client) — and so is a
+Raspberry Pi Zero 2 W that does the aiming itself and reports as a USB
+mouse — see [The Raspberry Pi gun](#the-raspberry-pi-gun); the ESP32-S3
 native-USB path is still [Future work](#future-work). Rolling shutter is workable at short exposure; a global-shutter camera
 module trades cost for less motion blur if the stock OV2640 isn't
 enough.
@@ -1227,6 +1230,34 @@ the real server:
 It says nothing about the sensor, Wi-Fi, the LED or timing. See
 `firmware/boresight-cam/README.md` for the details.
 
+## The Raspberry Pi gun
+
+A Raspberry Pi Zero 2 W with a CSI camera is a gun that needs nothing else.
+It runs the same detection, solve, smoothing and aim-hold as the server,
+on the Pi, and presents itself to whatever it is plugged into as a USB
+absolute mouse: a PC, a console, an Android box, with no software and no
+network on the host. The trigger is a button on a GPIO and holds the primary
+button down, as on the other cameras.
+
+The server is not involved, so there is no web page, no settings API and no
+on-screen zeroing on the Pi. The marker layout is a file (`markers.toml`,
+the server's format), and a lens calibration or zero made on the server can
+be copied over; without them the aim is uncalibrated.
+
+    sudo deploy/pi/install.sh        # on the Pi, from a checkout
+
+The full walkthrough — wiring, configuration, power and what to do when the
+host sees nothing — is in [deploy/pi/README.md](deploy/pi/README.md).
+
+**Never yet run on a Pi.** The report format, pin rules, debouncing, aim
+path and failure handling are tested on an ordinary computer (`boresight-gun
+--emulate`, and `tests/test_gun_*.py`), and the pipeline imports with only
+OpenCV and NumPy installed. The camera and GPIO adapters, the gadget script
+and the frame rate on a Cortex-A53 are unmeasured.
+
+Install on a PC with `pip install boresight` for the aim pipeline alone, or
+`pip install 'boresight[server]'` for the server.
+
 ## Lens calibration
 
 Wide phone lenses and the OV2640 bend straight lines, which skews the
@@ -1482,6 +1513,7 @@ a defect invisible to a test suite that always runs from a checkout.
         shot.py               # firing at the named frame's unsmoothed aim
         shooter.py            # which session's aim drives the cursor
         zeroing.py            # shoot targets to correct camera-to-barrel aim
+        gun/                  # the Raspberry Pi gun: camera + trigger -> USB mouse
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
@@ -1494,6 +1526,7 @@ a defect invisible to a test suite that always runs from a checkout.
           test_host/          # host tests for boresight_proto (CMake + CTest)
           tools/              # Docker build and QEMU runner, no ESP-IDF install
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
+      deploy/pi/              # the Pi gun's installer, USB gadget script, services
       tests/
         fixtures/             # rendered frame sequences (Git LFS)
 

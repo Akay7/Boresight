@@ -1,0 +1,35 @@
+# /etc/boresight-gun.toml -- every key is optional; these are the defaults.
+# Nothing here is secret.
+
+# The marker layout, in the same format as the server's markers.toml. Without
+# this line the reference layout shipped with the package is used, which is
+# the one the test fixtures are rendered with -- not your TV. Measure yours.
+# layout = "/etc/boresight/markers.toml"
+
+# Calibration files the server wrote, copied here. Each is a store keyed by
+# client and camera: name the entry with *_key when the file has several.
+# A lens calibration only fits the resolution it was made at.
+# lens_file = "/etc/boresight/lens.json"
+# lens_key = "phone|cam|640x480"
+# zero_file = "/etc/boresight/zeroing.json"
+# zero_key = "gun"
+
+# hid_path = "/dev/hidg0"
+
+[camera]
+width = 640
+height = 480
+fps = 30
+exposure_us = 4000   # fixed: automatic exposure chases the bright panel
+gain = 1.0
+
+[pins]               # BCM numbers. The trigger goes between the pin and GND.
+trigger = 17         # header pin 11
+led = 27             # header pin 13, to an LED and resistor, to GND
+debounce_ms = 10
+
+[tuning]
+smoothing = true
+min_cutoff = 0.5
+beta = 1.0
+hold_s = 0.75

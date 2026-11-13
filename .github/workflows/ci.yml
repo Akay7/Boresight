@@ -122,3 +122,24 @@ jobs:
       - run: cmake -S test_host -B build-host
       - run: cmake --build build-host --parallel
       - run: ctest --test-dir build-host --output-on-failure
+
+  pi-gun:
+    name: Pi gun (core-only install, deploy scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: astral-sh/setup-uv@v6
+      - run: shellcheck deploy/pi/*.sh
+      # What the Pi gets: the package with only its core dependencies, no
+      # web stack. The gun must run on that, replaying fixture frames.
+      - name: Install with core dependencies only
+        run: |
+          uv venv /tmp/gun-venv
+          uv pip install --python /tmp/gun-venv/bin/python .
+          if /tmp/gun-venv/bin/python -c "import fastapi" 2>/dev/null; then
+            echo "the web stack was installed with the core dependencies"
+            exit 1
+          fi
+      - run: /tmp/gun-venv/bin/boresight-gun --emulate tests/fixtures/synthetic_video | head -3
