@@ -1116,15 +1116,14 @@ Remove the jumper and press RST to run what you flashed. An adapter that
 shows up as `/dev/ttyACM0` rather than `/dev/ttyUSB0` needs that port in
 the command above.
 
-![Flashing wiring: the adapter's 5V and GND to the 5V row's 5V and GND, its TX to U0R and RX to U0T on the 3V3 row, and IO0 jumpered to the GND beside it](firmware/boresight-cam/docs/flashing.svg)
+![Flashing wiring: the adapter's 5V and GND to the board's 5V and GND on the 5V side, its TX to U0R and RX to U0T on the 3V3 side, and IO0 jumpered to the GND beside it](firmware/boresight-cam/docs/flashing.svg)
 
-If the board resets while flashing, or the log says `Brownout detector
-was triggered`, the adapter's USB power is not enough. Give the board its
-own 5 V supply and keep only GND, TX and RX to the adapter. The shared
-ground is what the serial link needs; the adapter's 5V stays unconnected,
-since two 5 V sources must never be joined:
-
-![Flashing with a separate supply: the supply's +5V and GND to the 5V row's 5V and GND, the adapter's GND, TX and RX to GND, U0R and U0T at the end of the 3V3 row, and IO0 jumpered to the GND beside it](firmware/boresight-cam/docs/flashing-external-power.svg)
+- Leave the adapter's BOOT and EN unconnected: the board's header has no
+  EN pin, so the jumper does their job.
+- VCC is an output: never feed power into it.
+- If the board does not answer, move the GND wire to another GND pin.
+- If the adapter has no 5V pin, wire its 3.3 V to the board's **3V3**
+  pin instead, and check every wire before plugging the adapter in.
 
 `firmware/boresight-cam/README.md` has the details, and the firewall
 section above applies unchanged.
@@ -1574,8 +1573,8 @@ a defect invisible to a test suite that always runs from a checkout.
           components/
             boresight_proto/  # wire format, debouncer, LED patterns -- no ESP-IDF
           test_host/          # host tests for boresight_proto (CMake + CTest)
-          tools/              # Docker build, QEMU runner, diagram render; no ESP-IDF install
-          docs/               # wiring diagrams: WireViz sources and their SVGs
+          tools/              # Docker build and QEMU runner, no ESP-IDF install
+          docs/               # flashing wiring diagram: schemdraw script and its SVG
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
       deploy/pi/              # the Pi gun's installer, USB gadget script, services
       hardware/case/          # the printable modular case (its own uv project)

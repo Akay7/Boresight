@@ -22,6 +22,7 @@ the full walkthrough. This file is the build reference.
     partitions_emulator.csv   its partition table (room for the frames)
     tools/idf.sh              idf.py inside the pinned ESP-IDF container
     tools/run-emulator.sh     boot an image in QEMU, in the same container
+    docs/flashing.py          draws docs/flashing.svg, the flashing wiring
     components/boresight_proto/
                               wire format, debouncer, pin allowlist,
                               back-off and LED patterns -- no ESP-IDF
@@ -127,9 +128,27 @@ The ESP32-CAM has no USB port of its own. Flash through a USB-serial
 adapter (3.3 V logic, 5 V to the board's 5V pin), with **GPIO0 held to GND
 while it powers up** to enter the bootloader:
 
+![Flashing wiring: the adapter's 5V and GND to the board's 5V and GND on the 5V side, its TX to U0R and RX to U0T on the 3V3 side, and IO0 jumpered to the GND beside it](docs/flashing.svg)
+
     idf.py -p /dev/ttyUSB0 flash monitor
 
-Release GPIO0 and reset the board to run the firmware.
+Release GPIO0 and reset the board to run the firmware. Adapters built on
+an ESP32-S2 or S3, such as the ESPLink, show up as `/dev/ttyACM0` instead.
+The adapter's EN and BOOT lines have nowhere to go: the board's header has
+no EN pin, so the jumper does their job.
+
+- VCC is an output: never feed power into it.
+- If the board does not answer, move the GND wire to another GND pin.
+- If the adapter has no 5V pin, wire its 3.3 V to the board's **3V3**
+  pin instead, and check every wire before plugging the adapter in.
+
+The diagram is drawn by `docs/flashing.py` with
+[schemdraw](https://schemdraw.readthedocs.io/). After editing it,
+regenerate the SVG from the repository root; `uv` fetches schemdraw for
+the one run, so the project does not depend on it:
+
+    uv run --no-project --with schemdraw==0.23 \
+        python firmware/boresight-cam/docs/flashing.py
 
 ## TLS
 
