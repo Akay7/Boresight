@@ -333,6 +333,16 @@ handling to raw/relative mouse capture specifically in fullscreen,
 ignoring the OS cursor entirely; its own "Light Gun Mode" setting
 turned out to be the actual fix, not anything on Boresight's side.
 
+On Linux the virtual pointer is a pen hovering over a display tablet,
+so it can move the cursor without clicking. It hovers only while
+something aims: it comes into proximity with the first aimed frame and
+leaves once [the dropout hold](#holding-through-a-brief-dropout) runs
+out or the aiming camera disconnects. A trigger pulled while nothing
+aims clicks nowhere. Your own mouse is a separate pointer and works
+normally whenever the pen is away. Left hovering at a stale aim, the
+pen kept the window under it (VS Code, seen on KDE Plasma) from taking
+the mouse's clicks until the window was hidden and shown again.
+
 For a title where no such in-game setting exists, every backend can
 also emit a relative delta alongside its normal absolute placement —
 **off by default, and not safe to enable casually.** Continuous
@@ -755,16 +765,22 @@ left as it was. Over HTTP: `GET /settings`, `POST
 
 `aim_hold.py`'s `HoldingPipeline` wraps an `AimPipeline`: on a frame
 that does not solve, if a solved frame landed within the last `hold_s` (0.75s by default), it
-re-sends that same position to the (smoothing-wrapped) cursor backend.
-This exists because of a real platform behaviour, not a solving
-concern — a Wayland compositor hides a pointer that produces no events
-for a while, and an ordinary short dropout (a marker briefly occluded,
-motion blur) would otherwise read as the OS cursor blinking out and
-back. Re-sending an unchanged position through the one-euro filter
-converges to that same position regardless of elapsed time, so holding
-cannot itself introduce a jump — only fresh device traffic. Once the
-window lapses with no new solve, holding stops and the cursor is
-allowed to go idle. Each session has its own `HoldingPipeline`,
+re-sends that same position to the (smoothing-wrapped) cursor backend,
+so an ordinary short dropout (a marker briefly occluded, motion blur)
+does not count as losing the aim. Re-sending an unchanged position
+through the one-euro filter converges to that same position regardless
+of elapsed time, so holding cannot itself introduce a jump — only fresh
+device traffic. Once the window lapses with no new solve, holding stops
+and the backend is told nothing is aiming: the Linux pen leaves
+proximity and the cursor disappears until the next solve.
+
+The pen used to stay in proximity for good, which libinput (1.32's
+tablet proximity-timer plugin) does not allow a pen to do silently: a
+pen that has never sent a proximity out of its own is forced out 50 ms
+after its last event and back in with the next. At the ESP32-CAM's 12
+frames a second, 80 ms apart, the cursor blinked on every frame however
+well the aim held. The pen now sends one real proximity out when it
+first comes in, which turns that timer off for the device. Each session has its own `HoldingPipeline`,
 rebuilt whenever the marker source changes, so a switch does not carry a
 held position from the old source into the new one. The wire report and
 debug overlay are unaffected either way — a held frame is still

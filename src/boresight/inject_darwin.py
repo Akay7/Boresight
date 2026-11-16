@@ -283,6 +283,10 @@ class QuartzCursorBackend:
         self._button(kCGEventLeftMouseUp)
         self._held = False
 
+    def idle(self) -> None:
+        # The OS cursor is the mouse's: it stays where it was put.
+        pass
+
     def close(self) -> None:
         if self._held:
             self.release()

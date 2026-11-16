@@ -163,6 +163,11 @@ class HidGadgetBackend:
         self.press()
         self.release()
 
+    def idle(self) -> None:
+        # An absolute mouse has no way to stop presenting a position; the
+        # host's cursor stays at the last one reported.
+        pass
+
     def close(self) -> None:
         """Lets go of a held button before the device goes away."""
         with self._lock:

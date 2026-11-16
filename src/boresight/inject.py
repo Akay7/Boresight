@@ -18,6 +18,7 @@ alternative shape of the same thing.
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -61,6 +62,12 @@ class CursorBackend(Protocol):
     def click(self) -> None: ...
     def press(self) -> None: ...
     def release(self) -> None: ...
+
+    # Nothing is aiming any more: the dropout hold has run out, or the
+    # session that had the cursor has gone. The next move_absolute()
+    # starts aiming again. Only a device that can stop presenting a
+    # position (the uinput pen) does anything; for a mouse it is a no-op.
+    def idle(self) -> None: ...
 
 
 class CursorBackendUnavailable(RuntimeError):
@@ -240,14 +247,33 @@ class UinputCursorBackend:
         # position to take a delta against yet, and emitting one against
         # an arbitrary starting point would be a spurious jump.
         self._last_position: tuple[float, float] | None = None
+        # The tip is down: a press() landed while the pen was hovering.
         self._held = False
 
-        # Bring the pen into proximity once and leave it there for the
-        # life of the backend. Proximity is what makes the cursor track
-        # the reported coordinate; entering and leaving it per frame
-        # would be a stream of tool-in/tool-out transitions rather than
-        # simple movement.
-        self._device.write(ecodes.EV_KEY, ecodes.BTN_TOOL_PEN, 1)
+        # Proximity -- the pen hovering -- is what makes the cursor
+        # follow the reported coordinate. It starts out, is entered by
+        # the first move once something aims, and is left by idle() when
+        # nothing does. Not entered here: an aim that does not exist yet
+        # has no position to hover at.
+        #
+        # Entering once and never leaving, as this backend first did,
+        # breaks on libinput (its tablet-proximity-timer plugin, 1.32):
+        # every pen that has not yet sent a proximity out of its own gets
+        # one forced after 50 ms without events, and forced back in on the
+        # next event. A camera at 12 fps is 80 ms between frames, so the
+        # cursor showed and hid on every frame, and the stream of
+        # in/out pairs left clients confused about where the pen was --
+        # Qt logging "tablet event with no proximity surface", and VS
+        # Code ignoring the real mouse until its window was hidden and
+        # shown again. A real proximity out is also what switches that
+        # timer off for the device, so the first entry makes one; see
+        # _enter_proximity().
+        self._in_proximity = False
+        self._sent_proximity_out = False
+        # Moves come from frame-processing threads and presses from the
+        # event loop: the state above, and each event frame's writes,
+        # are kept together under this.
+        self._lock = threading.Lock()
         self._device.write(ecodes.EV_ABS, ecodes.ABS_PRESSURE, 0)
         self._device.syn()
 
@@ -265,29 +291,70 @@ class UinputCursorBackend:
     def move_absolute(self, x: float, y: float) -> None:
         abs_x = round(x * ABS_MAX)
         abs_y = round(y * ABS_MAX)
-        # Position only. The pen is already in proximity, and this never
-        # touches the tip: with the tip up it moves the cursor and
-        # nothing else, and with it held down by press() it is a drag.
-        self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_X, abs_x)
-        self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_Y, abs_y)
-        self._device.syn()
+        with self._lock:
+            # Position, and proximity if the pen is not hovering yet --
+            # in the same frame, so it comes into proximity where it
+            # aims rather than at the last place it left. This never
+            # touches the tip: with the tip up it moves the cursor and
+            # nothing else, and with it held down by press() it is a drag.
+            self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_X, abs_x)
+            self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_Y, abs_y)
+            if not self._in_proximity:
+                self._enter_proximity()
+            else:
+                self._device.syn()
 
-        # Alongside the absolute placement above: a relative delta from
-        # the last position, for a title reading raw mouse motion
-        # instead. See `self._relative_device`'s construction comment.
-        if self._last_position is not None:
-            last_x, last_y = self._last_position
-            rel_x = round((x - last_x) * self._rel_scale)
-            rel_y = round((y - last_y) * self._rel_scale)
-            if rel_x or rel_y:
-                self._relative_device.write(
-                    self._ecodes.EV_REL, self._ecodes.REL_X, rel_x
-                )
-                self._relative_device.write(
-                    self._ecodes.EV_REL, self._ecodes.REL_Y, rel_y
-                )
-                self._relative_device.syn()
-        self._last_position = (x, y)
+            # Alongside the absolute placement above: a relative delta
+            # from the last position, for a title reading raw mouse
+            # motion instead. See `self._relative_device`'s construction
+            # comment.
+            if self._last_position is not None:
+                last_x, last_y = self._last_position
+                rel_x = round((x - last_x) * self._rel_scale)
+                rel_y = round((y - last_y) * self._rel_scale)
+                if rel_x or rel_y:
+                    self._relative_device.write(
+                        self._ecodes.EV_REL, self._ecodes.REL_X, rel_x
+                    )
+                    self._relative_device.write(
+                        self._ecodes.EV_REL, self._ecodes.REL_Y, rel_y
+                    )
+                    self._relative_device.syn()
+            self._last_position = (x, y)
+
+    def _enter_proximity(self) -> None:
+        """Bring the pen into proximity; the position is already written.
+
+        The first time, it also leaves and re-enters straight away: a
+        real proximity out is what makes libinput drop its forced-out
+        timer for this device (see __init__). Later entries need no such
+        pair, since one has been sent by then. Should the compositor
+        reopen the device, the timer comes back with it until the next
+        idle() sends another.
+        """
+        ecodes = self._ecodes
+        self._device.write(ecodes.EV_KEY, ecodes.BTN_TOOL_PEN, 1)
+        self._device.syn()
+        if not self._sent_proximity_out:
+            self._device.write(ecodes.EV_KEY, ecodes.BTN_TOOL_PEN, 0)
+            self._device.syn()
+            self._device.write(ecodes.EV_KEY, ecodes.BTN_TOOL_PEN, 1)
+            self._device.syn()
+            self._sent_proximity_out = True
+        self._in_proximity = True
+
+    def idle(self) -> None:
+        # Out of proximity: the cursor stops following this pen, and
+        # whatever it hovered over gets its proximity out. Not while the
+        # tip is down -- that would end a drag the trigger is still
+        # holding; the next idle() after release() lifts it instead.
+        with self._lock:
+            if not self._in_proximity or self._held:
+                return
+            self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOOL_PEN, 0)
+            self._device.syn()
+            self._in_proximity = False
+            self._sent_proximity_out = True
 
     def click(self) -> None:
         # A pen tap -- tip down, then up -- at wherever the pen is
@@ -300,6 +367,10 @@ class UinputCursorBackend:
         # Tip down, and it stays down: every move_absolute until
         # release() drags with it.
         #
+        # Only while the pen hovers. Out of proximity nothing is aiming,
+        # and a tip landing at the last place something did would click
+        # wherever the aim used to be.
+        #
         # Not BTN_LEFT on `self._relative_device`: under a Wayland
         # compositor (seen on KWin) the tablet tool and the mouse are
         # separate pointers. The pen moves the visible cursor, but a
@@ -311,18 +382,24 @@ class UinputCursorBackend:
         # Pressure as well as BTN_TOUCH: for a pressure-capable tool
         # libinput decides tip contact from a pressure threshold and
         # ignores BTN_TOUCH alone.
-        self._device.write(
-            self._ecodes.EV_ABS, self._ecodes.ABS_PRESSURE, CLICK_PRESSURE
-        )
-        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 1)
-        self._device.syn()
-        self._held = True
+        with self._lock:
+            if not self._in_proximity or self._held:
+                return
+            self._device.write(
+                self._ecodes.EV_ABS, self._ecodes.ABS_PRESSURE, CLICK_PRESSURE
+            )
+            self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 1)
+            self._device.syn()
+            self._held = True
 
     def release(self) -> None:
-        self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_PRESSURE, 0)
-        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 0)
-        self._device.syn()
-        self._held = False
+        with self._lock:
+            if not self._held:
+                return
+            self._device.write(self._ecodes.EV_ABS, self._ecodes.ABS_PRESSURE, 0)
+            self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOUCH, 0)
+            self._device.syn()
+            self._held = False
 
     def displays(self) -> list:
         from boresight.displays import list_linux_displays
@@ -341,10 +418,8 @@ class UinputCursorBackend:
         # Lift the tip and leave proximity before going away, so the pen
         # is neither left pressed nor left hovering from the
         # compositor's point of view.
-        if self._held:
-            self.release()
-        self._device.write(self._ecodes.EV_KEY, self._ecodes.BTN_TOOL_PEN, 0)
-        self._device.syn()
+        self.release()
+        self.idle()
         self._device.close()
         self._relative_device.close()
 
@@ -386,6 +461,9 @@ class SmoothingCursorBackend:
         smoothed_x, smoothed_y = self._filter.apply(point, t=t)
         self._backend.move_absolute(smoothed_x, smoothed_y)
 
+    def idle(self) -> None:
+        self._backend.idle()
+
     def click(self) -> None:
         self._backend.click()
 
@@ -405,6 +483,9 @@ class _StampedMoves:
 
     def move_absolute(self, x: float, y: float) -> None:
         self._smoothing._move((x, y), self._t)  # noqa: SLF001 - its own view
+
+    def idle(self) -> None:
+        self._smoothing.idle()
 
     def click(self) -> None:
         self._smoothing.click()
@@ -436,6 +517,7 @@ class FakeCursorBackend:
         self.clicks: int = 0
         self.presses: int = 0
         self.releases: int = 0
+        self.idles: int = 0
         # The display last chosen with `show_on`, if any.
         self.display = None
 
@@ -454,6 +536,9 @@ class FakeCursorBackend:
 
     def release(self) -> None:
         self.releases += 1
+
+    def idle(self) -> None:
+        self.idles += 1
 
     def displays(self) -> list:
         from boresight.displays import Display

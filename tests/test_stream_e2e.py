@@ -1117,3 +1117,27 @@ def test_a_named_shot_does_not_move_a_button_someone_holds(
         _send_and_sync(second, UP)
 
     assert events_backend.events == [("press",), ("release",)]
+
+
+# --- A session that ends while aiming stops aiming ----------------------
+
+
+def test_a_session_that_ends_while_aiming_stops_aiming() -> None:
+    """Through the real server: the pen must not be left hovering at the
+    last aim of a camera that has gone, where on Linux it would keep the
+    window under it from taking the real mouse's clicks."""
+    backend = FakeCursorBackend()
+    entries = _manifest(VIDEO_DIR)["frames"][:2]
+    app = create_app(backend_factory=lambda: backend)
+
+    with TestClient(app) as client:
+        with client.websocket_connect(FRAME_SOCKET_PATH) as ws:
+            for entry in entries:
+                ws.send_bytes(pack_frame(CLIENT_MS, _frame_bytes(VIDEO_DIR, entry)))
+                ws.receive_json()
+            assert backend.calls, "the fixture frames should have aimed"
+            assert backend.idles == 0
+        # Out of the socket, still inside the app: the session has ended.
+        client.get("/")
+
+    assert backend.idles >= 1
