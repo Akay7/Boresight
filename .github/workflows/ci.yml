@@ -1,5 +1,6 @@
 # Lint, format and tests for the server; build and tests for the two C
-# components. The ESP-IDF/QEMU emulator tests are deliberately absent:
+# components; the printable case's checks, and its files for every shipped
+# configuration. The ESP-IDF/QEMU emulator tests are deliberately absent:
 # they need Docker and a firmware build, and stay opt-in
 # (BORESIGHT_EMULATOR_TESTS=1, see tests/test_firmware_emulator.py).
 name: CI
@@ -122,6 +123,32 @@ jobs:
       - run: cmake -S test_host -B build-host
       - run: cmake --build build-host --parallel
       - run: ctest --test-dir build-host --output-on-failure
+
+  # The printable case: a separate uv project (it needs the OpenCascade CAD
+  # kernel, which the package's environment never installs), pinned to
+  # Python 3.12 by its own .python-version. Its lint runs in the Python jobs
+  # above, with the rest of the tree. Every shipped configuration is built
+  # into one parts library and published as one artifact, only after the
+  # checks pass: a change that breaks a fit publishes nothing.
+  case:
+    name: Gun case (checks and parts library)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hardware/case
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: hardware/case/uv.lock
+      - run: uv sync --locked
+      - run: uv run pytest -q
+      - run: uv run boresight-case build --all --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: case
+          path: hardware/case/dist
 
   pi-gun:
     name: Pi gun (core-only install, deploy scripts)

@@ -1,0 +1,41 @@
+[project]
+name = "boresight-case"
+version = "0.1.0"
+description = "Parametric, printable modular case for the Boresight light gun"
+requires-python = ">=3.12"
+dependencies = [
+    # The CAD kernel (OpenCascade through OCP). Kept out of the boresight
+    # package and its environment on purpose: it is large, and its wheels
+    # lag new CPython releases, which is why this project pins 3.12 in
+    # .python-version while the root follows the newest Python.
+    "build123d>=0.13,<0.14",
+    # Mesh booleans for the geometry checks. The same checks then work on
+    # a third-party STL skin, which an OpenCascade check cannot load
+    # reliably.
+    "manifold3d>=3.5",
+]
+
+[project.scripts]
+boresight-case = "boresight_case.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/boresight_case"]
+
+# The root's lint rules, so `uv run ruff check` and the commit hooks at the
+# repository root treat this code exactly like the package's.
+[tool.ruff]
+extend = "../../pyproject.toml"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "error::DeprecationWarning",
+    "error::PendingDeprecationWarning",
+]

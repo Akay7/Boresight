@@ -54,8 +54,9 @@ any subset that surrounds the aim point stays within ~18mm.
 | *or* ESP32-CAM (AI-Thinker) | OV2640 camera, Wi-Fi and 4 MB PSRAM on one small board. Streams to the same server as the phone; see [The ESP32-CAM client](#the-esp32-cam-client) |
 | *or* Raspberry Pi Zero 2 W + CSI camera | A self-contained gun: the Pi aims with its own camera and plugs into the host as a USB mouse, with no server and no Wi-Fi. See [The Raspberry Pi gun](#the-raspberry-pi-gun) |
 | USB-serial adapter, 3.3 V logic | ESP32-CAM only. The board has no USB port of its own, so flashing goes through one |
-| 5 V supply, at least 1 A | ESP32-CAM only. The camera and radio draw current in bursts, and a weak supply shows up as brown-out resets |
-| NES Zapper shell | Gut the phototransistor board. With the phone, the trigger microswitch goes unused since the trigger is on-screen; with an ESP32-CAM it is wired to GPIO13 and becomes the trigger |
+| 5 V supply, at least 1 A | ESP32-CAM only. The camera and radio draw current in bursts, and a weak supply shows up as brown-out resets. The printed case's battery drawers and regulator are one |
+| Printed case | The recommended shell for the ESP32-CAM or the Pi gun: modular, printable, with AA, AAA, 18650 or USB power, an MX-style or lever microswitch trigger, and swappable skins. See [The printed case](#the-printed-case) |
+| *or* NES Zapper shell | Gut the phototransistor board. With the phone, the trigger microswitch goes unused since the trigger is on-screen; with an ESP32-CAM it is wired to GPIO13 and becomes the trigger |
 | Matte cardstock | Marker substrate. Never glossy |
 
 Phone cameras auto-expose aggressively and hit the same dynamic-range
@@ -1078,6 +1079,11 @@ Inside a shell the PCB antenna loses range. The board has a u.FL
 connector for an external antenna, selected by moving a 0 Ω resistor
 next to it.
 
+The [printed case](#the-printed-case) holds the board on its muzzle
+bulkhead and wires it as above: the trigger plug to GPIO13 and GND, its
+regulator to 5V and GND with the capacitor at the board, and a light guide
+from the GPIO33 LED to a window on top.
+
 ### Configure and flash
 
 Start the server bound to the network, as for the phone. It prints the
@@ -1103,9 +1109,25 @@ works. Copy those values into the firmware configuration and flash it:
     idf.py menuconfig        # Boresight camera -> Network
     idf.py -p /dev/ttyUSB0 flash monitor
 
-The ESP32-CAM has no USB port: flash through a 3.3 V USB-serial adapter,
-holding GPIO0 to GND while it powers up. `firmware/boresight-cam/README.md`
-has the details, and the firewall section above applies unchanged.
+The ESP32-CAM has no USB port: flash through a 3.3 V USB-serial adapter.
+Four wires carry power and serial, with TX and RX crossed over, and a
+jumper from IO0 to the GND beside it starts the board in its bootloader.
+Remove the jumper and press RST to run what you flashed. An adapter that
+shows up as `/dev/ttyACM0` rather than `/dev/ttyUSB0` needs that port in
+the command above.
+
+![Flashing wiring: the adapter's 5V and GND to the 5V row's 5V and GND, its TX to U0R and RX to U0T on the 3V3 row, and IO0 jumpered to the GND beside it](firmware/boresight-cam/docs/flashing.svg)
+
+If the board resets while flashing, or the log says `Brownout detector
+was triggered`, the adapter's USB power is not enough. Give the board its
+own 5 V supply and keep only GND, TX and RX to the adapter. The shared
+ground is what the serial link needs; the adapter's 5V stays unconnected,
+since two 5 V sources must never be joined:
+
+![Flashing with a separate supply: the supply's +5V and GND to the 5V row's 5V and GND, the adapter's GND, TX and RX to GND, U0R and U0T at the end of the 3V3 row, and IO0 jumpered to the GND beside it](firmware/boresight-cam/docs/flashing-external-power.svg)
+
+`firmware/boresight-cam/README.md` has the details, and the firewall
+section above applies unchanged.
 
 The configuration is saved to `sdkconfig`, which is gitignored because it
 holds the Wi-Fi password and the token.
@@ -1468,6 +1490,34 @@ Full detail — the build, the manifest, manual verification against
 `vkcube`, and the present-hook's design — lives in
 `native/vulkan_overlay/README.md`.
 
+## The printed case
+
+A modular, printable case for both self-contained guns lives in
+[hardware/case/](hardware/case/README.md). One core (receiver, barrel,
+grip, rear cap and trigger cassette) takes either board kit: the
+ESP32-CAM on the muzzle bulkhead, or the Pi Zero 2 W on a sled with a
+Camera Module 2 or 3 at the muzzle. The grip takes a 4×AA, 4×AAA, 18650
+or USB-tether drawer; the trigger is a lever pivoting on a piece of
+filament or an M3 bolt, or a push button, with an MX-style keyboard switch
+or a lever microswitch; and two skin styles change how it looks. It comes apart with
+one hex key: every screw goes into a captive nut, every wire between
+modules is a plug.
+
+It is generated from code (build123d) and checked by computer for bed
+fit, support-free printing, interference with every part, the camera's
+view and the skins' keep-out zones. It has never been printed. The
+trigger, LED and power use the pins the firmware and the Pi gun already
+default to: GPIO13 on the ESP32-CAM; GPIO17 (pin 11) and GPIO27 (pin 13)
+on the Pi.
+
+    cd hardware/case
+    uv sync
+    uv run boresight-case build --all --out dist
+
+CI builds every shipped configuration and keeps them as one downloadable
+parts library: every distinct part's STL, 3MF and STEP once, and each
+configuration's bill of materials and exploded view.
+
 ## Repo layout
 
 Target layout for the full pipeline — some of this doesn't exist yet.
@@ -1524,9 +1574,11 @@ a defect invisible to a test suite that always runs from a checkout.
           components/
             boresight_proto/  # wire format, debouncer, LED patterns -- no ESP-IDF
           test_host/          # host tests for boresight_proto (CMake + CTest)
-          tools/              # Docker build and QEMU runner, no ESP-IDF install
+          tools/              # Docker build, QEMU runner, diagram render; no ESP-IDF install
+          docs/               # wiring diagrams: WireViz sources and their SVGs
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
       deploy/pi/              # the Pi gun's installer, USB gadget script, services
+      hardware/case/          # the printable modular case (its own uv project)
       tests/
         fixtures/             # rendered frame sequences (Git LFS)
 

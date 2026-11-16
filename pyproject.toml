@@ -65,6 +65,11 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
+# Only this package's suite. hardware/case is a separate project with its
+# own environment (it needs a CAD kernel this one does not install), so
+# collecting its tests here -- as the commit hook's `uv run pytest` would
+# without this line -- fails on import. CI runs that suite in its own job.
+testpaths = ["tests"]
 markers = [
     "emulator: boots the ESP32-CAM firmware in QEMU; opt-in, see tests/test_firmware_emulator.py",
 ]

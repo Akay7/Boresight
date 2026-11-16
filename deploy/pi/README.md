@@ -19,6 +19,7 @@ confirm; until it is ticked, treat every default here as a guess.
 | Push button | Between GPIO 17 (header pin 11) and any GND pin. The internal pull-up is used |
 | LED and resistor (optional) | GPIO 27 (header pin 13) to the LED, resistor, GND. Without one the state is only logged |
 | A USB cable to the host | Into the Pi's **data** port, the one nearer the middle of the board. It also powers the Pi |
+| A case (optional) | The printed case in [hardware/case/](../../hardware/case/README.md): the Pi kit with the USB tether drawer. It wires the trigger and LED to the pins above, and its rear cap comes off to reach the micro-SD card |
 
 Set up the SD card with Raspberry Pi Imager: Lite, Trixie, your Wi-Fi and an
 SSH user for installing. Wi-Fi is only for you; the gun does not use it.
