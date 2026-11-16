@@ -865,7 +865,7 @@ async def run_frame_session(
                 fps = stats.processed / max(now - started, 1e-9)
                 logger.info(
                     "streaming from %s: %.1f fps, %s markers, %s, "
-                    "%d received / %d solved / %d dropped / %d failed",
+                    "%d received / %d processed / %d dropped / %d failed",
                     session.label(),
                     fps,
                     stats.markers_detected,
@@ -952,7 +952,7 @@ async def run_frame_session(
         if seen_first_frame:
             logger.info(
                 "client disconnected: %s after %.1fs, "
-                "%d received / %d solved / %d dropped / %d failed (%.1f fps)",
+                "%d received / %d processed / %d dropped / %d failed (%.1f fps)",
                 session.label(),
                 elapsed,
                 stats.received,
