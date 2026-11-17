@@ -13,13 +13,15 @@ the full walkthrough. This file is the build reference.
     main/                     the firmware (ESP-IDF v5.x)
       Kconfig.projbuild       every setting, under "Boresight camera"
       main.c                  boot, configuration check, capture loop
+      ota.c                   firmware updates: install, keep, roll back
       link.c                  frame socket: connect, hello, send, telemetry
       camera.c  wifi.c  buttons.c  status_led.c
       camera_fake.c  net_openeth.c  console.c
                               emulator build only: recorded frames,
                               emulated Ethernet, console buttons
     sdkconfig.emulator        the emulator profile's settings (no secrets)
-    partitions_emulator.csv   its partition table (room for the frames)
+    partitions.csv            both profiles: two firmware slots for updates
+                              over Wi-Fi, NVS where it always was
     tools/idf.sh              idf.py inside the pinned ESP-IDF container
     tools/run-emulator.sh     boot an image in QEMU, in the same container
     docs/flashing.py          draws docs/flashing.svg, the flashing wiring
@@ -74,6 +76,16 @@ swaps in three things and nothing else:
 - the trigger pin: console commands. Type `press`, `release` or `click` in
   the emulator's console; they feed the real debouncer and send path.
 
+Type `setup` to restart into setup mode, which a board enters with the
+trigger held at power-on (the console only starts after that). With no
+radio there is no setup network: the same page is served on the emulated
+Ethernet, and `run-emulator.sh` forwards it to
+<http://127.0.0.1:7380/> -- loopback only, nothing else on your network
+can reach it (`BORESIGHT_EMULATOR_SETUP_PORT` picks another port).
+Settings saved there survive the device's restarts for the rest of the
+run; every `run-emulator.sh` starts from a freshly merged image, so they
+are gone next time.
+
 The emulated device dials `10.0.2.2:7391` with token `emulator-token`:
 that is the loopback of the machine running QEMU, so a server bound to
 `127.0.0.1` is reached with nothing exposed. For example:
@@ -88,6 +100,23 @@ board. Quit QEMU with Ctrl-A X.
 image instead. It has no Ethernet or fake camera, so it only gets through
 its boot checks.
 
+Settings saved there, and firmware uploaded there, survive the device's
+restarts for the rest of the run.
+
+To watch a rollback, build an image that resets at every boot, before it
+can be kept, into its own directory:
+
+    mkdir -p build-emulator/crash
+    echo CONFIG_BORESIGHT_TEST_RESET_AT_BOOT=y > build-emulator/crash/sdkconfig.crash
+    tools/idf.sh emulator -B build-emulator/crash \
+        -D SDKCONFIG=build-emulator/crash/sdkconfig \
+        -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.emulator;build-emulator/crash/sdkconfig.crash" \
+        build
+
+Upload `build-emulator/crash/boresight-cam.bin` from setup mode: the
+device restarts into `ota_1`, resets, and comes back on `ota_0` with
+`update to ... in ota_1 did not start: rolled back`.
+
 ### The end-to-end suite
 
     tools/idf.sh emulator build
@@ -97,14 +126,23 @@ its boot checks.
 against the real server with a recording cursor backend, so nothing moves
 your mouse, and checks: identification and streaming, with every solved
 position one the same frames replay to; trigger press and release; a
-server restart, with a press made while it was down never replayed; and a
-refused token reported and not retried within the 30 s back-off. Without
+server restart, with a press made while it was down never replayed; a
+refused token reported and not retried within the 30 s back-off; and setup
+mode, where an invalid submission stores nothing and names the field, the
+stored token never appears in the page, saving the right token for a
+server that refuses the built-in one gets the device streaming again
+after its restart, a board image, a cut-off image and a file that is not
+firmware are each refused with the reason, and the emulator's own image
+installs into the other slot and streams with the stored settings. Without
 the variable, a Docker that answers and a built image, the normal `pytest`
 run skips it and says which is missing.
 
 It found two bugs before any board existed: a refused token was retried
 like a network blip, and a server restart was misread as a certificate
-mismatch.
+mismatch. Setup mode's tests found two more: an empty field ended the page
+early (an empty chunk ends a chunked response), and `esp_restart()` hangs
+the restarted image in QEMU, which never starts the second core again, so
+the emulator build restarts with a whole-system reset instead.
 
 What emulation cannot tell you: exposure and gain, rolling shutter,
 sensor noise, Wi-Fi throughput and latency, the real frame rate, the LED
@@ -149,6 +187,28 @@ the one run, so the project does not depend on it:
 
     uv run --no-project --with schemdraw==0.23 \
         python firmware/boresight-cam/docs/flashing.py
+
+## Flashing from a browser, and publishing
+
+The flasher is a page of the project site (`mkdocs.yml` and `website/` at
+the repository root), not of the Boresight server. Served locally, it
+flashes the build in `build/` from Chrome or Edge over Web Serial:
+
+    uv run --group docs mkdocs serve      # http://127.0.0.1:8000/Boresight/flash/
+
+`BORESIGHT_FIRMWARE=<build or bundle>` picks another build. It writes the
+four parts in `flash_args` — never NVS, so stored settings survive —
+bundled by `website/flasher.py`. ESP Web Tools is not in the repository:
+the first site build fetches it with `tools/vendor-esp-web-tools.sh`, at a
+pinned version checked against its SHA-512, and keeps it in
+`website/vendor/` (ignored) after that.
+
+CI builds the generic image, with no `sdkconfig` and so no secrets, on
+every push (`.github/workflows/firmware.yml`), and for a `v*` tag
+publishes a GitHub Release; the tag must match `PROJECT_VER` in
+`CMakeLists.txt`. The site, with the latest release in its flasher, is
+published on GitHub Pages from `main` and from tags
+(`.github/workflows/site.yml`).
 
 ## TLS
 

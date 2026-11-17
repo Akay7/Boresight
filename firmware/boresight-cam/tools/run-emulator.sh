@@ -11,6 +11,10 @@
 # 7391, token `emulator-token` (see sdkconfig.emulator). The container
 # shares the host's network namespace so that loopback is the host's; a
 # server bound to 127.0.0.1 is reached with nothing exposed beyond it.
+#
+# In setup mode (type `setup`) the device's page is forwarded to
+# http://127.0.0.1:7380/ -- loopback only, so nothing else on the network
+# can reach it. BORESIGHT_EMULATOR_SETUP_PORT picks another port.
 set -euo pipefail
 
 IMAGE="${IDF_IMAGE:-espressif/idf:v5.4}"
@@ -19,6 +23,7 @@ RUNTIME="${CONTAINER:-docker}"
 # device image instead: it has no emulated Ethernet or fake camera, so it
 # only gets as far as its boot checks -- which is what that is for.
 BUILD_DIR="${BORESIGHT_EMULATOR_BUILD:-build-emulator}"
+SETUP_PORT="${BORESIGHT_EMULATOR_SETUP_PORT:-7380}"
 
 firmware_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 repo_dir="$(cd "$firmware_dir/../.." && pwd)"
@@ -33,6 +38,7 @@ run_flags=(
     -v "$repo_dir:/project"
     -w "/project/firmware/boresight-cam/$BUILD_DIR"
     -e HOME=/tmp
+    -e SETUP_PORT="$SETUP_PORT"
 )
 if [ -t 0 ] && [ -t 1 ]; then
     run_flags+=(-t)
@@ -57,6 +63,6 @@ exec "$RUNTIME" run "${run_flags[@]}" "$IMAGE" bash -c '
     exec qemu-system-xtensa -nographic -machine esp32 \
         -m 4M \
         -drive file=flash_image.bin,if=mtd,format=raw \
-        -nic user,model=open_eth \
+        -nic "user,model=open_eth,hostfwd=tcp:127.0.0.1:$SETUP_PORT-:80" \
         -global driver=timer.esp32.timg,property=wdt_disable,value=true
 '

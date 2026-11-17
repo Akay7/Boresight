@@ -26,6 +26,7 @@ def test_every_table_defaults_without_a_file(tmp_path: Path) -> None:
     startup = resolve_settings(tmp_path / "none.toml", env={}).startup
     assert startup.server.port == 7331
     assert startup.server.qr is True
+    assert startup.server.announce is True
     assert startup.markers.layout == "file"
     assert startup.detection.tracker() == TrackerOptions()
     assert startup.recording.seconds == 10.0
@@ -34,7 +35,7 @@ def test_every_table_defaults_without_a_file(tmp_path: Path) -> None:
 def test_the_new_tables_come_from_the_file(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "config.toml",
-        "[server]\nport = 9100\ntls = true\nqr = false\n"
+        "[server]\nport = 9100\ntls = true\nqr = false\nannounce = false\n"
         '[markers]\nlayout = "screen:1920x1080"\n'
         "[detection]\ncoarse_min_side_px = 48\nfull_pass_every = 5\n"
         "[recording]\nseconds = 5\nmax_mb = 16\n",
@@ -43,6 +44,7 @@ def test_the_new_tables_come_from_the_file(tmp_path: Path) -> None:
     assert startup.server.port == 9100
     assert startup.server.tls is True
     assert startup.server.qr is False
+    assert startup.server.announce is False
     assert startup.markers.layout == "screen:1920x1080"
     assert startup.detection.tracker() == TrackerOptions(
         min_side_px=48.0, full_pass_every=5
@@ -56,10 +58,17 @@ def test_tracking_off_means_no_tracker(tmp_path: Path) -> None:
 
 
 def test_a_flag_overrides_a_file_boolean_either_way(tmp_path: Path) -> None:
-    path = _write(tmp_path / "config.toml", "[server]\ntls = true\nqr = false\n")
-    live = resolve_settings(path, env={}, cli={"server.tls": False, "server.qr": True})
+    path = _write(
+        tmp_path / "config.toml", "[server]\ntls = true\nqr = false\nannounce = false\n"
+    )
+    live = resolve_settings(
+        path,
+        env={},
+        cli={"server.tls": False, "server.qr": True, "server.announce": True},
+    )
     assert live.startup.server.tls is False
     assert live.startup.server.qr is True
+    assert live.startup.server.announce is True
 
 
 @pytest.mark.parametrize(
@@ -71,6 +80,7 @@ def test_a_flag_overrides_a_file_boolean_either_way(tmp_path: Path) -> None:
         ("[detection]\nfull_pass_every = 0\n", "full_pass_every"),
         ("[recording]\nseconds = -1\n", "seconds"),
         ("[server]\nprot = 9100\n", "prot"),
+        ('[server]\nannounce = "no"\n', "announce"),
     ],
 )
 def test_a_bad_value_in_a_new_table_is_refused(

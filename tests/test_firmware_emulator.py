@@ -2,9 +2,10 @@
 
 Everything above the camera sensor and the radio is the firmware that
 runs on a board: the WebSocket client, the fragmented frame send,
-`hello`, `rtt`, the debouncer, trigger press and release, reconnection
-and token refusal. The emulator build swaps in three things only --
-recorded frames of the Blender scene rendered as the ESP32-CAM sees it
+`hello`, `rtt`, the debouncer, trigger press and release, reconnection,
+token refusal, and setup mode's page, checks and stored settings. The
+emulator build swaps in three things only -- recorded frames of the
+Blender scene rendered as the ESP32-CAM sees it
 (tests/fixtures/esp32cam_video) for the sensor, QEMU's emulated Ethernet
 for Wi-Fi, and console commands for reading the trigger pin -- so what
 fails here fails on a board too.
@@ -18,8 +19,10 @@ minutes:
 The server is the real app on 127.0.0.1:7391 with a recording cursor
 backend, so nothing moves the mouse and nothing is reachable from
 elsewhere. One emulator boot serves the whole module; the tests run in
-file order, and token refusal goes last because the device then waits
-30 seconds before trying again.
+file order. Token refusal comes near the end because the device then
+waits 30 seconds before trying again, and setup mode last, since what it
+stores outlives the restart (for this run only: the image is merged
+afresh on every boot).
 
 Asserts on events and counts only. Emulated time is not real time, so
 frame rates and latencies measured here mean nothing.
@@ -32,9 +35,12 @@ import logging
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -52,6 +58,9 @@ REPO = Path(__file__).parents[1]
 FIRMWARE = REPO / "firmware" / "boresight-cam"
 RUN_EMULATOR = FIRMWARE / "tools" / "run-emulator.sh"
 EMULATOR_IMAGE = FIRMWARE / "build-emulator" / "flash_args"
+# The application images a firmware upload takes.
+EMULATOR_APP = FIRMWARE / "build-emulator" / "boresight-cam.bin"
+DEVICE_APP = FIRMWARE / "build" / "boresight-cam.bin"
 DEVICE_FIXTURE = REPO / "tests" / "fixtures" / "esp32cam_video"
 
 # Fixed by sdkconfig.emulator.
@@ -125,8 +134,11 @@ class LoopbackServer:
         logging.getLogger("boresight").setLevel(logging.INFO)
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
+        # The token the running server takes; what /sessions is asked with.
+        self.token = TOKEN
 
     def start(self, token: str = TOKEN) -> None:
+        self.token = token
         app = create_app(
             backend_factory=lambda: self.backend,
             config=ServerConfig(host="127.0.0.1", port=PORT, token=token),
@@ -158,7 +170,7 @@ class LoopbackServer:
             self._server = None
 
     def sessions(self) -> list[dict]:
-        url = f"http://127.0.0.1:{PORT}/sessions?token={TOKEN}"
+        url = f"http://127.0.0.1:{PORT}/sessions?token={self.token}"
         with urllib.request.urlopen(url, timeout=5) as response:
             return json.load(response)["sessions"]
 
@@ -175,11 +187,17 @@ class Emulator:
 
     def __init__(self) -> None:
         self.name = f"boresight-emulator-{uuid.uuid4().hex[:8]}"
+        # Where run-emulator.sh forwards the setup page, on loopback.
+        self.setup_port = _free_loopback_port()
         self.lines: list[str] = []
         self._changed = threading.Condition()
         self._process = subprocess.Popen(
             [str(RUN_EMULATOR)],
-            env={**os.environ, "BORESIGHT_EMULATOR_NAME": self.name},
+            env={
+                **os.environ,
+                "BORESIGHT_EMULATOR_NAME": self.name,
+                "BORESIGHT_EMULATOR_SETUP_PORT": str(self.setup_port),
+            },
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -225,6 +243,39 @@ class Emulator:
         subprocess.run([RUNTIME, "rm", "-f", self.name], capture_output=True)
         self._process.kill()
         self._process.wait(timeout=10)
+
+
+def _free_loopback_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _setup_page(
+    emulator: Emulator, path: str = "/", form: dict | None = None
+) -> tuple[int, str]:
+    """GET (or with `form`, POST) the device's setup page: status and body."""
+    data = urllib.parse.urlencode(form).encode() if form is not None else None
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{emulator.setup_port}{path}", data=data
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode()
+
+
+def _lan_address() -> str | None:
+    """This machine's address on its network, if it has one. Nothing is
+    sent: connecting a UDP socket only picks the route."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.connect(("192.0.2.1", 9))
+        except OSError:
+            return None
+        address = probe.getsockname()[0]
+    return None if address.startswith("127.") else address
 
 
 def _wait_until(condition, timeout: float, what: str) -> None:
@@ -358,3 +409,160 @@ def test_a_refused_token_is_reported_and_not_hammered(
     # The back-off is 30 s; anything under it proves there is no tight loop.
     time.sleep(25)
     assert server.refusals.count == refusals
+
+
+def test_an_invalid_setup_submission_changes_nothing(
+    server: LoopbackServer, emulator: Emulator
+) -> None:
+    mark = emulator.mark()
+    emulator.send("setup")
+    emulator.wait_for(r"restarting into setup mode", timeout=10, after=mark)
+    emulator.wait_for(r"state: setup", timeout=60, after=mark)
+    emulator.wait_for(r"setup page served on port 80", timeout=60, after=mark)
+
+    _wait_until(
+        lambda: _setup_page(emulator)[0] == 200, timeout=30, what="the setup page"
+    )
+    status, page = _setup_page(emulator)
+    assert "Boresight camera" in page
+    assert 'value="7391"' in page
+    # The build's token is in effect and set, but never in the page.
+    assert "emulator-token" not in page
+    assert "Token <span" in page and "(set: leave empty to keep it)" in page
+
+    status, page = _setup_page(
+        emulator,
+        "/save",
+        {"ssid": "emulated", "port": "70000", "token": "would-be-new"},
+    )
+    assert status == 400
+    assert "Nothing was saved" in page
+    assert "A whole number from 1 to 65535." in page
+    # What was typed comes back, so nothing has to be typed again.
+    assert 'value="70000"' in page
+
+    # Still in setup, with nothing stored.
+    time.sleep(2)
+    assert not any("leaving setup mode" in line for line in emulator.lines[mark:])
+    status, page = _setup_page(emulator)
+    assert status == 200 and 'value="7391"' in page
+
+    # Any other path leads to the page, as a phone's sign-in check does.
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{emulator.setup_port}/generate_204"
+    )
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        opener.open(request, timeout=10)
+        raise AssertionError("expected a redirect")
+    except urllib.error.HTTPError as error:
+        assert error.code == 302
+        assert error.headers["Location"] == "/"
+
+    # Forwarded to loopback only: not reachable on this machine's network
+    # address.
+    lan = _lan_address()
+    if lan is not None:
+        with socket.socket() as probe:
+            probe.settimeout(2)
+            assert probe.connect_ex((lan, emulator.setup_port)) != 0
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def test_a_token_fixed_through_setup_mode_is_accepted(
+    server: LoopbackServer, emulator: Emulator
+) -> None:
+    """The server still refuses the build's token (the previous test left
+    it so): set the right one on the device and it streams again."""
+    mark = emulator.mark()
+    refusals = server.refusals.count
+
+    status, page = _setup_page(
+        emulator, "/save", {"ssid": "emulated", "token": "not-the-emulator-token"}
+    )
+    assert status == 200 and "Saved" in page
+    emulator.wait_for(r"leaving setup mode: restarting", timeout=10, after=mark)
+    emulator.wait_for(r"token set \(device\)", timeout=60, after=mark)
+    emulator.wait_for(r"state: streaming", timeout=90, after=mark)
+
+    _wait_until(
+        lambda: server.device_session() is not None,
+        timeout=10,
+        what="the device session with the new token",
+    )
+    assert server.refusals.count == refusals
+
+
+def _upload(emulator: Emulator, image: bytes) -> tuple[int, str]:
+    """POST a firmware image to the setup page as the page's script does."""
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{emulator.setup_port}/update",
+        data=image,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    try:
+        # Emulated Ethernet and flash: a megabyte takes a while.
+        with urllib.request.urlopen(request, timeout=300) as response:
+            return response.status, response.read().decode()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read().decode()
+
+
+def test_a_board_image_and_a_cut_one_are_refused(
+    server: LoopbackServer, emulator: Emulator
+) -> None:
+    if not DEVICE_APP.exists():
+        pytest.skip("no board image: run `tools/idf.sh device build`")
+    mark = emulator.mark()
+    emulator.send("setup")
+    emulator.wait_for(r"setup page served on port 80", timeout=90, after=mark)
+    _wait_until(
+        lambda: _setup_page(emulator)[0] == 200, timeout=30, what="the setup page"
+    )
+    status, page = _setup_page(emulator)
+    assert "Running 0.1.0+emulator" in page
+
+    status, page = _upload(emulator, DEVICE_APP.read_bytes())
+    assert status == 400
+    assert "this is the emulator, which takes only an emulator build" in page
+
+    image = EMULATOR_APP.read_bytes()
+    status, page = _upload(emulator, image[: len(image) // 2])
+    assert status == 400
+    assert "incomplete or damaged" in page
+
+    status, page = _upload(emulator, b"not a firmware at all" * 50)
+    assert status == 400
+    assert "Not a firmware image" in page
+
+    # Nothing was installed, and setup mode carries on.
+    time.sleep(2)
+    assert not any("leaving setup mode" in line for line in emulator.lines[mark:])
+    assert _setup_page(emulator)[0] == 200
+
+
+def test_a_firmware_uploaded_in_setup_mode_is_installed(
+    server: LoopbackServer, emulator: Emulator
+) -> None:
+    """Still in setup mode from the previous test: install the emulator's
+    own image, which goes to the other slot and keeps the stored token
+    the server now insists on."""
+    mark = emulator.mark()
+
+    status, page = _upload(emulator, EMULATOR_APP.read_bytes())
+    assert status == 200, page
+    assert "Installed 0.1.0+emulator" in page
+
+    emulator.wait_for(r"leaving setup mode: restarting", timeout=10, after=mark)
+    emulator.wait_for(r"running 0\.1\.0\+emulator from ota_1", timeout=90, after=mark)
+    emulator.wait_for(r"state: streaming", timeout=90, after=mark)
+    emulator.wait_for(r"firmware 0\.1\.0\+emulator started: kept", 10, mark)
+    _wait_until(
+        lambda: server.device_session() is not None,
+        timeout=10,
+        what="the device session after the update",
+    )

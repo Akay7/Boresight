@@ -13,7 +13,7 @@ BLOCK = textwrap.dedent(
     import importlib.abc, sys
 
     SERVER_ONLY = {"fastapi", "uvicorn", "starlette", "pydantic", "evdev",
-                   "cryptography", "segno", "httpx", "websockets"}
+                   "cryptography", "segno", "httpx", "websockets", "zeroconf"}
 
     class Blocker(importlib.abc.MetaPathFinder):
         def find_spec(self, name, path, target=None):

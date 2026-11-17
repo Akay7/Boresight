@@ -28,6 +28,8 @@ static const char *state_name(bp_link_state_t state)
         return "error";
     case BP_LINK_STREAMING:
         return "streaming";
+    case BP_LINK_SETUP:
+        return "setup";
     default:
         return "unknown";
     }

@@ -292,6 +292,7 @@ static void test_led_patterns_follow_the_link_state(void)
     CHECK(bp_led_pattern(BP_LINK_ERROR, true, 0) == BP_LED_ERROR_FLASH);
     CHECK(bp_led_pattern(BP_LINK_STREAMING, true, 100) == BP_LED_SOLID);
     CHECK(bp_led_pattern(BP_LINK_STREAMING, false, 100) == BP_LED_HEARTBEAT);
+    CHECK(bp_led_pattern(BP_LINK_SETUP, true, 0) == BP_LED_DOUBLE_BLINK);
 }
 
 static void test_stale_telemetry_is_not_shown_as_solved(void)
@@ -304,9 +305,9 @@ static void test_led_patterns_are_distinguishable(void)
 {
     /* Sampled over 3 s at 10 ms: every pair of patterns must disagree
      * somewhere, or the person holding the gun cannot tell them apart. */
-    const bp_led_pattern_t patterns[] = {BP_LED_SLOW_BLINK, BP_LED_FAST_BLINK,
+    const bp_led_pattern_t patterns[] = {BP_LED_SLOW_BLINK,  BP_LED_FAST_BLINK,
                                          BP_LED_ERROR_FLASH, BP_LED_SOLID,
-                                         BP_LED_HEARTBEAT};
+                                         BP_LED_HEARTBEAT,   BP_LED_DOUBLE_BLINK};
     const size_t count = sizeof patterns / sizeof patterns[0];
     for (size_t a = 0; a < count; a++) {
         for (size_t b = a + 1; b < count; b++) {

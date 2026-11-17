@@ -10,7 +10,7 @@ CONFIG_ETH_USE_OPENETH=y
 
 # The embedded frames need more room than the single-app layout gives.
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions_emulator.csv"
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 
 # The machine running QEMU is 10.0.2.2 from inside it. Port 7391, not the

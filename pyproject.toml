@@ -34,6 +34,10 @@ server = [
     # Encodes the phone URL as a QR code printed at startup. Pure Python
     # with no dependencies of its own; only its module matrix is used.
     "segno>=1.6.6",
+    # Announces the server over multicast DNS (`_boresight._tcp`), so an
+    # ESP32-CAM left without a server address finds it (discovery.py).
+    # LGPL-2.1-or-later, used unmodified as an installed library.
+    "zeroconf>=0.136",
 ]
 # The on-screen marker overlay only. Kept out of the core dependencies
 # deliberately: this project uses opencv-python-headless precisely to
@@ -42,6 +46,9 @@ server = [
 overlay = ["PySide6-Essentials>=6.8"]
 
 [dependency-groups]
+# The project site (mkdocs.yml): `uv run --group docs mkdocs serve`. Not
+# in dev, so a plain `uv sync` stays as it was.
+docs = ["mkdocs-material>=9.5"]
 dev = [
     "boresight[server]",
     "pytest>=8.3",

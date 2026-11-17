@@ -151,6 +151,8 @@ bp_led_pattern_t bp_led_pattern(bp_link_state_t state, bool last_solved,
         return BP_LED_FAST_BLINK;
     case BP_LINK_ERROR:
         return BP_LED_ERROR_FLASH;
+    case BP_LINK_SETUP:
+        return BP_LED_DOUBLE_BLINK;
     case BP_LINK_STREAMING:
     default:
         return (last_solved && ms_since_stats < BP_STATS_STALE_MS)
@@ -173,6 +175,12 @@ bool bp_led_on(bp_led_pattern_t pattern, uint32_t now_ms)
     }
     case BP_LED_SOLID:
         return true;
+    case BP_LED_DOUBLE_BLINK: {
+        /* Two longer flashes every two seconds: fewer, longer and slower
+         * than the error's three. */
+        uint32_t phase = now_ms % 2000u;
+        return phase < 150u || (phase >= 300u && phase < 450u);
+    }
     case BP_LED_HEARTBEAT:
     default:
         return now_ms % 1000u < 80u;
