@@ -3,10 +3,12 @@
 #
 # Built strictly on every push and pull request, so a README change that
 # breaks a link fails its own pull request. Deployed to GitHub Pages from
-# main and from version tags, with the latest release's firmware bundle in
-# the flasher -- fetched at build time, so no browser ever has to fetch a
-# Release download (they send no CORS headers). Before the first release
-# the flasher says there is no firmware yet.
+# main only -- Pages refuses a deploy from a tag -- with the latest
+# release's firmware bundle in the flasher, fetched at build time so no
+# browser ever has to fetch a Release download (they send no CORS
+# headers). A version tag reaches the site through firmware.yml: once it
+# has published the release, this workflow runs again on main and picks
+# it up. Before the first release the flasher says there is no firmware.
 #
 # GitHub Pages must be enabled once, with "GitHub Actions" as its source,
 # in the repository's settings.
@@ -15,7 +17,6 @@ name: Site
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
   # A release published by firmware.yml: put its image in the flasher.
@@ -39,8 +40,11 @@ jobs:
       - name: The latest release's firmware, if there is one
         env:
           GH_TOKEN: ${{ github.token }}
+        # Only "there is no release" is passed over: a release that fails
+        # to download fails the build rather than publish an empty flasher.
         run: |
-          if gh release download --repo "$GITHUB_REPOSITORY" --dir release; then
+          if gh release view --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release download --repo "$GITHUB_REPOSITORY" --dir release --pattern '*'
             echo "BORESIGHT_FIRMWARE=$PWD/release" >> "$GITHUB_ENV"
           else
             echo "no release yet: the flasher will say so"
@@ -60,9 +64,9 @@ jobs:
   deploy:
     name: Publish on GitHub Pages
     if: >-
-      github.event_name != 'pull_request' &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') ||
-       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'))
+      github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.conclusion == 'success')
     needs: build
     runs-on: ubuntu-latest
     permissions:
