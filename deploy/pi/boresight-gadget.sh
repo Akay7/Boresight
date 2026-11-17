@@ -34,7 +34,10 @@ stop() {
 start() {
     modprobe libcomposite
     stop
-    udc=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+    udc=
+    for path in /sys/class/udc/*; do
+        [ -e "$path" ] && { udc=${path##*/}; break; }
+    done
     if [ -z "$udc" ]; then
         echo "no USB device controller: is dtoverlay=dwc2,dr_mode=peripheral set" \
             "in config.txt, and has the Pi been rebooted since?" >&2
