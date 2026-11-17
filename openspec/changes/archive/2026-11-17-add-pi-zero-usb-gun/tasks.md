@@ -24,17 +24,20 @@
 
 ## 4. Pi hardware adapters
 
-- [ ] 4.1 Implement the picamera2 `Camera`: luma frames, fixed exposure/gain, AWB off, sensor timestamps, applied settings logged; verify by hand on a Pi Zero 2 W and record fps and solve rate at 640x480 and 1024x768 in the README
-- [ ] 4.2 Implement the gpiozero trigger and LED; verify by hand with a button and LED on the default pins
+Code written: picamera2 camera and gpiozero trigger/LED in
+`src/boresight/gun/hardware.py`. Hand checks on a Pi moved to
+`add-pi-zero-nes-console`, group 7.
 
 ## 5. Deployment
 
-- [ ] 5.1 Write `deploy/pi/boresight-gadget.sh` (configfs vendor/product/serial/strings, HID function from the shared descriptor, bind/unbind, idempotent); verify with `shellcheck` and by hand that a PC enumerates the mouse
-- [ ] 5.2 Write the systemd units and `install.sh` (dwc2 overlay, gadget oneshot, gun service ordered after it, sandboxing, restart on failure); verify with `systemd-analyze verify` and a power cycle that aiming works with no login
-- [ ] 5.3 Verify replug: unplug and replug the cable, the host sees the mouse again without a Pi reboot; record in the README
+Written: `deploy/pi/boresight-gadget.sh` (shellcheck clean), systemd units
+and `install.sh`. Hand checks on a Pi (enumeration, power cycle, replug)
+moved to `add-pi-zero-nes-console`, group 7.
 
 ## 6. Documentation
 
-- [ ] 6.1 Write `deploy/pi/README.md`: Imager setup, camera enable, wiring, copying `markers.toml`/lens/zero from the server, config reference, power notes, tested hosts, troubleshooting; verify by following it on a fresh SD card
+`deploy/pi/README.md` written; following it on a fresh SD card moved to
+`add-pi-zero-nes-console`, group 7.
+
 - [x] 6.2 Update the main README: hardware table, install line for the `server` extra, a Pi section beside the ESP32-CAM; verify links resolve
 - [x] 6.3 Run `openspec validate add-pi-zero-usb-gun --strict`; verify it passes
