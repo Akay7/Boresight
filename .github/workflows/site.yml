@@ -1,0 +1,76 @@
+# The project site (mkdocs.yml): the READMEs, rendered, with the ESP32-CAM
+# flasher as one of its pages.
+#
+# Built strictly on every push and pull request, so a README change that
+# breaks a link fails its own pull request. Deployed to GitHub Pages from
+# main and from version tags, with the latest release's firmware bundle in
+# the flasher -- fetched at build time, so no browser ever has to fetch a
+# Release download (they send no CORS headers). Before the first release
+# the flasher says there is no firmware yet.
+#
+# GitHub Pages must be enabled once, with "GitHub Actions" as its source,
+# in the repository's settings.
+name: Site
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+  # A release published by firmware.yml: put its image in the flasher.
+  workflow_run:
+    workflows: [Firmware]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The latest release's firmware, if there is one
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release download --repo "$GITHUB_REPOSITORY" --dir release; then
+            echo "BORESIGHT_FIRMWARE=$PWD/release" >> "$GITHUB_ENV"
+          else
+            echo "no release yet: the flasher will say so"
+          fi
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Build strictly
+        env:
+          NO_MKDOCS_2_WARNING: "1"
+        run: uv run --only-group docs mkdocs build --strict
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .site
+
+  deploy:
+    name: Publish on GitHub Pages
+    if: >-
+      github.event_name != 'pull_request' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'))
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

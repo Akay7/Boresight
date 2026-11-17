@@ -28,15 +28,17 @@ static const char *TAG = "camera";
 
 static framesize_t configured_frame_size(void)
 {
-#if CONFIG_BORESIGHT_FRAME_SIZE_VGA
-    return FRAMESIZE_VGA;
-#elif CONFIG_BORESIGHT_FRAME_SIZE_SVGA
-    return FRAMESIZE_SVGA;
-#elif CONFIG_BORESIGHT_FRAME_SIZE_HD
-    return FRAMESIZE_HD;
-#else
-    return FRAMESIZE_XGA;
-#endif
+    switch (settings()->resolution) {
+    case BP_RES_VGA:
+        return FRAMESIZE_VGA;
+    case BP_RES_SVGA:
+        return FRAMESIZE_SVGA;
+    case BP_RES_HD:
+        return FRAMESIZE_HD;
+    case BP_RES_XGA:
+    default:
+        return FRAMESIZE_XGA;
+    }
 }
 
 esp_err_t camera_start(int *width, int *height)
@@ -70,7 +72,7 @@ esp_err_t camera_start(int *width, int *height)
         /* Encoded by the sensor itself: no CPU spent on JPEG. */
         .pixel_format = PIXFORMAT_JPEG,
         .frame_size = configured_frame_size(),
-        .jpeg_quality = CONFIG_BORESIGHT_JPEG_QUALITY,
+        .jpeg_quality = settings()->jpeg_quality,
         .fb_count = 2,
         .fb_location = CAMERA_FB_IN_PSRAM,
         /* Overwrite unread frames rather than queue them. */
@@ -93,9 +95,9 @@ esp_err_t camera_start(int *width, int *height)
      * panel and the markers underexpose to mud. */
     sensor->set_exposure_ctrl(sensor, 0);
     sensor->set_aec2(sensor, 0);
-    sensor->set_aec_value(sensor, CONFIG_BORESIGHT_AEC_VALUE);
+    sensor->set_aec_value(sensor, settings()->exposure);
     sensor->set_gain_ctrl(sensor, 0);
-    sensor->set_agc_gain(sensor, CONFIG_BORESIGHT_AGC_GAIN);
+    sensor->set_agc_gain(sensor, settings()->gain);
 
     /* Reported from what the sensor holds, not from what was asked for. */
     const camera_status_t *status = &sensor->status;

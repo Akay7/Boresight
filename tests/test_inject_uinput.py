@@ -168,6 +168,7 @@ def test_click_is_a_pen_tap_not_a_mouse_button(fake_uinput) -> None:
     separate Wayland pointer's position instead."""
     backend = UinputCursorBackend()
     pen, relative_device = fake_uinput
+    backend.move_absolute(0.5, 0.5)
     pen.events.clear()
 
     backend.click()
@@ -201,6 +202,7 @@ def _tip(fake: FakeUInput) -> list[tuple[int, int]]:
 def test_press_move_release_is_a_drag(fake_uinput) -> None:
     backend = UinputCursorBackend()
     pen = fake_uinput[0]
+    backend.move_absolute(0.0, 0.0)
     pen.events.clear()
 
     backend.press()
@@ -215,6 +217,7 @@ def test_press_move_release_is_a_drag(fake_uinput) -> None:
 def test_close_lifts_a_held_tip(fake_uinput) -> None:
     backend = UinputCursorBackend()
     pen = fake_uinput[0]
+    backend.move_absolute(0.5, 0.5)
     backend.press()
     pen.events.clear()
 
@@ -245,3 +248,118 @@ def test_close_closes_both_devices(fake_uinput) -> None:
 
     assert fake_uinput[0].closed
     assert fake_uinput[1].closed
+
+
+def _pen_proximity(fake: FakeUInput) -> list[int]:
+    """BTN_TOOL_PEN writes, in order: 1 is into proximity, 0 out."""
+    return [
+        value
+        for etype, c, value in _writes(fake)
+        if etype == evdev.ecodes.EV_KEY and c == evdev.ecodes.BTN_TOOL_PEN
+    ]
+
+
+def test_the_pen_is_not_hovering_before_anything_aims(fake_uinput) -> None:
+    UinputCursorBackend()
+
+    assert _pen_proximity(fake_uinput[0]) == []
+
+
+def test_the_first_move_enters_proximity_with_one_real_proximity_out(
+    fake_uinput,
+) -> None:
+    """In, out, in: libinput forces a pen out of proximity 50 ms after
+    its last event until the device has sent a proximity out of its own,
+    which at camera frame rates hid the cursor between frames."""
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    pen.events.clear()
+
+    backend.move_absolute(0.25, 0.75)
+
+    assert _pen_proximity(pen) == [1, 0, 1]
+    # The position goes in the frame that brings the pen in, so it does
+    # not appear first wherever it last was.
+    first_frame = pen.events[: pen.events.index(("SYN",))]
+    assert (evdev.ecodes.EV_ABS, evdev.ecodes.ABS_X, round(0.25 * 32767)) in first_frame
+    assert (evdev.ecodes.EV_KEY, evdev.ecodes.BTN_TOOL_PEN, 1) in first_frame
+
+
+def test_later_moves_only_move(fake_uinput) -> None:
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    backend.move_absolute(0.5, 0.5)
+    pen.events.clear()
+
+    backend.move_absolute(0.6, 0.5)
+
+    assert _pen_proximity(pen) == []
+    assert pen.events.count(("SYN",)) == 1
+
+
+def test_idle_leaves_proximity_and_the_next_move_comes_back(fake_uinput) -> None:
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    backend.move_absolute(0.5, 0.5)
+    pen.events.clear()
+
+    backend.idle()
+    backend.idle()  # nothing aiming twice is still nothing aiming
+    backend.move_absolute(0.5, 0.5)
+
+    # One out, and a plain in: the real proximity out is already sent.
+    assert _pen_proximity(pen) == [0, 1]
+
+
+def test_idle_before_anything_aims_writes_nothing(fake_uinput) -> None:
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    pen.events.clear()
+
+    backend.idle()
+
+    assert pen.events == []
+
+
+def test_a_trigger_with_nothing_aiming_clicks_nowhere(fake_uinput) -> None:
+    """Out of proximity, a tap would land at the last place anything
+    aimed -- wherever the gun used to point."""
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    backend.move_absolute(0.5, 0.5)
+    backend.idle()
+    pen.events.clear()
+
+    backend.click()
+    backend.press()
+    backend.release()
+
+    assert all(c != evdev.ecodes.BTN_TOUCH for _, c, _ in _writes(pen))
+
+
+def test_idle_keeps_a_held_tip_until_it_is_released(fake_uinput) -> None:
+    """Leaving proximity mid-drag would end a drag the trigger still
+    holds; the next idle() after the release lifts the pen instead."""
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    backend.move_absolute(0.5, 0.5)
+    backend.press()
+    pen.events.clear()
+
+    backend.idle()
+    assert _pen_proximity(pen) == []
+
+    backend.release()
+    backend.idle()
+    assert _pen_proximity(pen) == [0]
+
+
+def test_close_leaves_proximity(fake_uinput) -> None:
+    backend = UinputCursorBackend()
+    pen = fake_uinput[0]
+    backend.move_absolute(0.5, 0.5)
+    pen.events.clear()
+
+    backend.close()
+
+    assert _pen_proximity(pen) == [0]

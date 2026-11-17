@@ -126,6 +126,7 @@ typedef enum {
     BP_LINK_CONNECTING,
     BP_LINK_ERROR,
     BP_LINK_STREAMING,
+    BP_LINK_SETUP,
 } bp_link_state_t;
 
 typedef enum {
@@ -134,6 +135,7 @@ typedef enum {
     BP_LED_ERROR_FLASH,    /* configuration, token or certificate error */
     BP_LED_SOLID,          /* streaming, last frame solved */
     BP_LED_HEARTBEAT,      /* streaming, last frame not solved */
+    BP_LED_DOUBLE_BLINK,   /* setup mode */
 } bp_led_pattern_t;
 
 /* Telemetry older than this counts as unsolved, so a stalled server does

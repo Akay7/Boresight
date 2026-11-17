@@ -52,9 +52,11 @@ any subset that surrounds the aim point stays within ~18mm.
 | --- | --- |
 | Android phone | Any phone with a modern browser and a rear camera. Doubles as the trigger — no dedicated webcam module or microcontroller needed |
 | *or* ESP32-CAM (AI-Thinker) | OV2640 camera, Wi-Fi and 4 MB PSRAM on one small board. Streams to the same server as the phone; see [The ESP32-CAM client](#the-esp32-cam-client) |
+| *or* Raspberry Pi Zero 2 W + CSI camera | A self-contained gun: the Pi aims with its own camera and plugs into the host as a USB mouse, with no server and no Wi-Fi. See [The Raspberry Pi gun](#the-raspberry-pi-gun) |
 | USB-serial adapter, 3.3 V logic | ESP32-CAM only. The board has no USB port of its own, so flashing goes through one |
-| 5 V supply, at least 1 A | ESP32-CAM only. The camera and radio draw current in bursts, and a weak supply shows up as brown-out resets |
-| NES Zapper shell | Gut the phototransistor board. With the phone, the trigger microswitch goes unused since the trigger is on-screen; with an ESP32-CAM it is wired to GPIO13 and becomes the trigger |
+| 5 V supply, at least 1 A | ESP32-CAM only. The camera and radio draw current in bursts, and a weak supply shows up as brown-out resets. The printed case's battery drawers and regulator are one |
+| Printed case | The recommended shell for the ESP32-CAM or the Pi gun: modular, printable, with AA, AAA, 18650 or USB power, an MX-style or lever microswitch trigger, and swappable skins. See [The printed case](#the-printed-case) |
+| *or* NES Zapper shell | Gut the phototransistor board. With the phone, the trigger microswitch goes unused since the trigger is on-screen; with an ESP32-CAM it is wired to GPIO13 and becomes the trigger |
 | Matte cardstock | Marker substrate. Never glossy |
 
 Phone cameras auto-expose aggressively and hit the same dynamic-range
@@ -64,7 +66,9 @@ problem as any other sensor here — pin exposure via the browser's
 ### Dedicated hardware
 
 Camera and trigger don't have to be a phone. The ESP32-CAM path is
-built — see [The ESP32-CAM client](#the-esp32-cam-client); the ESP32-S3
+built — see [The ESP32-CAM client](#the-esp32-cam-client) — and so is a
+Raspberry Pi Zero 2 W that does the aiming itself and reports as a USB
+mouse — see [The Raspberry Pi gun](#the-raspberry-pi-gun); the ESP32-S3
 native-USB path is still [Future work](#future-work). Rolling shutter is workable at short exposure; a global-shutter camera
 module trades cost for less motion blur if the stock OV2640 isn't
 enough.
@@ -328,6 +332,16 @@ confirmed on one real title (Blue Estate) that switches its own input
 handling to raw/relative mouse capture specifically in fullscreen,
 ignoring the OS cursor entirely; its own "Light Gun Mode" setting
 turned out to be the actual fix, not anything on Boresight's side.
+
+On Linux the virtual pointer is a pen hovering over a display tablet,
+so it can move the cursor without clicking. It hovers only while
+something aims: it comes into proximity with the first aimed frame and
+leaves once [the dropout hold](#holding-through-a-brief-dropout) runs
+out or the aiming camera disconnects. A trigger pulled while nothing
+aims clicks nowhere. Your own mouse is a separate pointer and works
+normally whenever the pen is away. Left hovering at a stale aim, the
+pen kept the window under it (VS Code, seen on KDE Plasma) from taking
+the mouse's clicks until the window was hidden and shown again.
 
 For a title where no such in-game setting exists, every backend can
 also emit a relative delta alongside its normal absolute placement —
@@ -666,6 +680,7 @@ token = "..."           # --token; a secret, like the TLS key beside it
 token_auto = false      # --token-auto / --no-token-auto
 tls = true              # --tls / --no-tls
 qr = true               # --qr / --no-qr
+announce = true         # --announce / --no-announce: see "Announced on the local network"
 # certfile, keyfile     # --certfile, --keyfile
 
 [markers]
@@ -751,16 +766,22 @@ left as it was. Over HTTP: `GET /settings`, `POST
 
 `aim_hold.py`'s `HoldingPipeline` wraps an `AimPipeline`: on a frame
 that does not solve, if a solved frame landed within the last `hold_s` (0.75s by default), it
-re-sends that same position to the (smoothing-wrapped) cursor backend.
-This exists because of a real platform behaviour, not a solving
-concern — a Wayland compositor hides a pointer that produces no events
-for a while, and an ordinary short dropout (a marker briefly occluded,
-motion blur) would otherwise read as the OS cursor blinking out and
-back. Re-sending an unchanged position through the one-euro filter
-converges to that same position regardless of elapsed time, so holding
-cannot itself introduce a jump — only fresh device traffic. Once the
-window lapses with no new solve, holding stops and the cursor is
-allowed to go idle. Each session has its own `HoldingPipeline`,
+re-sends that same position to the (smoothing-wrapped) cursor backend,
+so an ordinary short dropout (a marker briefly occluded, motion blur)
+does not count as losing the aim. Re-sending an unchanged position
+through the one-euro filter converges to that same position regardless
+of elapsed time, so holding cannot itself introduce a jump — only fresh
+device traffic. Once the window lapses with no new solve, holding stops
+and the backend is told nothing is aiming: the Linux pen leaves
+proximity and the cursor disappears until the next solve.
+
+The pen used to stay in proximity for good, which libinput (1.32's
+tablet proximity-timer plugin) does not allow a pen to do silently: a
+pen that has never sent a proximity out of its own is forced out 50 ms
+after its last event and back in with the next. At the ESP32-CAM's 12
+frames a second, 80 ms apart, the cursor blinked on every frame however
+well the aim held. The pen now sends one real proximity out when it
+first comes in, which turns that timer off for the device. Each session has its own `HoldingPipeline`,
 rebuilt whenever the marker source changes, so a switch does not carry a
 held position from the old source into the new one. The wire report and
 debug overlay are unaffected either way — a held frame is still
@@ -925,6 +946,37 @@ To close it again afterwards:
     sudo firewall-cmd --zone=home --remove-port=7331/tcp --permanent
     sudo firewall-cmd --reload
 
+### Announced on the local network
+
+Bound to a network address, the server announces itself over multicast
+DNS (mDNS / DNS-SD) as a `_boresight._tcp` service, for as long as it
+runs. An ESP32-CAM whose server address is left empty finds it that way
+before every connection attempt, so the PC's address can change without
+reconfiguring the device. The announcement carries the address, the
+port, the frame socket path and whether TLS is on — never the token,
+since anything on the network can read it. A server bound to loopback
+announces nothing.
+
+Check it from the PC (`avahi-browse` is in the `avahi-utils` or
+`avahi-tools` package):
+
+    avahi-browse -rt _boresight._tcp
+
+    = wlp194s0 IPv4 Boresight on gaming-pc    _boresight._tcp    local
+       hostname = [boresight-gaming-pc.local]
+       address = [192.168.1.20]
+       port = [7331]
+       txt = ["v=1" "tls=0" "path=/ws/frames"]
+
+The device's question arrives as multicast on UDP port 5353, which a
+firewall has to let in. firewalld's `home` zone does by default; another
+zone needs `sudo firewall-cmd --zone=<zone> --add-service=mdns`, and ufw
+`sudo ufw allow from 192.168.1.0/24 to any port 5353 proto udp`.
+
+`--no-announce` (or `announce = false` under `[server]`) turns it off;
+devices then need the address configured. The startup block says which:
+`announce on` or `announce off`.
+
 ### The server will not open itself up without a token
 
 Binding a non-loopback address without `--token` or `--token-auto` is a
@@ -1075,6 +1127,11 @@ Inside a shell the PCB antenna loses range. The board has a u.FL
 connector for an external antenna, selected by moving a 0 Ω resistor
 next to it.
 
+The [printed case](#the-printed-case) holds the board on its muzzle
+bulkhead and wires it as above: the trigger plug to GPIO13 and GND, its
+regulator to 5V and GND with the capacitor at the board, and a light guide
+from the GPIO33 LED to a window on top.
+
 ### Configure and flash
 
 Start the server bound to the network, as for the phone. It prints the
@@ -1085,24 +1142,69 @@ device's settings below the phone URL:
     Open this on the phone:  http://192.168.1.20:7331/?token=xK3f...
 
     For a device (ESP32-CAM), configure:
-      host    192.168.1.20
+      host    192.168.1.20   (or leave it empty: this server is announced)
       port    7331
       path    /ws/frames
       tls     off
       token   xK3f...
+      announce on
 
 A token generated by `--token-auto` changes on every start; a device
 needs a fixed one, so pass `--token` with a value of your own once it
-works. Copy those values into the firmware configuration and flash it:
+works. Those values go into the device in [setup mode](#setup-mode),
+from a phone, after flashing — or into the build, below.
+
+**Flash from the browser** — nothing to install but desktop Chrome or
+Edge (Web Serial). Wire the adapter as below, then open the flashing page
+of the [project site](https://akay7.github.io/Boresight/flash/), which
+offers the latest release's generic image: no Wi-Fi, server or token
+built in, so the board starts in setup mode.
+
+To flash a build of your own, serve the site from your checkout — its
+flashing page then offers what `firmware/boresight-cam/tools/idf.sh device
+build` last built:
+
+    uv run --group docs mkdocs serve      # http://127.0.0.1:8000/Boresight/flash/
+
+`localhost` is a secure context, so Web Serial works there with no TLS.
+The flasher is part of the site, not of the Boresight server: flashing a
+camera and aiming with it are separate programs.
+
+The page walks through it: fit the jumper and press RST, **Connect**,
+pick the adapter's port, install, then remove the jumper and press RST.
+Leave "erase" unticked to keep the settings stored on the board; erasing
+removes them too. Firefox and Safari have no Web Serial: the page offers
+the image files instead.
+
+Each release also has the files on its GitHub Release page: the four
+parts the flashing page writes, and `boresight-cam.bin`, the app image
+that [setup mode takes as a firmware update](#updating-the-firmware-over-wi-fi).
+
+**Or from the command line**, with the settings in the build:
 
     cd firmware/boresight-cam
     idf.py set-target esp32
     idf.py menuconfig        # Boresight camera -> Network
     idf.py -p /dev/ttyUSB0 flash monitor
 
-The ESP32-CAM has no USB port: flash through a 3.3 V USB-serial adapter,
-holding GPIO0 to GND while it powers up. `firmware/boresight-cam/README.md`
-has the details, and the firewall section above applies unchanged.
+The ESP32-CAM has no USB port: flash through a 3.3 V USB-serial adapter.
+Four wires carry power and serial, with TX and RX crossed over, and a
+jumper from IO0 to the GND beside it starts the board in its bootloader.
+Remove the jumper and press RST to run what you flashed. An adapter that
+shows up as `/dev/ttyACM0` rather than `/dev/ttyUSB0` needs that port in
+the command above.
+
+![Flashing wiring: the adapter's 5V and GND to the board's 5V and GND on the 5V side, its TX to U0R and RX to U0T on the 3V3 side, and IO0 jumpered to the GND beside it](firmware/boresight-cam/docs/flashing.svg)
+
+- Leave the adapter's BOOT and EN unconnected: the board's header has no
+  EN pin, so the jumper does their job.
+- VCC is an output: never feed power into it.
+- If the board does not answer, move the GND wire to another GND pin.
+- If the adapter has no 5V pin, wire its 3.3 V to the board's **3V3**
+  pin instead, and check every wire before plugging the adapter in.
+
+`firmware/boresight-cam/README.md` has the details, and the firewall
+section above applies unchanged.
 
 The configuration is saved to `sdkconfig`, which is gitignored because it
 holds the Wi-Fi password and the token.
@@ -1133,6 +1235,101 @@ the same time.
 TLS costs the classic ESP32 a multi-second handshake and some heap; that
 is a one-off per connection, not per frame.
 
+### Setup mode
+
+Everything the device needs to know — Wi-Fi, server, token, camera
+tuning — can be set from a phone, with no rebuild and no adapter. The
+device opens setup mode at boot:
+
+- by itself, when it has no Wi-Fi network configured (a board flashed
+  without `menuconfig` settings);
+- when the trigger is held for 5 seconds from power-on or reset. The LED
+  switches to two flashes every 2 seconds the moment the hold is long
+  enough: let go then.
+
+In setup mode the device stops streaming and opens a Wi-Fi network of its
+own, `Boresight-` and four hex digits from its MAC address, with no
+password. Join it from a phone and the setup page opens by itself, as a
+hotel Wi-Fi login does (or open <http://192.168.4.1/>). The page offers:
+
+| Setting | Notes |
+| --- | --- |
+| Network, password | Pick from the networks in range or type a name; 2.4 GHz only |
+| Address, port | Leave the address empty to find the server on the network (see below) |
+| Token | Letters, digits and `- . _ ~` only: it travels in the socket URL |
+| Resolution, JPEG quality, frame-rate cap, exposure, gain | Within the ranges `menuconfig` allows |
+
+Nothing is stored unless every field is valid; the page names any that
+are not. The stored password and token are never shown — the page says
+only whether each is set — and leaving their field empty keeps them.
+**Save and restart** stores the settings and restarts into normal
+operation; **Reset to build defaults** forgets everything stored. The
+page also installs a new firmware: see [Updating the firmware over
+Wi-Fi](#updating-the-firmware-over-wi-fi).
+
+The network is temporary. It closes when you save, or 10 minutes after
+it opened with nothing saved: a configured board then goes back to
+work with its settings unchanged, and an unconfigured one stops with the
+error flashes until it is reset.
+
+Settings stored on the device take precedence over `menuconfig`, which
+becomes the defaults for anything not set on the device. The boot log
+says where each value came from:
+
+    settings: server "192.168.1.20" (device), port 7331 (build), token set (device)
+
+**What it costs.** The setup network is open and the page is plain HTTP,
+so for those few minutes anyone in radio range could read the Wi-Fi
+password and token you type, or submit settings of their own. Hence the
+trigger hold on a configured board, the 10-minute limit, and closing on
+save. It is the same trade-off as the plain-text token, below.
+
+### Finding the server without its address
+
+With the address left empty, the device looks for the server's
+[announcement](#announced-on-the-local-network) before every connection
+attempt and connects to the first one it finds, so a PC whose address
+changes needs no device reconfigured. Its serial log shows what it found:
+
+    link: no server address: looking for _boresight._tcp
+    link: found "Boresight on gaming-pc" at 192.168.1.20:7331 (tls 0)
+
+With none announced it keeps looking, with the usual back-off and the
+connecting pattern. A configured address always wins, so with two servers
+on one network, set it. A server whose TLS setting differs from the
+build's is refused rather than worked around — a plain-text build never
+sends its token to a TLS server, nor a TLS build to a plain one — and
+the log says which:
+
+    link: 192.168.1.20:7331 requires TLS, and this build connects in plain text: rebuild with TLS, or give the address of a plain-text server
+
+### Updating the firmware over Wi-Fi
+
+Setup mode's page also takes a new firmware: under **Firmware**, choose
+the app image — `firmware/boresight-cam/build/boresight-cam.bin` after
+`tools/idf.sh device build`, or the release's `boresight-cam.bin` — and
+**Upload and restart**. The device writes it to the firmware slot it is
+not running from, so the running one is untouched until the new one is
+complete and checked, then restarts into it. Settings stored on the
+device are kept.
+
+It refuses, saying why on the page, anything that is not a complete
+Boresight camera firmware for a board: another file, a bootloader or
+merged image, another project's firmware, an emulator build, or an upload
+cut short. A new firmware is kept only once it has reached the server or
+setup mode; if it resets before that, the board returns to the previous
+one by itself, and the boot log says so:
+
+    ota: update to 0.2.0 in ota_1 did not start: rolled back to 0.1.0 in ota_0
+
+**One flash over the adapter first.** Updating over Wi-Fi needs the
+two-slot flash layout (`partitions.csv`) and a bootloader that can roll
+back. A board flashed before them has neither, so it takes one more flash
+over the adapter, without erasing: settings stored on the device sit in
+the same place in both layouts and survive. Every update after that is
+over Wi-Fi. A build configuration made before the change refuses to build
+until it selects the new layout, and says which three settings to change.
+
 ### Watching a camera that has no screen
 
 The status LED is the only display on the gun:
@@ -1144,6 +1341,7 @@ The status LED is the only display on the gun:
 | Three flashes, pause | Configuration, token or certificate error — read the serial log |
 | Solid | Streaming, and the last frame solved |
 | Brief flash each second | Streaming, but the last frame did not solve — no markers in view |
+| Two flashes every 2 s | Setup mode: join the `Boresight-XXXX` network from a phone |
 
 Everything else is on the server. Its log names the device:
 
@@ -1226,6 +1424,34 @@ the real server:
 
 It says nothing about the sensor, Wi-Fi, the LED or timing. See
 `firmware/boresight-cam/README.md` for the details.
+
+## The Raspberry Pi gun
+
+A Raspberry Pi Zero 2 W with a CSI camera is a gun that needs nothing else.
+It runs the same detection, solve, smoothing and aim-hold as the server,
+on the Pi, and presents itself to whatever it is plugged into as a USB
+absolute mouse: a PC, a console, an Android box, with no software and no
+network on the host. The trigger is a button on a GPIO and holds the primary
+button down, as on the other cameras.
+
+The server is not involved, so there is no web page, no settings API and no
+on-screen zeroing on the Pi. The marker layout is a file (`markers.toml`,
+the server's format), and a lens calibration or zero made on the server can
+be copied over; without them the aim is uncalibrated.
+
+    sudo deploy/pi/install.sh        # on the Pi, from a checkout
+
+The full walkthrough — wiring, configuration, power and what to do when the
+host sees nothing — is in [deploy/pi/README.md](deploy/pi/README.md).
+
+**Never yet run on a Pi.** The report format, pin rules, debouncing, aim
+path and failure handling are tested on an ordinary computer (`boresight-gun
+--emulate`, and `tests/test_gun_*.py`), and the pipeline imports with only
+OpenCV and NumPy installed. The camera and GPIO adapters, the gadget script
+and the frame rate on a Cortex-A53 are unmeasured.
+
+Install on a PC with `pip install boresight` for the aim pipeline alone, or
+`pip install 'boresight[server]'` for the server.
 
 ## Lens calibration
 
@@ -1437,6 +1663,34 @@ Full detail — the build, the manifest, manual verification against
 `vkcube`, and the present-hook's design — lives in
 `native/vulkan_overlay/README.md`.
 
+## The printed case
+
+A modular, printable case for both self-contained guns lives in
+[hardware/case/](hardware/case/README.md). One core (receiver, barrel,
+grip, rear cap and trigger cassette) takes either board kit: the
+ESP32-CAM on the muzzle bulkhead, or the Pi Zero 2 W on a sled with a
+Camera Module 2 or 3 at the muzzle. The grip takes a 4×AA, 4×AAA, 18650
+or USB-tether drawer; the trigger is a lever pivoting on a piece of
+filament or an M3 bolt, or a push button, with an MX-style keyboard switch
+or a lever microswitch; and two skin styles change how it looks. It comes apart with
+one hex key: every screw goes into a captive nut, every wire between
+modules is a plug.
+
+It is generated from code (build123d) and checked by computer for bed
+fit, support-free printing, interference with every part, the camera's
+view and the skins' keep-out zones. It has never been printed. The
+trigger, LED and power use the pins the firmware and the Pi gun already
+default to: GPIO13 on the ESP32-CAM; GPIO17 (pin 11) and GPIO27 (pin 13)
+on the Pi.
+
+    cd hardware/case
+    uv sync
+    uv run boresight-case build --all --out dist
+
+CI builds every shipped configuration and keeps them as one downloadable
+parts library: every distinct part's STL, 3MF and STEP once, and each
+configuration's bill of materials and exploded view.
+
 ## Repo layout
 
 Target layout for the full pipeline — some of this doesn't exist yet.
@@ -1482,6 +1736,7 @@ a defect invisible to a test suite that always runs from a checkout.
         shot.py               # firing at the named frame's unsmoothed aim
         shooter.py            # which session's aim drives the cursor
         zeroing.py            # shoot targets to correct camera-to-barrel aim
+        gun/                  # the Raspberry Pi gun: camera + trigger -> USB mouse
         serial_link.py        # future: optional ESP32 HID path
         debug_overlay.py      # future: quads, IDs, reprojection error
       tools/
@@ -1493,7 +1748,10 @@ a defect invisible to a test suite that always runs from a checkout.
             boresight_proto/  # wire format, debouncer, LED patterns -- no ESP-IDF
           test_host/          # host tests for boresight_proto (CMake + CTest)
           tools/              # Docker build and QEMU runner, no ESP-IDF install
+          docs/               # flashing wiring diagram: schemdraw script and its SVG
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
+      deploy/pi/              # the Pi gun's installer, USB gadget script, services
+      hardware/case/          # the printable modular case (its own uv project)
       tests/
         fixtures/             # rendered frame sequences (Git LFS)
 

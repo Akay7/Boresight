@@ -2,7 +2,13 @@
 # `idf.py menuconfig` and land in the untracked `sdkconfig`.
 CONFIG_IDF_TARGET="esp32"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Two application slots for updates over Wi-Fi (partitions.csv), and a
+# bootloader that returns to the previous slot if a new firmware resets
+# before marking itself good. main/CMakeLists.txt refuses to build without
+# either, since a configuration made earlier keeps its old values.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # The AI-Thinker board's 4 MB PSRAM holds the camera frame buffers.
 CONFIG_SPIRAM=y
@@ -13,3 +19,7 @@ CONFIG_FREERTOS_HZ=1000
 # Larger TCP send buffer: a frame is tens of kilobytes.
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
+# Setup mode's page: a phone browser's request headers overflow the
+# default 512 bytes, and an oversized request is refused before the page
+# is served. main/setup_http.c refuses to build with less.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024

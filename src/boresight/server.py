@@ -13,14 +13,23 @@ from typing import Annotated, Literal
 
 import cv2
 import numpy as np
-from fastapi import Depends, FastAPI, Request, WebSocket
-from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-from starlette.requests import HTTPConnection
+
+try:
+    from fastapi import Depends, FastAPI, Request, WebSocket
+    from fastapi.responses import JSONResponse
+    from fastapi.staticfiles import StaticFiles
+    from pydantic import BaseModel, Field
+    from starlette.requests import HTTPConnection
+except ModuleNotFoundError as exc:  # the core install has no web stack
+    raise SystemExit(
+        f"The server needs its web dependencies ({exc.name} is missing). "
+        "Install them with: pip install 'boresight[server]'"
+    ) from exc
+
 
 from boresight.calibration import CalibrationCapture
 from boresight.detect import TrackerOptions
+from boresight.discovery import Announcer, announceable_address
 from boresight.displays import DisplayError
 from boresight.inject import CursorBackend, TriggerHold, default_cursor_backend
 from boresight.layout_source import (
@@ -191,6 +200,7 @@ def create_app(
     lens_store_factory: Callable[[], LensStore] = lambda: LensStore(None),
     zeroing_path: Path | None = None,
     recording: RecordingConfig | None = None,
+    announcer: Announcer | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -211,6 +221,11 @@ def create_app(
 
     `zeroing_path` is where clients' zeroes are kept; None keeps them in
     memory, which is what tests want. `main()` passes the real file.
+
+    `announcer` announces the server on the local network while it runs;
+    None, the default, announces nothing, so an app built for a test is
+    never visible to anything else. `main()` passes one when the server
+    is bound to a network address and announcing is on.
     """
     config = config or ServerConfig()
     live_settings = settings or LiveSettings(
@@ -257,9 +272,15 @@ def create_app(
         )
         # Each live session's recorder, for POST /recordings.
         app.state.recorders = {}
+        # Last: a device finding the server should find it ready.
+        if announcer is not None:
+            await announcer.start()
         try:
             yield
         finally:
+            # First: nothing should go on finding a server that is leaving.
+            if announcer is not None:
+                await announcer.stop()
             # Before the backend closes: an overlay outliving the server
             # cannot be dismissed by clicking, since it takes no input.
             app.state.markers.shutdown()
@@ -857,7 +878,7 @@ async def run_frame_session(
                 fps = stats.processed / max(now - started, 1e-9)
                 logger.info(
                     "streaming from %s: %.1f fps, %s markers, %s, "
-                    "%d received / %d solved / %d dropped / %d failed",
+                    "%d received / %d processed / %d dropped / %d failed",
                     session.label(),
                     fps,
                     stats.markers_detected,
@@ -944,7 +965,7 @@ async def run_frame_session(
         if seen_first_frame:
             logger.info(
                 "client disconnected: %s after %.1fs, "
-                "%d received / %d solved / %d dropped / %d failed (%.1f fps)",
+                "%d received / %d processed / %d dropped / %d failed (%.1f fps)",
                 session.label(),
                 elapsed,
                 stats.received,
@@ -1245,7 +1266,9 @@ async def _report(
         return
 
 
-def _device_details(config: ServerConfig, certfile: Path | None) -> str:
+def _device_details(
+    config: ServerConfig, certfile: Path | None, announced: bool = False
+) -> str:
     """What a client without a browser has to be configured with.
 
     A phone is handed a URL to open. A device has its settings typed into
@@ -1253,14 +1276,21 @@ def _device_details(config: ServerConfig, certfile: Path | None) -> str:
     under TLS, a fingerprint to check the certificate it embedded against
     the one actually being served. Regenerating `.boresight/` changes it,
     and from the device that looks only like a connection that fails.
+
+    `announced` says whether the server is being announced on the local
+    network, in which case a device's address may be left empty.
     """
+    host = config.advertised_host()
+    if announced:
+        host += "   (or leave it empty: this server is announced)"
     lines = [
         "  For a device (ESP32-CAM), configure:",
-        f"    host    {config.advertised_host()}",
+        f"    host    {host}",
         f"    port    {config.port}",
         f"    path    {FRAME_SOCKET_PATH}",
         f"    tls     {'on' if config.tls else 'off'}",
         f"    token   {config.token or '(none)'}",
+        f"    announce {'on' if announced else 'off'}",
     ]
     if certfile is not None:
         lines.append(f"    cert    {certfile}")
@@ -1337,6 +1367,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="print the phone URL as a QR code (default: on; it is printed "
         "only to an interactive terminal large enough for it anyway)",
+    )
+    server.add_argument(
+        "--announce",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="announce the server on the local network over multicast DNS, "
+        "so a device left without a server address finds it (default: on; "
+        "made only when bound to a network address)",
     )
     markers = parser.add_argument_group("markers", "the [markers] and [view] tables")
     markers.add_argument(
@@ -1452,6 +1490,7 @@ def main(argv: list[str] | None = None) -> int:
                 "server.certfile": args.certfile,
                 "server.keyfile": args.keyfile,
                 "server.qr": args.qr,
+                "server.announce": args.announce,
                 "markers.layout": args.markers,
                 "detection.tracked": args.tracked_detection,
                 "tuning.min_cutoff": args.aim_min_cutoff,
@@ -1502,7 +1541,18 @@ def main(argv: list[str] | None = None) -> int:
     qr = terminal_qr.for_terminal(config.phone_url()) if served.qr else None
     if qr is not None:
         print(qr, flush=True)
-    print(_device_details(config, certfile), flush=True)
+    announcer = None
+    if served.announce and not is_loopback(config.host):
+        address = announceable_address(config.advertised_host())
+        if address is not None:
+            announcer = Announcer(
+                address=address,
+                port=config.port,
+                tls=config.tls,
+                path=FRAME_SOCKET_PATH,
+            )
+    announced = announcer is not None
+    print(_device_details(config, certfile, announced=announced), flush=True)
     if not config.tls and not is_loopback(config.host):
         print(
             "  Warning: serving plain HTTP. The camera will not be available\n"
@@ -1529,6 +1579,7 @@ def main(argv: list[str] | None = None) -> int:
                 seconds=options.recording.seconds,
                 max_bytes=int(options.recording.max_mb * 1024 * 1024),
             ),
+            announcer=announcer,
         ),
         host=config.host,
         port=config.port,

@@ -25,6 +25,10 @@
 #include "mbedtls/x509.h"
 #include "mbedtls/x509_crt.h"
 #include "sdkconfig.h"
+#if !CONFIG_BORESIGHT_EMULATOR
+#include "esp_netif_ip_addr.h"
+#include "mdns.h"
+#endif
 
 static const char *TAG = "link";
 
@@ -352,6 +356,8 @@ static void run_session(esp_websocket_client_handle_t client)
 
     ESP_LOGI(TAG, "connected; streaming");
     status_led_set_link(BP_LINK_STREAMING);
+    /* Reaching the server proves a newly installed firmware works. */
+    ota_mark_good();
     xEventGroupWaitBits(s_events, ENDED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
@@ -360,6 +366,131 @@ static void run_session(esp_websocket_client_handle_t client)
     xSemaphoreGive(s_lock);
     ESP_LOGW(TAG, "connection ended");
 }
+
+/* The socket URL for the next attempt. Built per attempt, not once, so a
+ * server found by discovery can move between attempts. The token travels
+ * as a query parameter, as the phone's does; setup mode admits only
+ * URL-safe characters into it. */
+static bool build_uri(const char *host, unsigned port)
+{
+    const char *token = settings()->token;
+    int written;
+    if (strlen(token) > 0) {
+        written = snprintf(s_uri, sizeof s_uri, SCHEME "://%s:%u" FRAME_SOCKET_PATH
+                                                       "?token=%s",
+                           host, port, token);
+    } else {
+        written = snprintf(s_uri, sizeof s_uri, SCHEME "://%s:%u" FRAME_SOCKET_PATH,
+                           host, port);
+    }
+    if (written < 0 || (size_t)written >= sizeof s_uri) {
+        ESP_LOGE(TAG, "server address and token do not fit in the URI buffer");
+        return false;
+    }
+    return true;
+}
+
+#if CONFIG_BORESIGHT_TLS
+#define BUILT_WITH_TLS true
+#else
+#define BUILT_WITH_TLS false
+#endif
+
+typedef enum {
+    DISCOVERY_FOUND = 0,
+    DISCOVERY_NOT_FOUND,
+    /* Found, but its TLS setting is not this build's: a configuration
+     * error, not something more tries will fix. */
+    DISCOVERY_TLS_MISMATCH,
+} discovery_t;
+
+#if CONFIG_BORESIGHT_EMULATOR
+/* QEMU's user networking carries no multicast: the emulator build always
+ * has an address configured (main.c refuses to start without one). */
+static discovery_t discover(char *host, size_t size, unsigned *port)
+{
+    (void)host;
+    (void)size;
+    (void)port;
+    return DISCOVERY_NOT_FOUND;
+}
+#else
+#define DISCOVERY_TIMEOUT_MS 3000
+#define DISCOVERY_MAX_RESULTS 4
+
+static const char *txt_value(const mdns_result_t *result, const char *key)
+{
+    for (size_t i = 0; i < result->txt_count; i++) {
+        if (strcmp(result->txt[i].key, key) == 0) {
+            return result->txt[i].value != NULL ? result->txt[i].value : "";
+        }
+    }
+    return NULL;
+}
+
+/* The first announced Boresight server with an IPv4 address. Every one
+ * found is logged, so a second server on the network is no mystery. */
+static discovery_t discover(char *host, size_t size, unsigned *port)
+{
+    static bool started;
+    if (!started) {
+        esp_err_t err = mdns_init();
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "mDNS did not start: %s", esp_err_to_name(err));
+            return DISCOVERY_NOT_FOUND;
+        }
+        started = true;
+    }
+    ESP_LOGI(TAG, "no server address: looking for _boresight._tcp");
+    mdns_result_t *results = NULL;
+    if (mdns_query_ptr("_boresight", "_tcp", DISCOVERY_TIMEOUT_MS, DISCOVERY_MAX_RESULTS,
+                       &results) != ESP_OK ||
+        results == NULL) {
+        ESP_LOGW(TAG, "no Boresight server announced on this network");
+        return DISCOVERY_NOT_FOUND;
+    }
+    discovery_t outcome = DISCOVERY_NOT_FOUND;
+    for (const mdns_result_t *r = results; r != NULL; r = r->next) {
+        const mdns_ip_addr_t *address = r->addr;
+        while (address != NULL && address->addr.type != ESP_IPADDR_TYPE_V4) {
+            address = address->next;
+        }
+        if (address == NULL || r->port == 0) {
+            continue;
+        }
+        char text[16];
+        snprintf(text, sizeof text, IPSTR, IP2STR(&address->addr.u_addr.ip4));
+        const char *tls = txt_value(r, "tls");
+        ESP_LOGI(TAG, "found \"%s\" at %s:%u (tls %s)",
+                 r->instance_name ? r->instance_name : "?", text, r->port,
+                 tls ? tls : "not stated");
+        if (outcome == DISCOVERY_FOUND) {
+            continue; /* the first one wins; the rest are only logged */
+        }
+        if (!bp_discovery_tls_ok(tls, BUILT_WITH_TLS)) {
+            if (BUILT_WITH_TLS) {
+                ESP_LOGE(TAG,
+                         "%s:%u does not announce TLS, and this build only "
+                         "connects over TLS",
+                         text, r->port);
+            } else {
+                ESP_LOGE(TAG,
+                         "%s:%u requires TLS, and this build connects in plain "
+                         "text: rebuild with TLS, or give the address of a "
+                         "plain-text server",
+                         text, r->port);
+            }
+            outcome = DISCOVERY_TLS_MISMATCH;
+            continue;
+        }
+        strlcpy(host, text, size);
+        *port = r->port;
+        outcome = DISCOVERY_FOUND;
+    }
+    mdns_query_results_free(results);
+    return outcome;
+}
+#endif
 
 static void link_task(void *arg)
 {
@@ -391,13 +522,36 @@ static void link_task(void *arg)
         xEventGroupClearBits(s_events, CONNECTED_BIT | ENDED_BIT);
         s_failure = FAILURE_NONE;
 
+        /* The configured address, or, when there is none, whichever
+         * server is announced right now: found again every attempt, so a
+         * server that moved is followed. */
+        char discovered[16];
+        const char *host = settings()->host;
+        unsigned port = settings()->port;
+        if (host[0] == '\0') {
+            discovery_t found = discover(discovered, sizeof discovered, &port);
+            if (found != DISCOVERY_FOUND) {
+                uint32_t delay_ms;
+                if (found == DISCOVERY_TLS_MISMATCH) {
+                    status_led_set_link(BP_LINK_ERROR);
+                    delay_ms = BP_BACKOFF_MAX_MS;
+                } else {
+                    backoff_ms = bp_backoff_next(backoff_ms);
+                    delay_ms = backoff_ms;
+                }
+                vTaskDelay(pdMS_TO_TICKS(delay_ms));
+                continue;
+            }
+            host = discovered;
+        }
         /* A fresh client per attempt: simpler than reasoning about which
          * states a stopped client can be restarted from. */
-        esp_websocket_client_handle_t client = esp_websocket_client_init(&config);
+        esp_websocket_client_handle_t client =
+            build_uri(host, port) ? esp_websocket_client_init(&config) : NULL;
         if (client != NULL) {
             esp_websocket_register_events(client, WEBSOCKET_EVENT_ANY, on_event, NULL);
-            ESP_LOGI(TAG, "connecting to " SCHEME "://%s:%d" FRAME_SOCKET_PATH,
-                     CONFIG_BORESIGHT_SERVER_HOST, CONFIG_BORESIGHT_SERVER_PORT);
+            ESP_LOGI(TAG, "connecting to " SCHEME "://%s:%u" FRAME_SOCKET_PATH, host,
+                     port);
             EventBits_t bits = 0;
             if (esp_websocket_client_start(client) == ESP_OK) {
                 bits = xEventGroupWaitBits(s_events, CONNECTED_BIT | ENDED_BIT, pdFALSE,
@@ -416,7 +570,8 @@ static void link_task(void *arg)
         uint32_t delay_ms;
         if (s_failure != FAILURE_NONE) {
             /* Retrying a refused token every second would only fill the
-             * server's log; nothing changes until the device is reflashed. */
+             * server's log; nothing changes until the device is set up
+             * again. */
             status_led_set_link(BP_LINK_ERROR);
             delay_ms = BP_BACKOFF_MAX_MS;
         } else {
@@ -461,21 +616,6 @@ esp_err_t link_start(const char *version, int width, int height)
         return ESP_ERR_NO_MEM;
     }
 
-    /* The token travels as a query parameter, as the phone's does. */
-    int written;
-    if (strlen(CONFIG_BORESIGHT_TOKEN) > 0) {
-        written = snprintf(s_uri, sizeof s_uri,
-                           SCHEME "://%s:%d" FRAME_SOCKET_PATH "?token=%s",
-                           CONFIG_BORESIGHT_SERVER_HOST, CONFIG_BORESIGHT_SERVER_PORT,
-                           CONFIG_BORESIGHT_TOKEN);
-    } else {
-        written = snprintf(s_uri, sizeof s_uri, SCHEME "://%s:%d" FRAME_SOCKET_PATH,
-                           CONFIG_BORESIGHT_SERVER_HOST, CONFIG_BORESIGHT_SERVER_PORT);
-    }
-    if (written < 0 || (size_t)written >= sizeof s_uri) {
-        ESP_LOGE(TAG, "server address and token do not fit in the URI buffer");
-        return ESP_ERR_INVALID_SIZE;
-    }
     if (bp_format_hello(s_hello, sizeof s_hello, version, width, height) < 0) {
         ESP_LOGE(TAG, "firmware version \"%s\" cannot go in a hello", version);
         return ESP_ERR_INVALID_ARG;

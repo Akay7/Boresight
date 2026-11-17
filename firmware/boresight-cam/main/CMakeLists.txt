@@ -5,28 +5,35 @@ if(CONFIG_BORESIGHT_EMULATOR)
     # console commands for the button pins.
     set(profile_sources "net_openeth.c" "camera_fake.c" "console.c")
 else()
-    set(profile_sources "wifi.c" "camera.c")
+    set(profile_sources "wifi.c" "camera.c" "setup_ap.c")
 endif()
 
 idf_component_register(
     SRCS
         "main.c"
+        "settings.c"
+        "ota.c"
+        "setup.c"
+        "setup_http.c"
         "link.c"
         "buttons.c"
         "status_led.c"
         ${profile_sources}
     INCLUDE_DIRS "."
     REQUIRES
+        app_update
         boresight_proto
         driver
         esp_app_format
         esp_eth
         esp_event
+        esp_http_server
         esp_netif
         esp_timer
         esp_wifi
         json
         mbedtls
+        mdns
         nvs_flash
 )
 
@@ -69,4 +76,21 @@ if(CONFIG_BORESIGHT_EMULATOR)
         endif()
         target_add_binary_data(${COMPONENT_LIB} "${frame}" BINARY)
     endforeach()
+endif()
+
+# Updates over Wi-Fi need the two-slot table and the rollback bootloader.
+# sdkconfig.defaults sets both, but a configuration made before keeps what
+# it had, and a board built from it would silently lose the ability to
+# update without the adapter -- so it does not build.
+if(NOT CONFIG_PARTITION_TABLE_CUSTOM
+   OR NOT CONFIG_PARTITION_TABLE_CUSTOM_FILENAME STREQUAL "partitions.csv"
+   OR NOT CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE)
+    message(FATAL_ERROR
+        "This configuration predates firmware updates over Wi-Fi. Set, in "
+        "menuconfig or in sdkconfig:\n"
+        "  CONFIG_PARTITION_TABLE_CUSTOM=y\n"
+        "  CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions.csv\"\n"
+        "  CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n"
+        "(Partition Table, and Bootloader config -> Application Rollback). "
+        "Moving a board to the new layout takes one flash over the adapter.")
 endif()

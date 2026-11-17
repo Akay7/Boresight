@@ -25,3 +25,7 @@ firmware/*/main/server_cert.pem
 # Git worktrees made by Claude Code for parallel agents. Each is a full
 # checkout of its own branch; none of it belongs in this one.
 .claude/worktrees/
+.site/
+# ESP Web Tools, fetched at the pinned version by tools/vendor-esp-web-tools.sh
+# when the site is built (website/hooks.py): not committed.
+website/vendor/

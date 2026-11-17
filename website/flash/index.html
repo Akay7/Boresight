@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash the ESP32-CAM</title>
+<!--
+  Flashes the Boresight camera firmware from the browser over Web Serial,
+  with the vendored ESP Web Tools (../vendor/esp-web-tools, Apache-2.0).
+  A page of the project site (mkdocs.yml): published, it offers the latest
+  release's generic image; served locally with `mkdocs serve`, this
+  checkout's build. Either way, manifest.json beside it says what to write.
+-->
+<style>
+  :root { --fg: #111; --bg: #fff; --muted: #555; --box: #f3f3f3; --warn: #fee; --accent: #1f77b4; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #eee; --bg: #111; --muted: #aaa; --box: #1c1c1c; --warn: #422; }
+  }
+  body { font: 16px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+         max-width: 40em; margin: 0 auto; padding: 1em; }
+  h1 { font-size: 1.5em; margin-bottom: .2em; }
+  .muted { color: var(--muted); }
+  .box { background: var(--box); border-radius: 8px; padding: .8em 1em; margin: 1em 0; }
+  .warn { background: var(--warn); }
+  ol li { margin: .4em 0; }
+  code { font-size: .95em; }
+  [hidden] { display: none !important; }
+  esp-web-install-button button {
+    font: inherit; background: var(--accent); color: #fff; border: 0;
+    border-radius: 6px; padding: .7em 1.4em; cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<h1>Flash the ESP32-CAM</h1>
+<p class="muted" id="what">Looking for a firmware to flash…</p>
+
+<div class="box warn" id="unsupported" hidden>
+  <p><strong>This browser cannot flash.</strong> Flashing over the USB-serial adapter
+  needs Web Serial: desktop <strong>Chrome</strong> or <strong>Edge</strong>, with the
+  page opened over <strong>HTTPS</strong> (the project's published site) or on
+  <strong>localhost</strong> (<code>mkdocs serve</code> in a checkout).</p>
+  <p>The image files are below for flashing from the command line instead.</p>
+</div>
+
+<div class="box warn" id="nobuild" hidden>
+  <p><strong>No firmware here yet.</strong> In a checkout, build it with</p>
+  <pre><code>firmware/boresight-cam/tools/idf.sh device build</code></pre>
+  <p>and restart <code>mkdocs serve</code>. Or flash the latest released image
+  from the <a href="https://akay7.github.io/Boresight/flash/">project's
+  flashing page</a>.</p>
+</div>
+
+<section id="steps" hidden>
+  <ol>
+    <li>Wire the board to the USB-serial adapter as in the README, and plug the
+      adapter in.</li>
+    <li><strong>Fit the jumper from IO0 to the GND beside it, then press RST.</strong>
+      The adapter cannot put an ESP32-CAM into download mode by itself; this does.</li>
+    <li>Press <strong>Connect</strong>, pick the adapter's serial port (a CP210x,
+      CH340 or similar), then choose to install the firmware.</li>
+    <li>When asked whether to erase the device first, leave it unticked to
+      <strong>keep the settings stored on the board</strong>. Erasing also erases
+      them, and the board then starts in setup mode.</li>
+    <li>When it is done, <strong>remove the jumper and press RST</strong>.</li>
+  </ol>
+  <p><esp-web-install-button id="install"></esp-web-install-button></p>
+  <p class="box">If it reports that the board did not answer, or failed to initialise:
+  the board is probably <strong>not in download mode</strong>. Check the jumper is on
+  IO0 and GND, press RST, and try again. If it still does not answer, swap the TX and
+  RX wires.</p>
+</section>
+
+<section id="files" hidden>
+  <h2>Image files</h2>
+  <p class="muted">For <code>esptool</code>: each file at its offset, without erasing.</p>
+  <ul id="filelist"></ul>
+</section>
+
+<script type="module">
+const what = document.getElementById("what");
+const supported = "serial" in navigator && window.isSecureContext;
+
+async function load() {
+  let manifest;
+  try {
+    const response = await fetch("manifest.json", { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    manifest = await response.json();
+  } catch (error) {
+    what.textContent = "";
+    document.getElementById("nobuild").hidden = false;
+    return;
+  }
+  what.textContent = `${manifest.name} ${manifest.version}` +
+    (manifest.built ? `, built ${manifest.built}` : "");
+
+  const list = document.getElementById("filelist");
+  for (const part of manifest.builds[0].parts) {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = part.path;
+    link.textContent = part.path.split("/").pop();
+    item.append(link, ` at 0x${part.offset.toString(16)}`);
+    list.append(item);
+  }
+  document.getElementById("files").hidden = false;
+
+  if (!supported) {
+    document.getElementById("unsupported").hidden = false;
+    return;
+  }
+  await import("../vendor/esp-web-tools/install-button.js");
+  document.getElementById("install").setAttribute("manifest", "manifest.json");
+  document.getElementById("steps").hidden = false;
+}
+
+load();
+</script>
+</body>
+</html>

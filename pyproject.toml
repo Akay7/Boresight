@@ -4,11 +4,27 @@ version = "0.1.0"
 description = "A computer-vision light gun"
 requires-python = ">=3.12"
 dependencies = [
+    # What the aim pipeline needs and nothing more, so a Raspberry Pi
+    # running `boresight-gun` installs no web stack. Everything the
+    # server adds is the `server` extra below.
+    "opencv-python-headless>=4.10",
+    "numpy>=2.1",
+]
+
+# The same entry points as `python -m boresight.server` and
+# `python -m boresight.overlay`, which keep working.
+[project.scripts]
+boresight = "boresight.server:main"
+boresight-overlay = "boresight.overlay.__main__:main"
+boresight-gun = "boresight.gun.__main__:main"
+
+[project.optional-dependencies]
+# The server: web framework, input injection, and the certificate and QR
+# code the phone path needs. `uv sync` installs it through the dev group.
+server = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "evdev>=1.9; sys_platform == 'linux'",
-    "opencv-python-headless>=4.10",
-    "numpy>=2.1",
     # Generates the self-signed certificate the phone path needs.
     # Browsers expose getUserMedia only in a secure context, so a LAN
     # IP over plain HTTP has no camera API at all. Shelling out to the
@@ -18,15 +34,11 @@ dependencies = [
     # Encodes the phone URL as a QR code printed at startup. Pure Python
     # with no dependencies of its own; only its module matrix is used.
     "segno>=1.6.6",
+    # Announces the server over multicast DNS (`_boresight._tcp`), so an
+    # ESP32-CAM left without a server address finds it (discovery.py).
+    # LGPL-2.1-or-later, used unmodified as an installed library.
+    "zeroconf>=0.136",
 ]
-
-# The same entry points as `python -m boresight.server` and
-# `python -m boresight.overlay`, which keep working.
-[project.scripts]
-boresight = "boresight.server:main"
-boresight-overlay = "boresight.overlay.__main__:main"
-
-[project.optional-dependencies]
 # The on-screen marker overlay only. Kept out of the core dependencies
 # deliberately: this project uses opencv-python-headless precisely to
 # avoid a GUI stack, and most users run printed markers and never need
@@ -34,7 +46,11 @@ boresight-overlay = "boresight.overlay.__main__:main"
 overlay = ["PySide6-Essentials>=6.8"]
 
 [dependency-groups]
+# The project site (mkdocs.yml): `uv run --group docs mkdocs serve`. Not
+# in dev, so a plain `uv sync` stays as it was.
+docs = ["mkdocs-material>=9.5"]
 dev = [
+    "boresight[server]",
     "pytest>=8.3",
     "ruff>=0.16.0",
     "pre-commit>=4.6.1",
@@ -56,6 +72,11 @@ line-length = 88
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
+# Only this package's suite. hardware/case is a separate project with its
+# own environment (it needs a CAD kernel this one does not install), so
+# collecting its tests here -- as the commit hook's `uv run pytest` would
+# without this line -- fails on import. CI runs that suite in its own job.
+testpaths = ["tests"]
 markers = [
     "emulator: boots the ESP32-CAM firmware in QEMU; opt-in, see tests/test_firmware_emulator.py",
 ]

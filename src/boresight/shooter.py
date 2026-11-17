@@ -153,11 +153,31 @@ class _GatedCursor:
             if not self._closed:
                 self._arbiter._move_locked(self._owner, self._label, x, y)  # noqa: SLF001
 
+    def idle(self) -> None:
+        """This session has stopped aiming.
+
+        Reaches the backend only if no one else is aiming: while another
+        session has the cursor, its pen stays where that session put it.
+        """
+        with self._arbiter._lock:  # noqa: SLF001
+            if not self._closed:
+                self._idle_locked()
+
     def close(self) -> None:
-        """Drop every move from now on, and free the cursor if it is ours."""
+        """Drop every move from now on, and free the cursor if it is ours.
+
+        A session that ends while it has the cursor stops aiming with it,
+        so the pen is not left hovering at its last aim.
+        """
         with self._arbiter._lock:  # noqa: SLF001
             self._closed = True
+            self._idle_locked()
             self._arbiter._release_locked(self._owner)  # noqa: SLF001
+
+    def _idle_locked(self) -> None:
+        current = self._arbiter._current()  # noqa: SLF001
+        if current is None or current is self._owner:
+            self._arbiter._backend.idle()  # noqa: SLF001
 
     def click(self) -> None:
         self._arbiter._backend.click()  # noqa: SLF001 - its own gate

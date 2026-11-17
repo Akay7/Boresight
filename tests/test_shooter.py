@@ -175,3 +175,71 @@ def test_closing_a_gate_leaves_another_owner_alone() -> None:
     arbiter.cursor_for(b, b.label).close()
 
     assert arbiter.status(a) == "yours"
+
+
+def test_the_owner_stopping_aiming_reaches_the_backend() -> None:
+    arbiter, backend, _ = _arbiter()
+    a = _Session("a")
+    gate = arbiter.cursor_for(a, a.label)
+    gate.move_absolute(0.1, 0.1)
+
+    gate.idle()
+
+    assert backend.idles == 1
+
+
+def test_one_session_stopping_never_lifts_another_owners_pen() -> None:
+    arbiter, backend, _ = _arbiter()
+    a, b = _Session("a"), _Session("b")
+    arbiter.cursor_for(a, a.label).move_absolute(0.1, 0.1)
+
+    arbiter.cursor_for(b, b.label).idle()
+
+    assert backend.idles == 0
+    assert arbiter.status(a) == "yours"
+
+
+def test_stopping_with_a_free_cursor_reaches_the_backend() -> None:
+    """Nobody aims, so nobody's pen is left hovering by it."""
+    arbiter, backend, _ = _arbiter()
+    b = _Session("b")
+
+    arbiter.cursor_for(b, b.label).idle()
+
+    assert backend.idles == 1
+
+
+def test_closing_the_owners_gate_stops_its_aim() -> None:
+    """A session that ends mid-aim does not leave the pen hovering."""
+    arbiter, backend, _ = _arbiter()
+    a = _Session("a")
+    gate = arbiter.cursor_for(a, a.label)
+    gate.move_absolute(0.1, 0.1)
+
+    gate.close()
+
+    assert backend.idles == 1
+    assert arbiter.status(a) == "free"
+
+
+def test_closing_another_sessions_gate_does_not_stop_the_owners_aim() -> None:
+    arbiter, backend, _ = _arbiter()
+    a, b = _Session("a"), _Session("b")
+    arbiter.cursor_for(a, a.label).move_absolute(0.1, 0.1)
+
+    arbiter.cursor_for(b, b.label).close()
+
+    assert backend.idles == 0
+
+
+def test_a_closed_gate_stops_nothing_later() -> None:
+    arbiter, backend, _ = _arbiter()
+    a, b = _Session("a"), _Session("b")
+    gate = arbiter.cursor_for(a, a.label)
+    gate.close()
+    arbiter.cursor_for(b, b.label).move_absolute(0.9, 0.9)
+    idles_before = backend.idles
+
+    gate.idle()
+
+    assert backend.idles == idles_before

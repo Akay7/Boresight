@@ -1,0 +1,20 @@
+[Unit]
+Description=Boresight light gun
+Requires=boresight-gadget.service
+After=boresight-gadget.service
+
+[Service]
+ExecStart=/opt/boresight/bin/boresight-gun --config /etc/boresight-gun.toml
+Restart=always
+RestartSec=2
+# Root, because the USB gadget and /dev/hidg0 are root's. The rest of the
+# system is read-only to it. (No device allowlist: the camera stack opens a
+# long and version-dependent list of nodes.)
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

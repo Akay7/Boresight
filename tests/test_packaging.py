@@ -17,7 +17,7 @@ def _project() -> dict:
 def test_every_console_script_resolves_to_a_callable() -> None:
     scripts = _project()["scripts"]
 
-    assert set(scripts) == {"boresight", "boresight-overlay"}
+    assert set(scripts) == {"boresight", "boresight-overlay", "boresight-gun"}
     for target in scripts.values():
         module_name, _, attribute = target.partition(":")
         assert callable(getattr(importlib.import_module(module_name), attribute))
@@ -32,3 +32,11 @@ def test_the_server_command_is_the_module_entry_point() -> None:
     scripts = _project()["scripts"]
     assert scripts["boresight"] == f"{server.__name__}:{server.main.__name__}"
     assert scripts["boresight-overlay"] == f"{overlay.__name__}:{overlay.main.__name__}"
+
+
+def test_the_gun_command_is_the_module_entry_point() -> None:
+    from boresight.gun import __main__ as gun
+
+    assert (
+        _project()["scripts"]["boresight-gun"] == f"{gun.__name__}:{gun.main.__name__}"
+    )

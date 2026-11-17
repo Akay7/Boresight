@@ -4,6 +4,8 @@
  *   press     the trigger goes down, as if its pin were pulled low
  *   release   the trigger comes back up
  *   click     press, hold past the debounce, release
+ *   setup     restart into setup mode: a board's trigger held at boot,
+ *             which the console cannot do since it starts after that
  *
  * Each command sets the level the button task reads in place of the pin,
  * so the debouncer, the press/release logic and the send path are the
@@ -16,6 +18,7 @@
 #include "driver/uart.h"
 #include "driver/uart_vfs.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
@@ -46,8 +49,16 @@ static void console_task(void *arg)
             buttons_inject(TRIGGER_INDEX, true);
             vTaskDelay(pdMS_TO_TICKS(CONFIG_BORESIGHT_DEBOUNCE_MS * 5));
             buttons_inject(TRIGGER_INDEX, false);
+        } else if (strcmp(line, "setup") == 0) {
+            if (settings_request_setup() == ESP_OK) {
+                ESP_LOGI(TAG, "restarting into setup mode");
+                vTaskDelay(pdMS_TO_TICKS(100)); /* let the line out */
+                boresight_restart();
+            }
+            ESP_LOGE(TAG, "could not ask for setup mode");
         } else if (line[0] != '\0') {
-            ESP_LOGW(TAG, "unknown command \"%s\": press, release or click", line);
+            ESP_LOGW(TAG, "unknown command \"%s\": press, release, click or setup",
+                     line);
         }
     }
 }
@@ -60,5 +71,5 @@ void console_start(void)
     uart_vfs_dev_use_driver(CONFIG_ESP_CONSOLE_UART_NUM);
     setvbuf(stdin, NULL, _IONBF, 0);
     xTaskCreate(console_task, "console", 3072, NULL, 3, NULL);
-    ESP_LOGI(TAG, "buttons on the console: press, release, click");
+    ESP_LOGI(TAG, "console commands: press, release, click, setup");
 }

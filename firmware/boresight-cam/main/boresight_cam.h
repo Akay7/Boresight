@@ -14,12 +14,83 @@
 #include <stdint.h>
 
 #include "boresight_proto.h"
+#include "boresight_setup.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "sdkconfig.h"
 
+/* CONFIG_BORESIGHT_EMULATOR as a value: Kconfig leaves an option that is
+ * off undefined. */
+#if CONFIG_BORESIGHT_EMULATOR
+#define BORESIGHT_IS_EMULATOR true
+#else
+#define BORESIGHT_IS_EMULATOR false
+#endif
+
 /* Milliseconds since boot, from the monotonic esp_timer clock. */
 uint32_t boresight_now_ms(void);
+
+/* Restarts the device: esp_restart() on a board, a whole-system reset in
+ * the emulator, where a CPU-only restart hangs. */
+void boresight_restart(void) __attribute__((noreturn));
+
+/* The settings in effect: the build's, with anything stored on the device
+ * over them. Loaded once at boot, after NVS; read-only everywhere else. */
+void settings_load(void);
+const bp_settings_t *settings(void);
+const bp_camera_limits_t *settings_camera_limits(void);
+void settings_build_defaults(bp_settings_t *out);
+/* Stores what differs from the build and forgets what does not. */
+esp_err_t settings_save(const bp_settings_t *s);
+/* Forgets everything stored: the build's values apply again. */
+esp_err_t settings_erase(void);
+/* Asks the next boot to enter setup mode, once (the emulator's `setup`). */
+esp_err_t settings_request_setup(void);
+bool settings_take_setup_request(void);
+
+/* --- Firmware updates (ota.c) --------------------------------------------
+ *
+ * ota_boot_report logs the running firmware and slot, and a rolled-back
+ * update. ota_mark_good keeps a newly installed firmware; call it once the
+ * device has reached the server or setup mode. The upload calls run in
+ * order: begin with the image's first bytes and its total size, write the
+ * rest as it arrives, then finish (or abort). Each failure gives a reason
+ * for the setup page.
+ */
+void ota_boot_report(void);
+void ota_mark_good(void);
+esp_err_t ota_upload_begin(const uint8_t *head, size_t length, size_t total,
+                           const char **reason);
+esp_err_t ota_upload_write(const void *data, size_t length);
+esp_err_t ota_upload_finish(const char **reason);
+void ota_upload_abort(void);
+const char *ota_upload_version(void);
+
+/* --- Setup mode ----------------------------------------------------------
+ *
+ * setup.c: whether this boot opens setup mode (a console request, no
+ * network configured, or the trigger held 5 s from boot), and running it.
+ * setup_run returns only if setup mode could not run or ran out on an
+ * unconfigured device; the caller then stops where it is.
+ */
+bool setup_requested_at_boot(void);
+void setup_run(void);
+/* The page's handlers: a save or reset has been answered, restart soon. */
+void setup_done(void);
+
+/* setup_http.c: the page, at `home` for redirects. */
+esp_err_t setup_http_start(const char *home);
+void setup_http_stop(void);
+
+/* setup_ap.c on a board, empty stand-ins in the emulator. */
+#define SETUP_MAX_NETWORKS 16
+size_t setup_networks(char names[][BP_SSID_MAX + 1], size_t max);
+void setup_rescan(void);
+#if !CONFIG_BORESIGHT_EMULATOR
+/* Opens the setup network; `name` gets its SSID. */
+esp_err_t setup_network_start(char *name, size_t size);
+void setup_network_stop(void);
+#endif
 
 void status_led_start(void);
 void status_led_set_link(bp_link_state_t state);

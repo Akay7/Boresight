@@ -19,3 +19,9 @@ target_link_libraries(test_proto PRIVATE boresight_proto)
 target_compile_definitions(test_proto PRIVATE
     FIXTURE_FRAME="${CMAKE_CURRENT_SOURCE_DIR}/../../../tests/fixtures/synthetic_video/frame_0001.jpg")
 add_test(NAME boresight_proto COMMAND test_proto)
+
+add_executable(test_setup test_setup.c)
+target_link_libraries(test_setup PRIVATE boresight_proto)
+target_compile_definitions(test_setup PRIVATE
+    FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+add_test(NAME boresight_setup COMMAND test_setup)

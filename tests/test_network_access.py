@@ -893,6 +893,37 @@ def test_plain_text_device_details_are_printed(monkeypatch, capsys) -> None:
     assert "sha256" not in out
 
 
+def test_device_details_offer_discovery_when_announced(monkeypatch, capsys) -> None:
+    _run_main(monkeypatch, ["--host", "192.168.1.20", "--token", TOKEN])
+
+    out = capsys.readouterr().out
+
+    assert "host    192.168.1.20   (or leave it empty: this server is announced)" in out
+    assert "announce on" in out
+
+
+def test_device_details_do_not_offer_discovery_when_not_announced(
+    monkeypatch, capsys
+) -> None:
+    _run_main(
+        monkeypatch, ["--host", "192.168.1.20", "--token", TOKEN, "--no-announce"]
+    )
+
+    out = capsys.readouterr().out
+
+    assert "announce off" in out
+    assert "leave it empty" not in out
+
+
+def test_a_loopback_server_says_it_is_not_announced(monkeypatch, capsys) -> None:
+    _run_main(monkeypatch, ["--host", "127.0.0.1"])
+
+    out = capsys.readouterr().out
+
+    assert "announce off" in out
+    assert "leave it empty" not in out
+
+
 def test_tls_device_details_carry_the_certificate_fingerprint(
     monkeypatch, capsys, tmp_path: Path
 ) -> None:

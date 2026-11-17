@@ -135,6 +135,9 @@ class ServerOptions(BaseModel):
     certfile: str | None = None
     keyfile: str | None = None
     qr: bool = True
+    # Over multicast DNS, for devices left without a server address
+    # (`discovery.py`). Only ever made when bound to a network address.
+    announce: bool = True
 
 
 class MarkerOptions(BaseModel):
@@ -207,6 +210,7 @@ CLI_FLAGS: dict[str, str] = {
     "server.certfile": "--certfile",
     "server.keyfile": "--keyfile",
     "server.qr": "--qr",
+    "server.announce": "--announce",
     "markers.layout": "--markers",
     "detection.tracked": "--tracked-detection",
     "recording.seconds": "--record-seconds",

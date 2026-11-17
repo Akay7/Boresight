@@ -2,3 +2,5 @@ dependencies:
   idf: ">=5.1"
   espressif/esp32-camera: "^2.0.10"
   espressif/esp_websocket_client: "^1.2.3"
+  # Finds the server when its address is left empty (link.c, boards).
+  espressif/mdns: "^1.4.0"

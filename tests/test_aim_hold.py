@@ -202,3 +202,64 @@ def test_a_zero_window_disables_holding(marker_map: MarkerMap) -> None:
     holding.process_frame(_frame())
 
     assert backend.calls == [solved.position]
+
+
+def test_a_lapsed_hold_says_nothing_is_aiming(marker_map: MarkerMap) -> None:
+    """Past the window the backend is told aim is lost, so the Linux pen
+    stops hovering at a stale position."""
+    backend = FakeCursorBackend()
+    inner = _pipeline(
+        marker_map, backend, [_detections(marker_map, PANEL_CENTRE_MM), [], []]
+    )
+    times = iter([0.0, 10.0, 10.1])
+    holding = HoldingPipeline(inner, backend, hold_s=0.75, clock=lambda: next(times))
+
+    holding.process_frame(_frame())
+    holding.process_frame(_frame())
+    holding.process_frame(_frame())
+
+    # Every frame past the window, not just the first: a trigger held
+    # through the lapse keeps the pen down until it lets go.
+    assert backend.idles == 2
+
+
+def test_a_frame_held_within_the_window_does_not_say_aim_is_lost(
+    marker_map: MarkerMap,
+) -> None:
+    backend = FakeCursorBackend()
+    inner = _pipeline(
+        marker_map, backend, [_detections(marker_map, PANEL_CENTRE_MM), []]
+    )
+    times = iter([0.0, 0.1])
+    holding = HoldingPipeline(inner, backend, hold_s=0.75, clock=lambda: next(times))
+
+    holding.process_frame(_frame())
+    holding.process_frame(_frame())
+
+    assert backend.idles == 0
+
+
+def test_with_holding_off_an_unsolved_frame_says_aim_is_lost(
+    marker_map: MarkerMap,
+) -> None:
+    backend = FakeCursorBackend()
+    inner = _pipeline(
+        marker_map, backend, [_detections(marker_map, PANEL_CENTRE_MM), []]
+    )
+    times = iter([0.0, 0.0])
+    holding = HoldingPipeline(inner, backend, hold_s=0.0, clock=lambda: next(times))
+
+    holding.process_frame(_frame())
+    holding.process_frame(_frame())
+
+    assert backend.idles == 1
+
+
+def test_a_solved_frame_never_says_aim_is_lost(marker_map: MarkerMap) -> None:
+    backend = FakeCursorBackend()
+    inner = _pipeline(marker_map, backend, [_detections(marker_map, PANEL_CENTRE_MM)])
+    holding = HoldingPipeline(inner, backend, hold_s=0.75, clock=lambda: 0.0)
+
+    holding.process_frame(_frame())
+
+    assert backend.idles == 0

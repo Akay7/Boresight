@@ -2,15 +2,15 @@
 
 `AimPipeline.process_frame` (`pipeline.py`) only calls
 `backend.move_absolute` on a solved frame; on any other outcome it goes
-silent. On this platform that silence reads as the OS cursor going idle
--- a Wayland compositor hides a pointer that produces no events for a
-while, and a short run of unsolved frames (a marker briefly occluded,
-motion blur) is ordinary, not a real loss of aim. `HoldingPipeline`
+silent. A short run of unsolved frames (a marker briefly occluded,
+motion blur) is ordinary, not a real loss of aim, so `HoldingPipeline`
 composes around an `AimPipeline` to re-send its last solved position to
-the backend through a short run of unsolved frames, without moving the
-cursor or changing what solving itself reports -- and stops once the
-gap runs longer than an ordinary dropout, so aim is not held stale
-forever.
+the backend through it, without moving the cursor or changing what
+solving itself reports. Once the gap runs longer than an ordinary
+dropout it stops, and tells the backend that nothing is aiming
+(`idle()`): the Linux pen then leaves proximity instead of hovering at a
+stale aim, where it would keep the window under it from taking the
+real mouse's clicks.
 
 Deliberately a wrapper, not a change to `AimPipeline`: the pipeline's
 own spec requires it to stay stateless, and this needs to remember the
@@ -114,5 +114,11 @@ class HoldingPipeline:
             # floating-point rounding far below anything visible -- so
             # this cannot introduce a jump, only fresh device traffic.
             backend.move_absolute(*self._last_position)
+        else:
+            # Past the window, or holding off: nothing is aiming. Told
+            # on every such frame, not once -- a pen whose tip a held
+            # trigger keeps down stays put until the trigger lets go,
+            # and the next frame after that lifts it. Idempotent below.
+            backend.idle()
 
         return result

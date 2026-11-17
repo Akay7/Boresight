@@ -11,6 +11,16 @@ menu "Boresight camera"
             ESP32-CAM. Set by `tools/idf.sh emulator` through
             sdkconfig.emulator; never set it in a device configuration.
 
+    config BORESIGHT_TEST_RESET_AT_BOOT
+        bool "TEST ONLY: reset at every boot, before starting"
+        default n
+        help
+            For checking that a firmware update which never starts is
+            rolled back: an image built with this resets right after boot,
+            before it could be marked good, so the bootloader returns to
+            the previous firmware. Never set it in a configuration you
+            flash for use.
+
     menu "Network"
 
         config BORESIGHT_WIFI_SSID
