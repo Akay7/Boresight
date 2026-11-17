@@ -1117,6 +1117,14 @@ phone's were.
 | Status LED | GPIO33 | The on-board red LED |
 | Power | 5V and GND | At least 1 A; a 470–1000 µF capacitor across 5V/GND at the board stops brown-outs |
 
+![Trigger wiring: one side of the button to IO13, the other to the GND two pins below it, both on the 5V side of the board](firmware/boresight-cam/docs/trigger.svg)
+
+The button's two legs go to IO13 and the GND two pins below it, either
+way round; any normally-open push button or microswitch will do. With no
+button wired yet, a jumper wire between the same two pins does the same
+job, for instance held there through a reset to open [setup
+mode](#setup-mode).
+
 Everything else is taken, and the firmware refuses at boot to put a
 button anywhere but GPIO13 or GPIO14. GPIO0, 2, 12 and 15 are boot
 straps — **GPIO12 pulled high at boot selects 1.8 V flash and the board
@@ -1245,7 +1253,8 @@ device opens setup mode at boot:
   without `menuconfig` settings);
 - when the trigger is held for 5 seconds from power-on or reset. The LED
   switches to two flashes every 2 seconds the moment the hold is long
-  enough: let go then.
+  enough: let go then. No trigger wired yet? Hold a jumper wire between
+  IO13 and GND instead (see [Wiring](#wiring)).
 
 In setup mode the device stops streaming and opens a Wi-Fi network of its
 own, `Boresight-` and four hex digits from its MAC address, with no
@@ -1748,7 +1757,7 @@ a defect invisible to a test suite that always runs from a checkout.
             boresight_proto/  # wire format, debouncer, LED patterns -- no ESP-IDF
           test_host/          # host tests for boresight_proto (CMake + CTest)
           tools/              # Docker build and QEMU runner, no ESP-IDF install
-          docs/               # flashing wiring diagram: schemdraw script and its SVG
+          docs/               # wiring diagrams (flashing, trigger): schemdraw scripts and SVGs
         boresight-hid/        # future: ESP32-S3, TinyUSB hardware path
       deploy/pi/              # the Pi gun's installer, USB gadget script, services
       hardware/case/          # the printable modular case (its own uv project)

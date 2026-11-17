@@ -25,6 +25,8 @@ the full walkthrough. This file is the build reference.
     tools/idf.sh              idf.py inside the pinned ESP-IDF container
     tools/run-emulator.sh     boot an image in QEMU, in the same container
     docs/flashing.py          draws docs/flashing.svg, the flashing wiring
+    docs/trigger.py           draws docs/trigger.svg, the trigger wiring
+    docs/board.py             the board both diagrams draw
     components/boresight_proto/
                               wire format, debouncer, pin allowlist,
                               back-off and LED patterns -- no ESP-IDF
