@@ -20,6 +20,185 @@ computer is (`uv run pytest tests/test_gun_*.py`, and `boresight-gun
 --emulate FRAMES_DIR`). The checklist at the end lists what only a Pi can
 confirm; until it is ticked, treat every default here as a guess.
 
+## Quick start
+
+Two paths from a blank SD card to a working gun. Pick one:
+
+- **A** if the Pi drives a TV and an emulator runs on it, or
+- **B** if the Pi is a USB mouse for another machine.
+
+Every step ends with a **check**. Don't go on until it passes; the sections
+after the quick start explain each part in more detail.
+
+### A. Next to an emulator, on a TV
+
+1. **Flash the SD card.** In Raspberry Pi Imager choose Raspberry Pi Zero 2 W
+   and *Raspberry Pi OS (64-bit)*, the **Desktop** image, Trixie or newer.
+   In its settings, set:
+   - a hostname, e.g. `boresight`
+   - a username and password
+   - your Wi-Fi
+   - **SSH enabled**
+
+   **Check:** the card is written without errors.
+
+2. **Connect the hardware, with the Pi powered off:**
+   - the camera's ribbon into the camera connector, as the camera's own
+     instructions show
+   - the trigger button between **GPIO 17** (header pin 11) and **GND**
+     (pin 9)
+   - optionally, an LED and resistor from **GPIO 27** (pin 13) to GND
+   - HDMI to the TV, then power into the Pi's power port
+
+   **Check:** the Pi boots to its desktop on the TV, logged in.
+   Raspberry Pi OS Desktop logs in by itself. If yours asks for a
+   password, turn that on with `sudo raspi-config`: *System Options →
+   Boot / Auto Login → Desktop Autologin*.
+
+3. **Open a terminal.** Use a keyboard on the Pi's desktop, or SSH from
+   your computer:
+
+       ssh <user>@boresight.local
+
+4. **Check the camera:**
+
+       rpicam-hello --list-cameras
+
+   **Check:** your camera is listed. "No cameras available" means the
+   ribbon is loose or reversed: power off and reseat it. A USB webcam
+   instead shows up in `ls /dev/video*`.
+
+5. **Install the system dependencies, once.** uv, from its official
+   installer:
+
+       curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   Then log out and back in. git, a C compiler and the kernel headers
+   come with Raspberry Pi OS Desktop. On another system, install them
+   with your package manager.
+
+   **Check:** `uv --version`, `git --version` and `gcc --version` each
+   print a version.
+
+6. **Let the gun create its pointer.** That means read/write access to
+   `/dev/uinput` without root:
+
+       echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/60-uinput.rules
+       sudo usermod -aG input $USER
+
+   If `ls /dev/uinput` says there is no such file, the kernel module is
+   not loaded. Load it at every boot:
+
+       echo uinput | sudo tee /etc/modules-load.d/uinput.conf
+
+   Then `sudo reboot`, so the group and the rule apply.
+
+   **Check:** after the reboot, `ls -l /dev/uinput` shows the group
+   `input`, and `id` lists `input`.
+
+7. **Install the gun:**
+
+       git clone https://github.com/Akay7/Boresight.git ~/Boresight
+       cd ~/Boresight
+       uv sync --extra gun --extra local
+
+   This takes several minutes on a Zero 2 W, because `evdev` is compiled.
+
+   **Check:** `uv run boresight-gun --help` prints its options.
+
+8. **Write the configuration,** `~/boresight-gun.toml`:
+
+       output = "local"
+
+       [overlay]
+       picture_aspect = "4:3"
+
+   Keep `picture_aspect` if the emulator shows the game with bars at the
+   sides: the tags then go in those bars. Set it to the picture's shape.
+   Remove it if the game fills the screen.
+
+9. **Run it once by hand,** in a terminal on the Pi's desktop. Over SSH
+   there is no desktop for the overlay to draw on.
+
+       cd ~/Boresight
+       uv run boresight-gun --config ~/boresight-gun.toml
+
+   **Check:**
+   - White squares with black tags appear on the TV.
+   - Pointed at the TV, the gun logs `... fps, N% solved` every few
+     seconds.
+   - The mouse cursor follows where you aim, and the trigger clicks.
+
+   If tags are cut off at the TV's edge, set the TV's picture size to
+   "Just scan" or "Screen fit". If the TV has no such setting, add
+   `extra_margin_px = 30` under `[overlay]` and raise it until they show.
+   Stop the gun with Ctrl-C.
+
+10. **Start it at every login:**
+
+        uv run boresight-gun --config ~/boresight-gun.toml --autostart
+        sudo reboot
+
+    **Check:** when the desktop comes up, the tags appear by themselves.
+    `--autostart remove` undoes it.
+
+11. **Set up your emulator,** whichever you use:
+    - it runs **windowed or borderless full screen**, not
+      fullscreen-exclusive
+    - its light gun (Zapper, Light Phaser…) takes its position from the
+      **mouse**
+    - the game's shape matches `picture_aspect`
+
+    **Check:** in a light-gun game, shots land where you aim.
+
+### B. A USB mouse for another machine
+
+1. **Flash the SD card** as in A1, with *Raspberry Pi OS Lite (64-bit)*,
+   Trixie or newer. No desktop is needed.
+2. **Connect the camera and the button** as in A2, with the Pi off. Don't
+   connect the USB data cable yet. Power the Pi from its power port for
+   now.
+3. **Log in over SSH** as in A3.
+4. **Check the camera** as in A4.
+5. **Install uv** as in A5. If `git --version` fails, install git with
+   your package manager (`sudo apt install git` on Raspberry Pi OS).
+6. **Install the gun:**
+
+       git clone https://github.com/Akay7/Boresight.git ~/Boresight
+       cd ~/Boresight
+       uv sync --extra gun
+
+   **Check:** `uv run boresight-gun --help` prints its options.
+
+7. **Set up the USB mouse and the boot service** (root, once):
+
+       sudo deploy/pi/install.sh
+       sudo reboot
+
+   **Check:** after the reboot, `ls /sys/class/udc` lists a controller and
+   `systemctl status boresight-gun` says `active (running)`.
+
+8. **Put markers around the host's screen.** The host runs nothing, so
+   the tags are printed:
+   - On any computer with Boresight installed, run `uv run boresight` and
+     open `http://127.0.0.1:7331/markers` to print the sheet.
+   - Stick each tag where the sheet's diagram says.
+   - Measure where each one ended up, as the main README's "Marker
+     system" and "markers.toml" describe, and write the result into
+     `/etc/boresight/markers.toml` on the Pi.
+   - Uncomment `layout = "/etc/boresight/markers.toml"` in
+     `/etc/boresight-gun.toml`, and run
+     `sudo systemctl restart boresight-gun`.
+
+9. **Plug in the host.** Connect the Pi's USB **data** port, the one
+   nearer the middle of the board, to the host.
+
+   **Check:**
+   - The host lists a mouse called "Boresight light gun".
+   - `journalctl -u boresight-gun -f` shows `... fps, N% solved` while
+     you aim at the screen.
+   - The host's cursor follows the gun.
+
 ## What you need
 
 | Part | Notes |
