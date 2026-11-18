@@ -1395,7 +1395,11 @@ outcome and trigger count — readable from any browser or `curl`:
 A wrong token is refused during the handshake (HTTP 403). The device
 shows the error pattern and waits 30 seconds between attempts instead of
 hammering the server; a lost network or a restarted server is retried
-from 1 second, backing off to 30.
+from 1 second, backing off to 30. The server's log names the cause: a
+token that differs from the server's, and, when the server was started
+with `--token-auto`, that its token changed on that start and wants a
+fixed `--token` instead. The device details it prints mark such a token
+"this run only".
 
 ### Frames and the trigger
 

@@ -84,11 +84,17 @@ class ServerConfig:
     `token=None` means no authentication, which is only permitted on
     loopback. `validate()` enforces that and is called before anything
     binds.
+
+    `token_generated` says the token was made for this run
+    (`--token-auto`): fine for a phone, which is handed it again in the
+    printed URL, but a device keeps the token it was given, which stops
+    matching on the next start.
     """
 
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     token: str | None = None
+    token_generated: bool = False
     tls: bool = False
     certfile: Path | None = None
     keyfile: Path | None = None

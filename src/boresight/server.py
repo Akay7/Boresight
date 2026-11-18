@@ -460,12 +460,10 @@ def create_app(
         # holds no cookies, so the query parameter stays for it.
         client = _describe(websocket)
         if config.token and not _authorized(config.token, websocket):
-            # Logged rather than silent: from the phone this looks like
-            # the connection simply not working, and the cause is a URL
-            # missing its token or a cookie from a previous run.
+            # Logged rather than silent: from the phone or the device this
+            # looks like the connection simply not working.
             logger.warning(
-                "frame socket refused: bad or missing token, or foreign origin (%s)",
-                client,
+                "frame socket refused: %s (%s)", _refusal(config, websocket), client
             )
             await websocket.close(code=WS_POLICY_VIOLATION)
             return
@@ -514,6 +512,36 @@ def _authorized(configured: str, connection: HTTPConnection) -> bool:
         return True
     return origin_matches_host(
         connection.headers.get("origin"), connection.headers.get("host")
+    )
+
+
+def _refusal(config: ServerConfig, websocket: WebSocket) -> str:
+    """Why a frame socket was refused, in terms its sender can act on.
+
+    A token in the URL or a header on the socket is a device's: a browser
+    sends its cookie there instead. A device keeps the token it was set
+    up with, so under `--token-auto` every restart of the server strands
+    it, and the fix is on the server's side, not the device's.
+    """
+    explicit = presented_token(
+        websocket.query_params.get(TOKEN_QUERY_PARAM),
+        websocket.headers.get("authorization"),
+    )
+    if explicit is None:
+        # The phone: a URL missing its token, or a cookie from a
+        # previous run, or a page served by some other origin.
+        return "bad or missing token, or foreign origin"
+    if not config.token_generated:
+        return (
+            "a device presented a token that does not match this server's: "
+            "enter the server's token on the device's setup page"
+        )
+    return (
+        "a device presented a token that does not match this server's, which "
+        "is generated anew on every start (--token-auto): give the server a "
+        "fixed token (--token, or token under [server] in "
+        ".boresight/config.toml) and enter the same one on the device's "
+        "setup page"
     )
 
 
@@ -1284,13 +1312,16 @@ def _device_details(
     host = config.advertised_host()
     if announced:
         host += "   (or leave it empty: this server is announced)"
+    token = config.token or "(none)"
+    if config.token_generated:
+        token += "   (this run only: --token-auto; a device needs --token)"
     lines = [
         "  For a device (ESP32-CAM), configure:",
         f"    host    {host}",
         f"    port    {config.port}",
         f"    path    {FRAME_SOCKET_PATH}",
         f"    tls     {'on' if config.tls else 'off'}",
-        f"    token   {config.token or '(none)'}",
+        f"    token   {token}",
         f"    announce {'on' if announced else 'off'}",
     ]
     if certfile is not None:
@@ -1527,6 +1558,7 @@ def main(argv: list[str] | None = None) -> int:
         host=served.host,
         port=served.port,
         token=served.token or (generate_token() if served.token_auto else None),
+        token_generated=served.token is None and bool(served.token_auto),
         tls=served.tls,
         certfile=None if served.certfile is None else Path(served.certfile),
         keyfile=None if served.keyfile is None else Path(served.keyfile),

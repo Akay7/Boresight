@@ -92,6 +92,69 @@ def test_an_unauthenticated_socket_is_closed_rather_than_served(
     assert backend.calls == []
 
 
+def _refusal_logged(
+    caplog: pytest.LogCaptureFixture, config: ServerConfig, path: str
+) -> str:
+    app = create_app(backend_factory=FakeCursorBackend, config=config)
+    with (
+        TestClient(app) as client,
+        caplog.at_level(logging.WARNING, logger="boresight"),
+    ):
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect(path):
+                pass
+    [message] = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("frame socket refused")
+    ]
+    return message
+
+
+def test_a_device_with_a_stale_generated_token_is_told_to_fix_the_server(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The board keeps the token it was set up with; under --token-auto
+    the server's changed on restart, and nothing on the board can fix
+    that. The log names the cause and the fix, and neither token."""
+    config = ServerConfig(token=TOKEN, token_generated=True)
+
+    message = _refusal_logged(
+        caplog, config, f"{FRAME_SOCKET_PATH}?token=from-last-run"
+    )
+
+    assert "--token-auto" in message
+    assert "fixed token" in message
+    assert "setup page" in message
+    assert TOKEN not in caplog.text
+    assert "from-last-run" not in caplog.text
+
+
+def test_a_device_with_a_wrong_fixed_token_is_told_to_fix_the_device(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    message = _refusal_logged(
+        caplog, ServerConfig(token=TOKEN), f"{FRAME_SOCKET_PATH}?token=nearly-right"
+    )
+
+    assert "a device presented a token that does not match" in message
+    assert "setup page" in message
+    assert "--token-auto" not in message
+
+
+def test_a_socket_without_a_token_keeps_the_phone_explanation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No token in the URL is the phone's socket, which relies on its
+    cookie: the device advice would mislead there."""
+    config = ServerConfig(token=TOKEN, token_generated=True)
+
+    message = _refusal_logged(caplog, config, FRAME_SOCKET_PATH)
+
+    assert "bad or missing token, or foreign origin" in message
+    assert "device" not in message
+
+
 def test_a_valid_token_is_served_normally(backend: FakeCursorBackend) -> None:
     with _client(backend, TOKEN) as client:
         assert client.get(f"/?token={TOKEN}").status_code == 200
@@ -891,6 +954,20 @@ def test_plain_text_device_details_are_printed(monkeypatch, capsys) -> None:
     assert "tls     off" in out
     assert f"token   {TOKEN}" in out
     assert "sha256" not in out
+
+
+def test_a_generated_token_is_marked_as_this_run_only(monkeypatch, capsys) -> None:
+    _run_main(monkeypatch, ["--host", "192.168.1.20", "--token-auto"])
+
+    out = capsys.readouterr().out
+
+    assert "(this run only: --token-auto; a device needs --token)" in out
+
+
+def test_a_fixed_token_is_not_marked(monkeypatch, capsys) -> None:
+    _run_main(monkeypatch, ["--host", "192.168.1.20", "--token", TOKEN])
+
+    assert "this run only" not in capsys.readouterr().out
 
 
 def test_device_details_offer_discovery_when_announced(monkeypatch, capsys) -> None:
