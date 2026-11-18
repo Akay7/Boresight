@@ -126,7 +126,7 @@ jobs:
 
   # The printable case: a separate uv project (it needs the OpenCascade CAD
   # kernel, which the package's environment never installs), pinned to
-  # Python 3.12 by its own .python-version. Its lint runs in the Python jobs
+  # Python 3.14 by its own .python-version. Its lint runs in the Python jobs
   # above, with the rest of the tree. Every shipped configuration is built
   # into one parts library and published as one artifact, only after the
   # checks pass: a change that breaks a fit publishes nothing.
