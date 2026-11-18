@@ -226,8 +226,8 @@ CI builds the generic image, with no `sdkconfig` and so no secrets, on
 every push (`.github/workflows/firmware.yml`), and for a `v*` tag
 publishes a GitHub Release; the tag must match `PROJECT_VER` in
 `CMakeLists.txt`. The site, with the latest release in its flasher, is
-published on GitHub Pages from `main` and from tags
-(`.github/workflows/site.yml`).
+published on GitHub Pages from `main` (`.github/workflows/site.yml`),
+and again once a release is out, to put it in the flasher.
 
 ## TLS
 
