@@ -21,7 +21,7 @@ on the right side, a hex pocket for the nut. No skin part SHALL use a
 hook, snap or slide of its own, and skins SHALL rest only on the bones'
 outer surfaces, never on a functional part.
 
-#### Scenario: A skin's bolt holes line up
+#### Scenario: A skin's screws line up
 - **WHEN** a skin part built to the interface is placed on the bones
 - **THEN** each of its holes lines up with a through-bolt position, and
   it is clamped by the gun's own bolts and nuts
@@ -48,7 +48,7 @@ No skin part SHALL enter a keep-out zone:
 - **THEN** its opening widens with the field of view, or the check fails
   naming the field-of-view zone
 
-#### Scenario: Battery swap with covers on
+#### Scenario: Battery swap with skins on
 - **WHEN** a covered gun's drawer is changed
 - **THEN** no cover is in the way of the thumbscrew or the drawer
 

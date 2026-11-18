@@ -28,7 +28,7 @@ board kit, power drawer, trigger mechanism, switch plate, number of
 barrels, feedback device, buttons, style, style parameters, print volume
 and clearances.
 
-#### Scenario: Building a battery Pi gun with a solenoid
+#### Scenario: Building a Pi gun
 - **WHEN** the command is run with the Pi kit, the 18650 drawer, one
   barrel, the bolt lever with the MX plate, the solenoid, the buttons and
   the `minimal` style

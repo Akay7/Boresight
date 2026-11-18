@@ -17,9 +17,11 @@ from dataclasses import dataclass
 
 from build123d import Location, Part, Plane, Rectangle, Vector, loft
 
+from boresight_case import layout as L
 from boresight_case.config import Printer
 from boresight_case.geom import (
     Vec,
+    box,
     cylinder,
     hex_location,
     hexagon_prism,
@@ -36,6 +38,8 @@ from boresight_case.vendor import (
     M3_INSERT_LEN,
     M3_NUT_AF,
     M3_NUT_H,
+    M3_NYLOC_H,
+    M3_WASHER,
 )
 
 
@@ -185,6 +189,15 @@ class ModuleJoint:
         flare = loft([near, far])
         return collar - bore - flare
 
+    def tube(self, fit: Fit) -> Part:
+        """The tenon's tube and its root collar, without the screw's boss."""
+        ow, oh = self.tenon_outer(fit)
+        iw, ih = ow - 2 * self.wall, oh - 2 * self.wall
+        centre = v(self.mouth) + self._a * (self.depth / 2)
+        outer = oriented_box(centre, self._u, self._h, (ow, oh, self.depth))
+        inner = oriented_box(centre, self._u, self._h, (iw, ih, self.depth + 1))
+        return (outer - inner) + self._root(fit)
+
     def tenon_cuts(self, fit: Fit, up: Sequence[float]) -> Part:
         entry, d, _, _ = self._screw_geometry(fit)
         tenon_face = entry + d * (self.host_wall + fit.clearance)
@@ -292,146 +305,259 @@ def _perpendicular_to(d: Vector) -> Vector:
     return (trial - d * trial.dot(d)).normalized()
 
 
-# Skin attachment ------------------------------------------------------------
+# Through-bolts ----------------------------------------------------------------
 
-SKIN_T = 3.2  # skin flank thickness
-SKIN_CBORE_DEPTH = 2.0  # leaves 1.2 mm under the screw head
-HOOK_STEM = (4.0, 6.0)  # along the slide, across it
-HOOK_LIP = 1.6  # the 45-degree wedge's size
-NUT_BOSS = 4.5  # boss depth inside the core wall
+FLANGE = 3.0  # a cover's flange, or a spacer collar, under a head or a nut
+LAP = 1.5  # each cover's layer where two covers lap at a bolt
+COLLAR_OD = 9.0
 
 
 @dataclass(frozen=True)
-class AttachmentPoint:
-    """Where a skin part attaches: one M3 x 8 screw through the skin into a
-    nut in the core, and at the other end a hook through a slot in the core
-    wall. The skin is laid on with its hook in the slot, slid along `slide`
-    until the hook's 45-degree wedge is behind the wall, and screwed down.
+class ThroughBolt:
+    """An M3 x 50 straight through the gun along y: its head (on a washer)
+    on the left cover's flange, a nylon-insert nut in a hex pocket in the
+    right cover. Between the bone walls a crush tube, part of whatever
+    fills the port, takes the clamp load.
 
-    `normal` is the core flank's outward normal; `screw` and `hook` are on
-    the flank's outer face, `hook` at the stem's centre once engaged.
-    """
+    `centre` is where the bolt crosses the midplane, `half` half the width
+    of the bones it crosses (18 for the body, 18.6 for the grip)."""
 
     name: str
-    normal: Vec
-    screw: Vec
-    hook: Vec
-    slide: Vec
-    wall: float = 2.5
-    stem: tuple[float, float] = HOOK_STEM
-    # The nut boss inside the wall: along the slide, across it.
-    boss: tuple[float, float] = (9.0, 9.0)
-    # The wall is backed by solid material (a rib): cut room for the wedge
-    # to pass behind it as well.
-    backed: bool = False
-    # The hook's wall, when it is not the screw's flank (the grip's hooks go
-    # into its front wall).
-    hook_normal: Vec | None = None
+    centre: Vec
+    half: float = 18.0
+    length: float = 50.0
 
     @property
-    def _n(self) -> Vector:
-        return unit(self.normal)
+    def head_y(self) -> float:
+        """The flange's outer face under the head's washer."""
+        return self.half + FLANGE
 
     @property
-    def _s(self) -> Vector:
-        return unit(self.slide)
+    def nut_y(self) -> float:
+        """The right flange's outer face, where the nut seats."""
+        return -(self.half + FLANGE)
 
-    @property
-    def _hn(self) -> Vector:
-        return unit(self.hook_normal) if self.hook_normal else self._n
+    def _at(self, y: float) -> Vector:
+        x, _, z = self.centre
+        return Vector(x, y, z)
 
-    @property
-    def _t(self) -> Vector:
-        return self._hn.cross(self._s).normalized()
-
-    # core side
-    def core_boss(self, up: Sequence[float]) -> Part:
-        n = self._n
-        base = v(self.screw) - n * self.wall
-        return _gusset_block(base, -n, self._s, NUT_BOSS, *self.boss, up)
-
-    def core_cuts(self, fit: Fit, up: Sequence[float]) -> Part:
-        n = self._n
-        face = v(self.screw)
-        hole = teardrop(
-            face + n * 0.5, -n, M3_CLEAR / 2, self.wall + NUT_BOSS + 1.0, up
+    def hole(self, y0: float, y1: float, up: Sequence[float]) -> Part:
+        """The clear hole from y0 to y1 (a teardrop when it lies sideways)."""
+        lo, hi = sorted((y0, y1))
+        return teardrop(
+            self._at(hi + 0.01), (0, -1, 0), M3_CLEAR / 2, hi - lo + 0.02, up
         )
-        if fit.fastener == "insert":
-            pocket = cylinder(face + n * 0.01, -n, M3_INSERT_HOLE / 2, M3_INSERT_LEN)
-        else:
-            # Opens toward the inside; the screw pulls the nut onto the wall.
-            pocket = hexagon_prism(
-                face - n * (self.wall + NUT_BOSS / 2 + 0.5),
-                n,
-                fit.nut_af,
-                NUT_BOSS + 1.0,
-                up,
+
+    def crush_tube(self, y0: float, y1: float, up: Sequence[float]) -> Part:
+        """The crush tube between y0 and y1: solid, pointed on top in print,
+        with the bolt's hole through it."""
+        lo, hi = sorted((y0, y1))
+        # A solid bar sideways in print: its underside comes to the point.
+        down = tuple(-c for c in unit(up))
+        tube = teardrop(self._at(hi), (0, -1, 0), L.CRUSH_R, hi - lo, down)
+        return tube - self.hole(lo - 1, hi + 1, up)
+
+    def washer_location(self) -> Location:
+        return Location(Plane(origin=self._at(self.head_y), z_dir=(0, 1, 0)))
+
+    def bolt_location(self) -> Location:
+        """Head's underside on the washer, shank toward -y."""
+        return Location(
+            Plane(origin=self._at(self.head_y + M3_WASHER[1]), z_dir=(0, 1, 0))
+        )
+
+    def nut_location(self, up: Sequence[float], pocket: float = 0.0) -> Location:
+        """The nut on the right flange's outer face, or sunk `pocket` into a
+        cover's hex pocket."""
+        c = self._at(self.nut_y + pocket - M3_NYLOC_H / 2)
+        return hex_location(c, (0, 1, 0), up)
+
+    def nut_pocket(self, fit: Fit, up: Sequence[float], depth: float) -> Part:
+        """The nut's hex pocket in the right cover, from its outer face
+        `depth` in: the nut goes in from outside and bears on its floor."""
+        c = self._at(self.nut_y + depth / 2 - 0.01)
+        return hexagon_prism(c, (0, 1, 0), fit.nut_af, depth + 0.02, up)
+
+    def sweep(self, extra: float = 0.5) -> Part:
+        """The bolt's whole length, grown by `extra`: what it may not touch."""
+        top = self.head_y + M3_WASHER[1]
+        return cylinder(self._at(top), (0, -1, 0), 1.5 + extra, self.length)
+
+    def head_room(self, depth: float = 4.0) -> Part:
+        """The space a hex key and the head need outside the left flange."""
+        return cylinder(
+            self._at(self.head_y), (0, 1, 0), M3_HEAD_CBORE / 2 + 0.3, depth
+        )
+
+    def nut_room(self, depth: float = 8.0) -> Part:
+        """The space outside the right flange that the nut and the bolt's
+        tail take."""
+        return cylinder(
+            self._at(self.nut_y), (0, -1, 0), M3_HEAD_CBORE / 2 + 0.3, depth
+        )
+
+    def collar(self, side: int, fit: Fit) -> Part:
+        """A 3 mm spacer collar, standing in for a cover's flange on a bench
+        build: on the left (+1) or right (-1) flank."""
+        y0 = side * self.half
+        y1 = side * (self.half + FLANGE)
+        lo, hi = sorted((y0, y1))
+        ring = cylinder(self._at(lo), (0, 1, 0), COLLAR_OD / 2, hi - lo)
+        return ring - cylinder(
+            self._at(lo - 1), (0, 1, 0), M3_CLEAR / 2 + fit.clearance / 2, hi - lo + 2
+        )
+
+
+def _crush_and_holes(
+    bolts: Sequence[ThroughBolt], y: float, up: Sequence[float]
+) -> tuple[Part, Part]:
+    """(the crush tubes across +-y, the holes through everything)."""
+    from boresight_case.geom import union
+
+    tubes = union(b.crush_tube(-y, y, up) for b in bolts)
+    holes = union(b.hole(-30, 30, up) for b in bolts)
+    return tubes, holes
+
+
+@dataclass(frozen=True)
+class Port:
+    """A port: the 31 x 45 opening at a bone's end, 12 mm deep, keyed by a
+    rib under its top wall, with two through-bolts 6 mm in from its mouth.
+
+    `mouth` is the x of the opening; `facing` +1 when it opens forward (its
+    bone lies behind it), -1 when it opens backward. A tenon goes in along
+    -facing."""
+
+    name: str
+    mouth: float
+    facing: int
+
+    @property
+    def bolt_x(self) -> float:
+        return self.mouth - self.facing * L.PORT_BOLT_AT
+
+    @property
+    def bolts(self) -> tuple[ThroughBolt, ThroughBolt]:
+        return tuple(
+            ThroughBolt(
+                f"{self.name} bolt {'upper' if z > 0 else 'lower'}", (self.bolt_x, 0, z)
             )
-        return hole + pocket + self.slot(fit, up)
+            for z in L.PORT_BOLT_Z
+        )
 
-    def slot(self, fit: Fit, up: Sequence[float]) -> Part:
-        """The hook's slot through the wall: long enough for the wedge to
-        pass, then the skin slides it home. A backed wall also gets a pocket
-        behind it, for the wedge to travel in and seat against the wall."""
-        s, t, n = self._s, self._t, self._hn
-        stem_s, stem_t = self.stem
+    @property
+    def zone(self) -> tuple[float, float]:
+        """The port's span along x, inside its bone."""
+        return tuple(sorted((self.mouth, self.mouth - self.facing * L.PORT_DEPTH)))
+
+    # the host's side ---------------------------------------------------------
+
+    def rib(self) -> Part:
+        """The key rib under the host's top wall, through the port's depth."""
+        kw, kd = L.KEY_RIB
+        x0, x1 = self.zone
+        # Its front end, toward the mouth, is where a tenon first meets it.
+        return box(x0, x1, -kw / 2, kw / 2, L.IN_HALF_H - kd, L.IN_HALF_H + 0.01)
+
+    def host_cuts(self, up: Sequence[float]) -> Part:
+        from boresight_case.geom import union
+
+        return union(b.hole(-L.HALF_W - 1, L.HALF_W + 1, up) for b in self.bolts)
+
+    # the filler's side ---------------------------------------------------------
+
+    def tenon(self, fit: Fit, up: Sequence[float], root: bool = True) -> Part:
+        """The standard tenon: a keyed tube in the port, its two crush tubes
+        and the bolts' holes, and (with `root`) a collar behind the mouth
+        that fuses it to its own module's walls."""
         c = fit.clearance
-        s0 = -stem_s / 2 - HOOK_LIP - 2 * c
-        s1 = stem_s / 2 + c
-        width = stem_t + 2 * c
-
-        def cut(a0: float, a1: float, n0: float, n1: float) -> Part:
-            centre = v(self.hook) + s * ((a0 + a1) / 2) + n * ((n0 + n1) / 2)
-            return oriented_box(centre, s, t, (a1 - a0, width, n1 - n0))
-
-        through = cut(s0, s1, -self.wall - 0.5, 0.5)
-        if not self.backed:
-            return through
-        pocket = cut(
-            s0, stem_s / 2 + HOOK_LIP + c, -self.wall - HOOK_LIP - c, -self.wall
+        ow, oh = L.IN_W - 2 * c, L.IN_H - 2 * c
+        t = L.WALL
+        x0, x1 = self.zone
+        outer = box(x0, x1, -ow / 2, ow / 2, -oh / 2, oh / 2)
+        inner = box(x0 - 1, x1 + 1, -ow / 2 + t, ow / 2 - t, -oh / 2 + t, oh / 2 - t)
+        kw, kd = L.KEY_RIB
+        slot = box(
+            x0 - 1, x1 + 1, -kw / 2 - c, kw / 2 + c, oh / 2 - t - 0.5, oh / 2 + 1
         )
-        return through + pocket
+        tubes, holes = _crush_and_holes(self.bolts, ow / 2 - t + 0.01, up)
+        shape = (outer - inner - slot) + tubes
+        if root:
+            shape = shape + self._root(fit)
+        return shape - holes
 
-    def screw_location(self) -> Location:
-        """M3 x 8: head on the skin's counterbore floor."""
-        head = v(self.screw) + self._n * (SKIN_T - SKIN_CBORE_DEPTH)
-        return Location(Plane(origin=head, z_dir=self._n))
+    def tenon_cuts(self, up: Sequence[float]) -> Part:
+        """What a module that carries its own tenon must cut from itself."""
+        _, holes = _crush_and_holes(self.bolts, L.IN_HALF_W, up)
+        return holes
 
-    def nut_location(self, up: Sequence[float]) -> Location:
-        c = v(self.screw) - self._n * (self.wall + M3_NUT_H / 2)
-        return hex_location(c, self._n, up)
-
-    def insert_location(self) -> Location:
-        return Location(Plane(origin=v(self.screw), z_dir=self._n))
-
-    # skin side
-    def hook_tab(self) -> Part:
-        """The skin's hook: a stem through the wall and a 45-degree wedge
-        that catches the slot's far edge from inside."""
-        s, t, n = self._s, self._t, self._hn
-        stem_s, stem_t = self.stem
-        depth = self.wall + HOOK_LIP
-        stem_c = v(self.hook) - n * (depth / 2)
-        stem = oriented_box(stem_c, s, t, (stem_s, stem_t, depth))
-        # The wedge, drawn in the (s, n) plane at the stem's inner end.
-        o = v(self.hook) + s * (stem_s / 2) - n * depth - t * (stem_t / 2)
-        pts = [(0, 0), (HOOK_LIP, 0), (0, HOOK_LIP)]
-        wedge = prism(o, s, n, pts, stem_t)
-        if s.cross(n).dot(t) < 0:
-            wedge = prism(o + t * stem_t, s, n, pts, stem_t)
-        return stem + wedge
-
-    def skin_cuts(self, fit: Fit) -> Part:
-        n = self._n
-        face = v(self.screw)
-        hole = cylinder(face - n * 0.5, n, M3_CLEAR / 2 + fit.clearance / 2, SKIN_T + 1)
-        cbore = cylinder(
-            face + n * (SKIN_T - SKIN_CBORE_DEPTH), n, M3_HEAD_CBORE / 2, SKIN_T
+    def _root(self, fit: Fit) -> Part:
+        """A collar on the filler's side of the mouth that fuses the tenon,
+        inset by the clearance, to its own module's walls. Its inside flares
+        at 45 degrees from the tenon's bore to the full opening, so it prints
+        without support either way along the axis."""
+        c = fit.clearance
+        w, h = L.IN_W, L.IN_H
+        iw, ih = w - 2 * c - 2 * L.WALL, h - 2 * c - 2 * L.WALL
+        step = (w - iw) / 2
+        straight = 2.0
+        a = Vector(-self.facing, 0, 0)  # into the host
+        u, hd = Vector(0, 1, 0), Vector(0, 0, 1)
+        m = Vector(self.mouth, 0, 0)
+        length = straight + step
+        collar = oriented_box(m - a * (length / 2), u, hd, (w + 0.5, h + 0.5, length))
+        bore = oriented_box(m - a * (straight / 2), u, hd, (iw, ih, straight + 0.02))
+        near = Plane(origin=m - a * straight, x_dir=u, z_dir=-a) * Rectangle(iw, ih)
+        far = Plane(origin=m - a * (length + 0.01), x_dir=u, z_dir=-a) * Rectangle(
+            w + 0.02, h + 0.02
         )
-        return hole + cbore
+        return collar - bore - loft([near, far])
 
-    def screw_axis(self) -> tuple[Vector, Vector]:
-        return v(self.screw), self._n
+
+# Rails ------------------------------------------------------------------------
+
+
+def rails(x0: float, x1: float, side: int, fit: Fit, up: Sequence[float]) -> Part:
+    """The C-channels on one inner wall (left +1, right -1) from x0 to x1,
+    holding a carrier plate's top and bottom edges. The rails' end that
+    faces down in print slopes back to the wall at 45 degrees."""
+    from boresight_case.geom import union
+
+    c = fit.clearance
+    inner, _ = L.plate_y(side)
+    wall = side * L.IN_HALF_W
+    face = inner - side * c  # the lip's back, a clearance off the plate
+    lip_front = face - side * 1.0
+    down = -1 if unit(up).X > 0 else 1  # which x end faces the bed
+    parts = []
+    for edge, outward in ((L.RAIL_Z[1], 1), (L.RAIL_Z[0], -1)):
+        back = edge + outward * c
+        top = back + outward * 2.0
+        z0, z1 = sorted((back, top))
+        parts.append(_rail(x0, x1, wall, lip_front, z0, z1, down))
+        zl0, zl1 = sorted((edge - outward * 1.5, top))
+        parts.append(_rail(x0, x1, face, lip_front, zl0, zl1, down))
+    return union(parts)
+
+
+def _rail(
+    x0: float, x1: float, y_wall: float, y_far: float, z0: float, z1: float, down: int
+) -> Part:
+    """A bar along x from the wall out to y_far, its bed-side end sloping at
+    45 degrees back to the wall."""
+    depth = abs(y_far - y_wall)
+    if down < 0:  # the -x end faces the bed
+        pts = [(x0, y_wall), (x1, y_wall), (x1, y_far), (x0 + depth, y_far)]
+    else:
+        pts = [(x0, y_wall), (x1, y_wall), (x1 - depth, y_far), (x0, y_far)]
+    shape = prism((0, 0, z0), (1, 0, 0), (0, 1, 0), pts, z1 - z0)
+    return shape
+
+
+def carrier_plate(x0: float, x1: float, side: int) -> Part:
+    """A carrier's plate on the left (+1) or right (-1) rails."""
+    inner, outer = L.plate_y(side)
+    return box(x0, x1, inner, outer, *L.RAIL_Z)
 
 
 # Pegs, slots and keys --------------------------------------------------------

@@ -59,21 +59,29 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser(
         "check-skin",
         help="check third-party skin parts against the skin interface",
-        description="Check STL or 3MF skin parts: core envelope, keep-out "
-        "zones, screw holes on the attachment points, print bed.",
+        description="Check STL or 3MF cover parts: core envelope, keep-out "
+        "zones, the bolt holes and their flanges, print bed.",
     )
     s.add_argument("config", type=Path, help="the configuration the skin is for")
     s.add_argument("parts", nargs="+", type=Path, help="STL or 3MF files")
+    s.add_argument(
+        "--metal",
+        action="store_true",
+        help="the parts are metal or metal-filled: keep them out of the antenna zones",
+    )
     return p
 
 
 def _describe(cfg: Config) -> str:
     lines = [
         f"{cfg.name}:",
-        f"  board {cfg.board} (camera {cfg.camera}), power {cfg.power}, "
-        f"trigger {cfg.trigger}, style {cfg.style}",
+        f"  board {cfg.board} (camera {cfg.camera}), barrels {cfg.barrels}, "
+        f"power {cfg.power}, trigger {cfg.mechanism} with {cfg.trigger}, "
+        f"feedback {cfg.feedback}, buttons {'yes' if cfg.buttons else 'no'}, "
+        f"style {cfg.style}",
     ]
-    lines += [f"  {name}" for name in catalog.part_names(cfg)]
+    counts = catalog.part_counts(cfg)
+    lines += [f"  {name}" + (f" x {n}" if n > 1 else "") for name, n in counts.items()]
     return "\n".join(lines)
 
 
@@ -137,7 +145,7 @@ def _run(args: argparse.Namespace) -> int:
         from boresight_case.skin_check import check_skin_files
 
         cfg = load(args.config)
-        report = check_skin_files(cfg, args.parts)
+        report = check_skin_files(cfg, args.parts, metal=args.metal)
         print(report.text())
         return 0 if report.ok else 1
     raise AssertionError(args.command)

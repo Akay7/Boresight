@@ -5,8 +5,6 @@ import pytest
 
 from boresight_case.geom import X, Y, Z, box, cylinder
 from boresight_case.interfaces import (
-    SKIN_T,
-    AttachmentPoint,
     Fit,
     ModuleJoint,
     Peg,
@@ -84,61 +82,112 @@ def test_insert_fastener_puts_the_insert_where_the_nut_was():
     assert 0 < intersection_volume(insert, tenon) < 40
 
 
-def attachment() -> AttachmentPoint:
-    return AttachmentPoint(
-        name="test", normal=Y, screw=(0, 18, 0), hook=(60, 18, 0), slide=X
-    )
+# -- the port and its through-bolts ---------------------------------------------------
 
 
-def core_wall(fit: Fit, a: AttachmentPoint) -> object:
-    wall = box(-20, 80, 15.5, 18, -20, 20) + a.core_boss(X)
-    return wall - a.core_cuts(fit, X)
+def port_pair(fit: Fit):
+    """A receiver-like host round the receiver's front port, and the
+    standard tenon that fills it."""
+    from boresight_case.geom import NEG_X
+    from boresight_case.joints import RECEIVER_PORT
 
-
-def stem_gap(fit: Fit) -> float:
-    a = attachment()
-    # The stem where it passes through the wall, away from the flank face
-    # the skin rests on.
-    stem = a.hook_tab() & box(40, 80, 15.55, 17.95, -20, 20)
-    return min_gap(to_manifold(core_wall(fit, a)), to_manifold(stem))
+    host = box(-40, 0, -18, 18, -25, 25) - box(-41, 1, -15.5, 15.5, -22.5, 22.5)
+    host = host + RECEIVER_PORT.rib() - RECEIVER_PORT.host_cuts(X)
+    tenon = RECEIVER_PORT.tenon(fit, NEG_X)
+    return host, tenon
 
 
 @pytest.mark.parametrize("c", CLEARANCES)
-def test_hook_stem_clears_its_slot_by_the_clearance(c):
-    assert stem_gap(Fit(clearance=c)) == pytest.approx(c, abs=0.01)
+def test_a_tenon_clears_its_port_by_the_clearance(c):
+    host, tenon = port_pair(Fit(clearance=c))
+    inside = tenon & box(-40, -0.05, -30, 30, -30, 30)
+    assert min_gap(to_manifold(host), to_manifold(inside)) == pytest.approx(c, abs=0.01)
 
 
-def test_hook_tracks_the_clearance():
-    assert stem_gap(Fit(clearance=0.35)) - stem_gap(Fit(clearance=0.25)) == (
-        pytest.approx(0.1, abs=0.01)
+def test_an_upside_down_tenon_hits_the_key_rib():
+    from build123d import Axis
+
+    host, tenon = port_pair(Fit())
+    flipped = tenon.rotate(Axis((0, 0, 0), (1, 0, 0)), 180)
+    assert intersection_volume(to_manifold(host), to_manifold(tenon)) < 0.5
+    assert intersection_volume(to_manifold(host), to_manifold(flipped)) > 20
+
+
+def test_port_bolts_line_up_through_every_layer():
+    """Each bolt passes the covers' flanges, the host's walls and the
+    tenon's crush tube without touching any, on its washer and lock nut."""
+    from boresight_case.interfaces import FLANGE
+    from boresight_case.joints import RECEIVER_PORT
+
+    fit = Fit()
+    host, tenon = port_pair(fit)
+    for b in RECEIVER_PORT.bolts:
+        bolt = to_manifold(b.bolt_location() * VENDOR["m3x50"].build())
+        assert intersection_volume(bolt, to_manifold(host)) < 0.5
+        assert intersection_volume(bolt, to_manifold(tenon)) < 0.5
+        # The clamp: the body, a flange each side and the lock nut.
+        assert 2 * b.half + 2 * FLANGE + 4.0 == pytest.approx(46.0)
+        nut = to_manifold(b.nut_location(X) * VENDOR["m3-nyloc"].build())
+        assert bolt.min_gap(nut, 1.0) < 0.05  # through the nut
+        tip = bolt.bounding_box()[1]
+        assert tip < -(b.half + FLANGE + 4.0)  # past the nut
+
+
+def test_the_crush_tube_fills_the_tenon_from_wall_to_wall():
+    from boresight_case.joints import RECEIVER_PORT
+
+    _, tenon = port_pair(Fit())
+    for b in RECEIVER_PORT.bolts:
+        x, _, z = b.centre
+        ring = box(x - 3.2, x + 3.2, -12.0, 12.0, z - 3.2, z + 3.2) - cylinder(
+            (x, -13, z), Y, 2.0, 26
+        )
+        filled = intersection_volume(to_manifold(ring), to_manifold(tenon))
+        assert filled > 0.6 * to_manifold(ring).volume()
+
+
+# -- rails and carriers ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("side", (1, -1))
+@pytest.mark.parametrize("c", CLEARANCES)
+def test_a_carrier_slides_in_its_rails_by_the_clearance(side, c):
+    from boresight_case.interfaces import carrier_plate, rails
+
+    fit = Fit(clearance=c)
+    channel = rails(-80, -20, side, fit, X)
+    plate = carrier_plate(-80, -20, side)
+    assert min_gap(to_manifold(channel), to_manifold(plate)) == pytest.approx(
+        c, abs=0.01
     )
-
-
-def test_engaged_skin_rests_on_the_flank_without_overlap():
-    fit = Fit()
-    a = attachment()
-    skin = box(-20, 80, 18, 18 + SKIN_T, -20, 20) + a.hook_tab() - a.skin_cuts(fit)
-    wall = to_manifold(core_wall(fit, a))
-    assert intersection_volume(to_manifold(skin), wall) < 0.01
-    screw = to_manifold(a.screw_location() * VENDOR["m3x8"].build())
-    assert intersection_volume(screw, to_manifold(skin)) < 0.5
-    assert intersection_volume(screw, wall) < 0.5
-
-
-def test_hook_wedge_passes_the_slot_before_sliding_home():
-    fit = Fit()
-    a = attachment()
-    wall = to_manifold(core_wall(fit, a))
-    # Offered to the slot short of home by the wedge and the clearance, the
-    # whole hook goes straight in.
-    tab = a.hook_tab().moved(_shift(-(1.6 + fit.clearance)))
-    assert intersection_volume(to_manifold(tab), wall) < 0.01
-
-
-def _shift(dx: float):
+    # And it is held: it cannot come off the wall.
     from build123d import Location
 
-    return Location((dx, 0, 0))
+    off = Location((0, -side * 1.5, 0)) * plate
+    assert intersection_volume(to_manifold(channel), to_manifold(off)) > 1.0
+
+
+def test_spacers_fill_each_run_to_within_the_clearance():
+    from boresight_case import catalog
+    from boresight_case import layout as L
+    from boresight_case.config import Config
+
+    fit = Fit()
+    run = L.RECEIVER_RUN[1] - L.RECEIVER_RUN[0]
+    hub = L.HUB_X[1] - L.HUB_X[0]
+    for buttons in (False, True):
+        left = hub + sum(n for n, _ in catalog.SPACER_LEFT[buttons])
+        assert left == pytest.approx(run)
+    right = sum(n for n, _ in catalog.SPACER_RIGHT) + catalog.NO_FEEDBACK[0]
+    assert right == pytest.approx(run)
+    assert L.FEEDBACK_X[1] - L.FEEDBACK_X[0] == catalog.NO_FEEDBACK[0]
+    from conftest import assembly
+
+    a = assembly(Config())
+    ends = sorted(
+        p.shape.bounding_box().max.X for p in a.printed.values() if p.module == "spacer"
+    )
+    assert L.RECEIVER_RUN[1] - ends[-1] == pytest.approx(fit.clearance, abs=0.01)
 
 
 def peg_gap(fit: Fit) -> float:

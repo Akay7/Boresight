@@ -9,7 +9,7 @@ from boresight_case.config import Config
 from boresight_case.interfaces import Fit
 from boresight_case.model import Module
 from boresight_case.skins import blaster, minimal
-from boresight_case.skins.base import build_style
+from boresight_case.skins.base import build_style, placed
 
 STYLE_MODULES = {"minimal": minimal, "blaster": blaster}
 
@@ -23,4 +23,4 @@ def _skins(style: str, params, fit: Fit) -> Module:
 def skin_module(cfg: Config) -> Module:
     """The skins of `cfg`'s style. They do not depend on the board kit,
     drawer or switch plate: one set fits every configuration."""
-    return _skins(cfg.style, cfg.style_params, Fit.of(cfg.printer))
+    return placed(_skins(cfg.style, cfg.style_params, Fit.of(cfg.printer)), cfg.barrels)

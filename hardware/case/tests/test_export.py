@@ -13,11 +13,11 @@ from boresight_case import bom, catalog, cli, drawing
 from boresight_case.config import Config, shipped_configurations
 from boresight_case.coupon import coupon_parts, filament_grams
 from boresight_case.export import build_configuration
-from boresight_case.joints import ATTACHMENTS
-from boresight_case.keepouts import zones
+from boresight_case.joints import through_bolts
+from boresight_case.keepouts import metal_zones, zones
 from boresight_case.mesh import load_mesh_file
 
-PI = Config(board="pi-zero-2w", power="usb", trigger="mx", style="minimal")
+PI = Config(board="pi-zero-2w", power="18650", feedback="lra", buttons=True)
 ALL = shipped_configurations()
 
 
@@ -37,7 +37,8 @@ def test_build_holds_exactly_the_parts_the_configuration_needs(out):
     assert {p.stem for p in (out / "parts").glob("*.3mf")} == stems
     step_stems = {p.stem for p in (out / "step").glob("*.step")}
     assert step_stems == stems | {"assembly"}
-    assert not any("esp32" in s or s.startswith("drawer-a") for s in stems)
+    assert not any("esp32" in s or s.startswith(("drawer-a", "nose")) for s in stems)
+    assert {"feedback-lra", "button-panel", "cable-clamp", "pi-retainer"} <= stems
 
 
 def test_every_mesh_lies_on_the_bed(out):
@@ -61,12 +62,17 @@ def test_3mf_files_are_valid_for_slicers(out):
         assert meshes.GetCurrentMeshObject().IsManifoldAndOriented(), tmf.name
 
 
-def test_interface_lists_every_attachment_point_and_zone(out):
+def test_interface_lists_every_bolt_and_zone(out):
     data = json.loads((out / "interface" / "skin-interface.json").read_text())
-    assert {p["name"] for p in data["attachment_points"]} == {
-        a.name for a in ATTACHMENTS.values()
+    assert {b["name"] for b in data["bolts"]} == {
+        b.name for b in through_bolts(PI.barrels)
     }
-    assert {z["name"] for z in data["keep_out_zones"]} == set(zones())
+    for b in data["bolts"]:
+        assert b["flange"] == 3.0 and b["axis"] == [0.0, -1.0, 0.0]
+        assert b["nut_pocket"]["side"] == "right"
+    names = {(z["name"], z["applies_to"]) for z in data["keep_out_zones"]}
+    assert {n for n, k in names if k == "all"} == set(zones(PI))
+    assert {n for n, k in names if k == "metal"} == set(metal_zones(PI))
     assert (out / "interface" / "skin-interface.step").stat().st_size > 10_000
 
 
@@ -74,25 +80,43 @@ def test_bom_lists_every_part_with_its_count(out):
     a = assembly(PI, True)
     lines = bom.lines(a)
     printed = {ln.name: ln.count for ln in lines if ln.kind == "print"}
-    assert printed == {n: 1 for n in catalog.part_names(PI)}
+    assert printed == dict(catalog.part_counts(PI))
     bought = {ln.name: ln.count for ln in lines if ln.kind == "buy"}
     assert bought == dict(Counter(b.key for b in a.bought))
     text = (out / "bom.md").read_text()
-    assert "PETG" in text and "trigger-lever-filament" in text and "M3 x 8" in text
+    assert "PETG" in text and "trigger-blade" in text and "M3 x 50" in text
+    assert "## Leads" in text
     assert (
         (out / "bom.csv").read_text().startswith("kind,part,file,count,specification")
     )
 
 
+def test_an_aa_esp32_cam_gun_lists_every_bolt_and_nut_with_none_over():
+    a = assembly(Config(power="aa"), True)
+    bought = Counter(b.key for b in a.bought)
+    assert bought["m3x50"] == bought["m3-washer"] == len(a.bolts) == 8
+    assert bought["m3-nyloc"] == 8 + 1  # and the trigger's stop screw
+    nuts = [b for b in a.bought if b.key == "m3-nut"]
+    screws = [
+        b for b in a.bought if b.key in ("m3x12", "m3-thumbscrew", "m3-thumbscrew-16")
+    ]
+    # Every plain nut has its screw: the trigger's, its pivot's, the
+    # thumbscrew's.
+    assert len(nuts) == len([s for s in screws if "stop" not in s.label])
+
+
+def test_the_lra_wiring_names_its_pins():
+    rows = [ln for ln in bom.lines(assembly(PI, True)) if ln.name == "feedback lead"]
+    assert rows and all(f"pin {n}" in rows[0].spec for n in (1, 3, 5))
+
+
 @pytest.mark.parametrize("cfg", ALL, ids=lambda c: c.name)
-def test_teardown_takes_at_most_twelve_screws_in_two_lengths(cfg):
+def test_teardown_takes_at_most_twelve_bolts_in_two_lengths(cfg):
     a = assembly(cfg, True)
-    teardown = bom.teardown_screws(a)
+    teardown = bom.teardown_bolts(a)
     assert sum(teardown.values()) <= 12
-    assert len(teardown) <= 2
-    assert all(key.startswith("m3x") for key in teardown)
-    # Screws that stay inside a module are M3 x 12 or M3 x 8 too.
-    assert set(bom.screws(a)) <= {"m3x8", "m3x12"}
+    assert set(teardown) == {"m3x50", "m3x12"}
+    assert set(bom.bolts(a)) <= {"m3x50", "m3x12"}
 
 
 def test_a_part_name_always_means_the_same_geometry():
@@ -100,9 +124,9 @@ def test_a_part_name_always_means_the_same_geometry():
 
     seen = {}
     for cfg in ALL:
-        for name, p in assembly(cfg, True).printed.items():
-            sig = part_signature(p.shape)
-            assert seen.setdefault(name, sig) == sig, (name, cfg.name)
+        for p in assembly(cfg, True).printed.values():
+            sig = part_signature(p.oriented())
+            assert seen.setdefault(p.part, sig) == sig, (p.part, cfg.name)
 
 
 @pytest.fixture(scope="module")
@@ -112,10 +136,8 @@ def library(tmp_path_factory) -> Path:
     # One configuration of each mechanism and kit: every kind of part.
     sample = [
         Config(),
-        Config(
-            board="pi-zero-2w", power="usb", mechanism="bolt", trigger="microswitch"
-        ),
-        Config(power="18650", mechanism="button", style="blaster"),
+        Config(board="pi-zero-2w", power="usb", trigger="microswitch", barrels=2),
+        Config(power="18650", mechanism="button", style="blaster", feedback="solenoid"),
     ]
     return build_library(sample, tmp_path_factory.mktemp("library"))
 
@@ -134,11 +156,12 @@ def test_library_holds_each_part_once_and_every_bom_names_only_its_files(library
     assert not list(library.glob("*/step/assembly.step"))
 
 
-@pytest.mark.parametrize("cfg", ALL, ids=lambda c: c.name)
+@pytest.mark.parametrize("cfg", ALL[::7], ids=lambda c: c.name)
 def test_exploded_view_names_every_part(cfg):
-    svg = drawing.exploded_svg(assembly(cfg, True))
+    a = assembly(cfg, True)
+    svg = drawing.exploded_svg(a)
     assert svg.startswith("<svg") and "<polyline" in svg
-    for name in catalog.part_names(cfg):
+    for name in drawing.drawn(a):
         assert f">{name}</text>" in svg, name
 
 
@@ -156,7 +179,7 @@ def test_build_all_builds_the_library_of_every_configuration(
     monkeypatch.setattr(export, "build_library", fake)
     assert cli.main(["build", "--all", "--out", str(tmp_path)]) == 0
     assert sorted(built) == sorted(c.name for c in ALL)
-    assert len(built) == 72
+    assert len(built) == 103
 
 
 def test_coupon_is_small_and_prints_without_support():

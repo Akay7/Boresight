@@ -18,12 +18,19 @@ CURVE_STEPS = 12
 _D, _F = L.GRIP_D, L.GRIP_F
 OFFSETS = {
     "barrel": Vector(70, 0, 0),
-    "bulkhead": Vector(150, 0, 0),
+    "camera": Vector(160, 0, 0),
+    "nose": Vector(160, 0, 0),
     "rear-cap": Vector(-60, 0, 0),
-    "sled": Vector(-150, 0, 0),
+    "sled": Vector(70, 0, 110),
+    "pi-retainer": Vector(70, 0, -110),
+    "clamp": Vector(70, 0, -80),
+    "hub": Vector(-30, 0, 90),
+    "buttons": Vector(10, 0, 90),
+    "feedback": Vector(-10, 0, -60),
+    "spacer": Vector(-30, 0, 140),
     "grip": _D * 45,
     "drawer": _D * 140,
-    "trigger-cassette": Vector(0, 0, -70),
+    "trigger": Vector(30, 0, -80),
 }
 
 
@@ -32,19 +39,23 @@ def offset_for(module: str, name: str = "") -> Vector:
         side = 1 if "left" in name else -1 if "right" in name else 0
         base = Vector(0, 70 * side, 0)
         if name.startswith("accent-"):
-            base = (
-                base
-                + Vector(0, 25 * side, 0)
-                + (Vector(60, 0, 0) if side == 0 else Vector())
-            )
+            base = base + Vector(0, 25 * side, 0)
         if "-barrel-" in name:
             return base + OFFSETS["barrel"]
         if "-grip-" in name:
             return base + OFFSETS["grip"]
+        if name.endswith("-muzzle"):
+            return base + Vector(130, 0, 0)
         return base
     if module.startswith("drawer"):
         return OFFSETS["drawer"]
     return OFFSETS.get(module, Vector())
+
+
+def drawn(a: Assembly) -> dict:
+    """The parts the drawing shows: every printed part but the spacer
+    collars, which are too small to label."""
+    return {n: p for n, p in a.printed.items() if p.part != "spacer-collar"}
 
 
 def _edge_points(edge) -> list[tuple[float, float]]:
@@ -57,7 +68,7 @@ def exploded_svg(a: Assembly) -> str:
     """The drawing, as SVG text."""
     moved = {
         name: Location(offset_for(p.module, name)) * p.shape
-        for name, p in a.printed.items()
+        for name, p in drawn(a).items()
     }
     whole = Compound(children=list(moved.values()))
     centre = whole.bounding_box().center()

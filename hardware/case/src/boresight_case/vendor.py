@@ -31,7 +31,10 @@ M3_NUT_H = 2.4
 M3_NYLOC_H = 4.0  # a nylon-insert lock nut
 M3_INSERT_HOLE = 4.0  # hole for a 4.6 mm M3 heat-set insert
 M3_INSERT_LEN = 5.7
-SCREW_LENGTHS = (8.0, 12.0)
+M3_WASHER = (7.0, 0.5)  # outside diameter, thickness
+SCREW_LENGTHS = (12.0, 50.0)  # the trigger's bolts, and the through-bolts
+THROUGH_BOLT = 50.0
+THUMBSCREW = (10.0, 4.0, 10.0)  # head diameter, head height, thread length
 
 
 @dataclass(frozen=True)
@@ -52,47 +55,74 @@ class VendorPart:
 ESP32_W = 27.0  # across (y)
 ESP32_H = 40.5  # tall (z); antenna at +z
 ESP32_PCB = 1.6
-ESP32_FRONT = 3.3  # ESP32-S module shield above the PCB
-ESP32_BACK = 2.0  # PSRAM, regulator, SD slot, LED below the PCB
+# From the datasheet's pinout drawing and photos (AZ-Delivery, AI-Thinker
+# model): the front carries the micro-SD slot at the 5V/3V3 end with the
+# camera folded over it, the camera's connector and the white flash LED at
+# the other end; the back carries the ESP32-S module, its shield and its PCB
+# antenna at the end away from the micro-SD slot, the regulator and PSRAM
+# at the 5V end, and the header pins.
+ESP32_SD = 2.0  # the micro-SD slot on the front, under the camera
+ESP32_SD_LEN = 15.5  # from the 5V end
+ESP32_MODULE = 3.3  # the ESP32-S module and its shield, on the back
+ESP32_MODULE_LEN = 25.5  # from the antenna end
+ESP32_BACK = 2.0  # the regulator and PSRAM on the back, at the 5V end
 ESP32_HEADER_ROW_Y = 11.43  # rows at +-0.45 in
 ESP32_HEADER_Z0 = -18.9  # lowest pin, 2.54 mm pitch upward
 ESP32_HEADER_PLASTIC = 2.5
 ESP32_PIN_LEN = 6.0
 DUPONT_LEN = 14.5  # housing, from the header plastic outward
-# Header pins (row, index from the bottom) the case wires to. Row +1 is the
-# row at +y when the board's front faces +x.
-ESP32_PINS = {
-    "5V": (+1, 0),
-    "GND": (+1, 1),
-    "IO13": (+1, 3),
-    "GND2": (-1, 3),
+DUPONT_BEND = 4.0  # the wires' bend beyond it
+# The header, by row and pin number from the 5V end (pin 1 at the lowest
+# z in the board frame below). Row +1 is the row at +y when the board's
+# front faces +x.
+ESP32_HEADER = {
+    +1: ("5V", "GND", "IO12", "IO13", "IO15", "IO14", "IO2", "IO4"),
+    -1: ("3V3", "IO16", "IO0", "GND", "VCC", "U0R", "U0T", "GND"),
 }
-# The PCB antenna, on the ESP32-S module's far end (frame below).
-ESP32_ANTENNA = (0.0, ESP32_PCB + ESP32_FRONT, -9.0, 9.0, 14.25, 20.25)
-# The red status LED (GPIO33) on the back and the white flash LED (GPIO4)
-# on the front. Positions are estimates until a board is measured.
+# The two 1x6 plugs: (row, first pin, last pin). The hub's plug carries
+# power, the trigger and feedback; the debug plug the serial port and BOOT.
+ESP32_PLUGS = {"hub": (+1, 1, 6), "debug": (-1, 3, 8)}
+# The PCB antenna: the end of the ESP32-S module's own board, on the back,
+# beyond its shield (frame below).
+ESP32_ANTENNA = (-1.0, 0.0, -9.0, 9.0, 14.25, 20.25)
+# The camera, folded over the micro-SD slot: its lens axis in the board
+# frame (y, z), about 10 mm from the 5V end, as the pinout drawing shows it.
+# Its ribbon runs down the front to its connector, toward the antenna end.
+ESP32_LENS = (0.0, -10.2)
+# The red status LED (GPIO33) on the back by the reset button, and the
+# white flash LED (GPIO4) on the front at the antenna end, on the 3V3 side.
+# Positions are estimates until a board is measured.
 ESP32_RED_LED = (-1.0, 7.5, -15.0)
-ESP32_FLASH_LED = (ESP32_PCB + 0.8, -7.0, -15.5)
+ESP32_FLASH_LED = (ESP32_PCB + 0.8, -7.0, 15.5)
 
 
-def esp32_pin_position(name: str) -> tuple[float, float, float]:
-    """Where a used header pin meets the header plastic (board frame)."""
-    row, index = ESP32_PINS[name]
+def esp32_pin_position(row: int, pin: int) -> tuple[float, float, float]:
+    """Where header pin `pin` (1 to 8) of `row` meets the header plastic
+    (board frame)."""
     return (
         -ESP32_HEADER_PLASTIC,
         row * ESP32_HEADER_ROW_Y,
-        ESP32_HEADER_Z0 + 2.54 * index,
+        ESP32_HEADER_Z0 + 2.54 * (pin - 1),
     )
+
+
+def esp32_plug_pins(plug: str) -> tuple[str, ...]:
+    row, first, last = ESP32_PLUGS[plug]
+    return ESP32_HEADER[row][first - 1 : last]
 
 
 def _esp32_cam() -> Part:
     """Board frame: the PCB's back face at x=0, front (camera side) toward +x,
-    centred on y=0, z=0, antenna end at +z."""
+    centred on y=0, z=0; the 5V/3V3 end (header pin 1, the micro-SD slot) at
+    -z, the antenna end at +z."""
     w, h = ESP32_W / 2, ESP32_H / 2
     pcb = box(0, ESP32_PCB, -w, w, -h, h)
-    module = box(ESP32_PCB, ESP32_PCB + ESP32_FRONT, -9, 9, h - 25.5, h)
-    front_parts = box(ESP32_PCB, ESP32_PCB + 2.5, -w + 1, w - 1, -h + 1, h - 25.5)
-    back_parts = box(-ESP32_BACK, 0, -8.5, 8.5, -h + 1, h - 2)
+    sd = box(ESP32_PCB, ESP32_PCB + ESP32_SD, -7.0, 7.0, -h + 0.5, -h + ESP32_SD_LEN)
+    front_parts = box(
+        ESP32_PCB, ESP32_PCB + 2.5, -w + 1, w - 1, -h + ESP32_SD_LEN, h - 1
+    )
+    module = box(-ESP32_MODULE, 0, -9, 9, h - ESP32_MODULE_LEN, h)
+    back_parts = box(-ESP32_BACK, 0, -8.5, 8.5, -h + 1, h - ESP32_MODULE_LEN)
     rows = []
     for row in (-1, 1):
         y = row * ESP32_HEADER_ROW_Y
@@ -108,7 +138,7 @@ def _esp32_cam() -> Part:
                 z1 - 0.95,
             )
         )
-    return union([pcb, module, front_parts, back_parts, *rows])
+    return union([pcb, sd, front_parts, module, back_parts, *rows])
 
 
 # -- OV2640 camera (on the ESP32-CAM's short FPC) ------------------------------
@@ -143,6 +173,25 @@ PI_HEADER_PIN_TOP = PI_PCB + 8.5
 PI_USB_DATA_X = 41.4
 PI_SOC = (30.0, 15.5, 14.0)  # centre x, centre y, size
 SD_CARD_PROTRUDE = 2.5
+PI_PORTS = {"hdmi": 12.4, "usb": PI_USB_DATA_X, "pwr": 54.0}  # centre x
+# The PCB antenna (Pi frame: x0, x1, y0, y1, z0, z1), in the corner by the
+# micro-SD end and the header. An estimate until a board is measured.
+PI_ANTENNA = (1.0, 9.0, 22.0, 29.0, -PI_BOTTOM, 1.4 + 1.0)
+
+
+# The Pi signal lead: one 1x10 housing on the header's odd pins 1-19.
+PI_SIGNAL_PINS = {
+    1: "3V3",
+    3: "SDA",
+    5: "SCL",
+    7: "GPIO4",
+    9: "GND",
+    11: "GPIO17",
+    13: "GPIO27",
+    15: "GPIO22",
+    17: "3V3",
+    19: "GPIO10",
+}
 
 
 def pi_header_pin(n: int) -> tuple[float, float]:
@@ -180,7 +229,7 @@ def _pi_zero() -> Part:
     # The mounting holes, in their 6 mm component-free pads.
     for hx, hy in PI_HOLES:
         pad = cylinder(
-            (hx, hy, -PI_BOTTOM - 0.1), Z, 3.0, PI_BOTTOM + PI_TOP + 0.2
+            (hx, hy, -PI_BOTTOM - 0.1), Z, 3.0, PI_BOTTOM + PI_PCB + PI_TOP + 0.2
         ) - cylinder((hx, hy, -0.1), Z, 3.1, PI_PCB + 0.2)
         board = board - pad - cylinder((hx, hy, -1), Z, PI_HOLE_D / 2, PI_PCB + 2)
     return board
@@ -260,33 +309,71 @@ def _tp4056() -> Part:
     return union([pcb, parts, port])
 
 
-BUCK_BOOST = (21.0, 13.0, 5.0)
+BUCK_BOOST = (23.0, 18.0, 5.9)  # up to: length, width, height over the PCB's back
 
 
 def _buck_boost() -> Part:
-    """Regulator frame: a board up to 21 x 13 x 5 mm, centred, lying flat."""
+    """Regulator frame: the PCB's back face on z=0, parts toward +z, centred
+    on x and y."""
     length, width, height = BUCK_BOOST
     pcb = box(-length / 2, length / 2, -width / 2, width / 2, 0, 1.6)
-    # Parts keep about a millimetre off the edges, where holders grip it.
     parts = box(
         -length / 2 + 1, length / 2 - 1, -width / 2 + 1, width / 2 - 1, 1.6, height
     )
     return pcb + parts
 
 
-ROCKER_CUTOUT = (13.0, 9.0)
-ROCKER_BEZEL = (15.0, 10.5, 4.0)
-ROCKER_DEPTH = 12.0
+IDEAL_DIODE = (12.0, 9.0, 4.0)
 
 
-def _rocker() -> Part:
-    """Snap-in mini rocker: the panel's outer face at z=0, bezel above it,
-    body and terminals below; 13 mm along x, 9 mm along y."""
-    bx, by, bz = ROCKER_BEZEL
-    cx, cy = ROCKER_CUTOUT
-    bezel = box(-bx / 2, bx / 2, -by / 2, by / 2, 0, bz)
-    body = box(-cx / 2, cx / 2, -cy / 2, cy / 2, -ROCKER_DEPTH, 0)
-    return bezel + body
+def _ideal_diode() -> Part:
+    """Ideal-diode module: the PCB's back on z=0, centred."""
+    length, width, height = IDEAL_DIODE
+    return box(-length / 2, length / 2, -width / 2, width / 2, 0, height)
+
+
+SLIDE_SWITCH = (12.0, 6.0, 5.5)  # body along x, along y, height
+SLIDE_LEVER = (2.0, 2.0, 6.5)  # knob along x, y, and how far it stands up
+SLIDE_THROW = 3.0  # the knob's travel along x
+
+
+def _slide_switch() -> Part:
+    """Slide switch: its body on z=0 (the board side), the knob standing
+    up along +z from the body's top, centred; the throw is along x."""
+    bx, by, bz = SLIDE_SWITCH
+    body = box(-bx / 2, bx / 2, -by / 2, by / 2, 0, bz)
+    kx, ky, kz = SLIDE_LEVER
+    # The knob at either end of its throw.
+    knob = box(
+        -kx / 2 - SLIDE_THROW / 2,
+        kx / 2 + SLIDE_THROW / 2,
+        -ky / 2,
+        ky / 2,
+        bz,
+        bz + kz,
+    )
+    pins = box(-bx / 2 + 1, bx / 2 - 1, -1.0, 1.0, -3.0, 0)
+    return union([body, knob, pins])
+
+
+def _led3() -> Part:
+    """3 mm LED: its flange's back at z=0, dome toward +z."""
+    return cylinder((0, 0, -1.0), Z, 1.9, 1.0) + cylinder((0, 0, 0), Z, 1.5, 5.3)
+
+
+TACT = (6.0, 3.5)  # body square, height
+
+
+def _tact(stem: float) -> Callable[[], Part]:
+    def build() -> Part:
+        """Tactile switch: its body's back on z=0, the stem up along +z to
+        `stem` above it."""
+        b, h = TACT
+        body = box(-b / 2, b / 2, -b / 2, b / 2, 0, h)
+        plunger = cylinder((0, 0, h), Z, 1.75, stem - h)
+        return body + plunger
+
+    return build
 
 
 CONTACT_PLATE = (10.0, 10.0, 0.5)
@@ -379,24 +466,97 @@ def _microswitch() -> Part:
 
 # -- connectors, wires and small parts --------------------------------------------
 
-JST_XH2 = (5.9, 5.75, 9.6)
+JST_XH_PITCH = 2.5
+JST_XH = (5.75, 9.6)  # depth, mated height; width = ways x pitch + 3.4
 
 
-def _jst_xh2() -> Part:
-    """JST-XH 2-way plug and header, mated: mating axis along +z from z=0,
-    with 8 mm of wire bend room beyond."""
-    w, d, h = JST_XH2
-    return box(-w / 2, w / 2, -d / 2, d / 2, 0, h + 8.0)
+JST_BEND = 8.0  # wire bend room beyond a plug
+JST_BEND_TIGHT = 3.0  # with its wires turned at once, along the board
+
+
+def _jst_xh(ways: int, bend: float = JST_BEND) -> Callable[[], Part]:
+    def build() -> Part:
+        """JST-XH plug and header, mated: mating axis along +z from z=0, ways
+        along x, with room beyond for the wires to bend."""
+        w = ways * JST_XH_PITCH + 3.4
+        d, h = JST_XH
+        return box(-w / 2, w / 2, -d / 2, d / 2, 0, h + bend)
+
+    return build
 
 
 def _dupont(n: int) -> Callable[[], Part]:
     def build() -> Part:
         """Dupont housing of `n` ways on 2.54 mm pins: from the header plastic
-        at z=0 outward along +z, with 6 mm of wire bend room; ways along x."""
+        at z=0 outward along +z, with 4 mm of wire bend room; ways along x."""
         w = 2.54 * n
-        return box(-w / 2, w / 2, -1.3, 1.3, 0, DUPONT_LEN + 6.0)
+        return box(-w / 2, w / 2, -1.3, 1.3, 0, DUPONT_LEN + DUPONT_BEND)
 
     return build
+
+
+def _header_socket(n: int) -> Callable[[], Part]:
+    def build() -> Part:
+        """1 x n female header: its back on z=0, the socket face at z=8.5 and
+        the pins out of its back toward -z; ways along x."""
+        w = 2.54 * n
+        return box(-w / 2, w / 2, -1.27, 1.27, 0, 8.5) + box(
+            -w / 2 + 0.5, w / 2 - 0.5, -0.32, 0.32, -3.0, 0
+        )
+
+    return build
+
+
+def _test_pins() -> Part:
+    """Two square header pins, 2.54 mm apart along x, on z=0 up to 8 mm."""
+    return box(-2.54, 2.54, -1.27, 1.27, 0, 2.5) + box(-1.9, 1.9, -0.32, 0.32, 2.5, 8.0)
+
+
+PERFBOARD_T = 1.6
+
+
+PERFBOARD = (40.0, 32.0)
+
+
+def _perfboard() -> Part:
+    """The hub's perfboard: 34 x 32 mm, its back on z=0 with the wiring up
+    to 1 mm behind it, centred."""
+    w, h = PERFBOARD
+    return box(-w / 2, w / 2, -h / 2, h / 2, -1.0, PERFBOARD_T)
+
+
+PERFBOARD_SMALL = (16.0, 14.0)
+
+
+def _perfboard_small() -> Part:
+    """A 16 x 14 mm piece of perfboard: its back on z=0, wiring behind it."""
+    w, h = PERFBOARD_SMALL
+    return box(-w / 2, w / 2, -h / 2, h / 2, -1.0, PERFBOARD_T)
+
+
+M2_5 = (
+    2.9,
+    4.5,
+    2.5,
+    5.0,
+    2.0,
+)  # clear hole, head diameter, head height, nut AF, nut height
+
+
+def _m25_screw() -> Part:
+    """M2.5 x 6 socket-head screw: the head's underside at z=0, shank -z."""
+    _, hd, hh, _, _ = M2_5
+    return cylinder((0, 0, 0), Z, hd / 2, hh) + cylinder(
+        (0, 0, 0), (0, 0, -1), 1.25, 6.0
+    )
+
+
+def _m25_nut() -> Part:
+    """M2.5 hex nut centred on the origin, axis z."""
+    from boresight_case.geom import hexagon_prism
+
+    _, _, _, af, h = M2_5
+    return hexagon_prism((0, 0, 0), Z, af, h) - cylinder((0, 0, -h), Z, 1.27, 2 * h)
 
 
 MICRO_USB_90 = (11.0, 7.6, 6.0)  # head along the cable, width, thickness
@@ -409,6 +569,30 @@ def _micro_usb_90() -> Part:
     length, width, t = MICRO_USB_90
     tongue = box(-3.75, 3.75, -1.3, 1.3, 0, 5.5)
     head = box(-length + 3.5, 3.5, -width / 2, width / 2, -t, 0)
+    return tongue + head
+
+
+MINI_HDMI_90 = (16.0, 12.0, 8.0)  # head along the cable, width, thickness
+
+
+def _mini_hdmi_90() -> Part:
+    """90-degree mini-HDMI plug: the receptacle face at z=0, plug entering
+    along +z; the head turns the cable toward +x."""
+    length, width, t = MINI_HDMI_90
+    tongue = box(-5.5, 5.5, -1.6, 1.6, 0, 6.5)
+    head = box(-6.0, length - 6.0, -t / 2, t / 2, -width, 0)
+    return tongue + head
+
+
+MICRO_USB_STRAIGHT = (8.0, 14.0, 5.5)  # head width, length, thickness
+
+
+def _micro_usb() -> Part:
+    """Straight micro-USB plug: the receptacle face at z=0, plug entering
+    along +z, the head and cable straight back along -z."""
+    w, length, t = MICRO_USB_STRAIGHT
+    tongue = box(-3.75, 3.75, -1.3, 1.3, 0, 5.5)
+    head = box(-w / 2, w / 2, -t / 2, t / 2, -length, 0)
     return tongue + head
 
 
@@ -427,14 +611,12 @@ def _led5() -> Part:
     return cylinder((0, 0, -1.0), Z, 2.9, 1.0) + cylinder((0, 0, 0), Z, 2.5, 7.6)
 
 
-def _pivot_pin() -> Part:
-    """1.75 mm filament, 22 mm, along +y from y=0."""
-    return cylinder((0, 0, 0), Y, 0.875, 22.0)
+LIGHT_GUIDE_LEN = 12.0
 
 
 def _light_guide() -> Part:
-    """Clear 1.75 mm filament, 45 mm, along +z from z=0."""
-    return cylinder((0, 0, 0), Z, 0.875, 45.0)
+    """Clear 1.75 mm filament, 12 mm, along +z from z=0."""
+    return cylinder((0, 0, 0), Z, 0.875, LIGHT_GUIDE_LEN)
 
 
 SPRING = (6.0, 18.0, 9.0)  # outside diameter, free length, installed length
@@ -453,6 +635,69 @@ def _screw(length: float) -> Callable[[], Part]:
         return head + shank
 
     return build
+
+
+def _thumbscrew() -> Part:
+    """M3 thumbscrew: the knurled head's underside at z=0, the head toward
+    -z, the thread toward +z."""
+    d, h, length = THUMBSCREW
+    return cylinder((0, 0, 0), (0, 0, -1), d / 2, h) + cylinder(
+        (0, 0, 0), Z, 1.5, length
+    )
+
+
+def _thumbscrew16() -> Part:
+    """M3 x 16 thumbscrew: as `_thumbscrew`, with a 16 mm thread."""
+    d, h, _ = THUMBSCREW
+    return cylinder((0, 0, 0), (0, 0, -1), d / 2, h) + cylinder((0, 0, 0), Z, 1.5, 16.0)
+
+
+def _washer() -> Part:
+    """M3 washer centred on z=0 to z=0.5, axis z."""
+    od, t = M3_WASHER
+    return cylinder((0, 0, 0), Z, od / 2, t) - cylinder((0, 0, -1), Z, 1.6, t + 2)
+
+
+def _o_ring() -> Part:
+    """A 3 mm bore O-ring round an M3 thread, centred, axis z."""
+    return cylinder((0, 0, -0.75), Z, 3.0, 1.5) - cylinder((0, 0, -1), Z, 1.52, 3)
+
+
+# -- feedback devices ----------------------------------------------------------------
+
+
+def _coin_motor() -> Part:
+    """10 mm coin vibration motor: its back on z=0, 3.4 mm thick."""
+    return cylinder((0, 0, 0), Z, 5.0, 3.4)
+
+
+def _small_board(length: float, width: float, height: float) -> Callable[[], Part]:
+    def build() -> Part:
+        """A small module: the PCB's back on z=0, parts toward +z, centred."""
+        return box(-length / 2, length / 2, -width / 2, width / 2, 0, height)
+
+    return build
+
+
+SOLENOID = (20.0, 12.0, 11.0)  # frame length (along the plunger), width, height
+SOLENOID_STROKE = 4.0
+SOLENOID_REACH = 6.0 + SOLENOID_STROKE  # the plunger beyond the frame, extended
+
+
+def _solenoid() -> Part:
+    """5 V push-pull solenoid (JF-0520B size): frame from x=0 to 20 on its
+    mounting face z=0, the plunger out of the +x end at full stroke, and
+    its tail out of the -x end."""
+    length, width, height = SOLENOID
+    frame = box(0, length, -width / 2, width / 2, 0, height)
+    plunger = cylinder((length, 0, height / 2), X, 2.0, SOLENOID_REACH)
+    back = cylinder((-3.0, 0, height / 2), X, 1.5, 3.0)
+    return union([frame, plunger, back])
+
+
+def _lra() -> Part:
+    """10 mm coin LRA: its back on z=0, 3.6 mm thick."""
+    return cylinder((0, 0, 0), Z, 5.0, 3.6)
 
 
 def _nut() -> Part:
@@ -487,8 +732,9 @@ VENDOR: dict[str, VendorPart] = {
         VendorPart(
             "esp32-cam",
             "AI-Thinker ESP32-CAM (27 x 40.5 mm) with header pins",
-            "datasheet: AI-Thinker ESP32-CAM product specification (outline); "
-            "header and LED positions are estimates",
+            "datasheet: AZ-Delivery ESP32-Cam datasheet, AI-Thinker model "
+            "(27 x 40.5 x 4.5 mm, pinout drawing, photos); part and LED "
+            "positions are estimates",
             _esp32_cam,
             metal=True,
         ),
@@ -562,23 +808,6 @@ VENDOR: dict[str, VendorPart] = {
             metal=True,
         ),
         VendorPart(
-            "buck-boost",
-            "Buck-boost 5 V regulator module, 1 A, input 2.7-6.5 V, "
-            "up to 21 x 13 x 5 mm "
-            "(e.g. Pololu S9V11F5)",
-            "datasheet: Pololu S9V11F5 (11.4 x 15.2 mm); pocket sized for "
-            "generic modules",
-            _buck_boost,
-            metal=True,
-        ),
-        VendorPart(
-            "rocker",
-            "Snap-in mini rocker switch, SPST, 13 x 9 mm panel cut-out (KCD11)",
-            "listing: KCD11 mini rocker",
-            _rocker,
-            functional=False,
-        ),
-        VendorPart(
             "spring-contact",
             "Battery spring contact, 10 x 10 mm plate (AA type)",
             "listing: typical AA spring contact",
@@ -606,35 +835,11 @@ VENDOR: dict[str, VendorPart] = {
             _microswitch,
         ),
         VendorPart(
-            "jst-xh2",
-            "JST-XH 2-way plug and header pair, crimped",
-            "datasheet: JST XH series",
-            _jst_xh2,
-        ),
-        VendorPart(
-            "dupont1",
-            "Dupont 1-way female housing and crimp",
-            "listing: 2.54 mm Dupont housing",
-            _dupont(1),
-        ),
-        VendorPart(
-            "dupont3",
-            "Dupont 3-way female housing and crimps",
-            "listing: 2.54 mm Dupont housing",
-            _dupont(3),
-        ),
-        VendorPart(
-            "micro-usb-90",
-            "USB cable, micro-USB 90-degree (left/right angle) plug to the "
-            "host's plug, 2 m",
-            "listing: typical 90-degree micro-USB plug",
-            _micro_usb_90,
-        ),
-        VendorPart(
             "capacitor",
             "470-1000 uF 10 V radial electrolytic capacitor, up to 8 x 13 mm",
             "listing: 8 mm radial can",
             _capacitor,
+            metal=True,
         ),
         VendorPart(
             "heatsink",
@@ -644,22 +849,10 @@ VENDOR: dict[str, VendorPart] = {
             metal=True,
         ),
         VendorPart(
-            "led5",
-            "5 mm LED and a 330 ohm resistor",
-            "datasheet: T-1 3/4 LED outline",
-            _led5,
-        ),
-        VendorPart(
             "light-guide",
-            "Clear 1.75 mm filament, 45 mm (the status light guide)",
+            "Clear 1.75 mm filament, 12 mm (the status light guide)",
             "caliper: 1.75 mm filament",
             _light_guide,
-        ),
-        VendorPart(
-            "pivot-pin",
-            "1.75 mm filament, 22 mm (the trigger's pivot pin)",
-            "caliper: 1.75 mm filament",
-            _pivot_pin,
         ),
         VendorPart(
             "spring",
@@ -668,14 +861,6 @@ VENDOR: dict[str, VendorPart] = {
             "listing: ballpoint pen spring",
             _spring,
             metal=True,
-        ),
-        VendorPart(
-            "m3x8",
-            "M3 x 8 socket-head screw",
-            "datasheet: ISO 4762",
-            _screw(8.0),
-            metal=True,
-            functional=False,
         ),
         VendorPart(
             "m3x12",
@@ -709,13 +894,253 @@ VENDOR: dict[str, VendorPart] = {
             metal=True,
             functional=False,
         ),
+        VendorPart(
+            "buck-boost",
+            "Buck-boost 5 V regulator module, 1.5 A, input 2.7-6.5 V, set to "
+            "5.1 V, up to 23 x 18 x 6 mm (e.g. Pololu S13V15F5)",
+            "listing: Pololu S13V15F5 and generic 1.5 A buck-boost modules",
+            _buck_boost,
+            metal=True,
+        ),
+        VendorPart(
+            "ideal-diode",
+            "Ideal-diode module, LM66100 class, 1.5 A, up to 12 x 9 x 4 mm",
+            "listing: LM66100 breakout boards",
+            _ideal_diode,
+            metal=True,
+        ),
+        VendorPart(
+            "slide-switch",
+            "Slide switch, SPDT, 12 x 6 mm body, 6.5 mm knob (SS-12F44 type)",
+            "listing: SS-12F44 slide switch",
+            _slide_switch,
+        ),
+        VendorPart(
+            "led3",
+            "3 mm LED and a 330 ohm resistor",
+            "datasheet: T-1 LED outline",
+            _led3,
+        ),
+        VendorPart(
+            "tact-13",
+            "6 x 6 mm tactile switch with a 13 mm stem",
+            "listing: 6 x 6 x 13 mm tactile switch",
+            _tact(13.0),
+        ),
+        VendorPart(
+            "tact-7",
+            "6 x 6 mm tactile switch with a 5 mm stem (the BOOT button)",
+            "listing: 6 x 6 x 5 mm tactile switch",
+            _tact(5.0),
+        ),
+        VendorPart(
+            "jst-xh2",
+            "JST-XH 2-way plug and header pair, crimped",
+            "datasheet: JST XH series",
+            _jst_xh(2),
+        ),
+        VendorPart(
+            "jst-xh3",
+            "JST-XH 3-way plug and header pair, crimped",
+            "datasheet: JST XH series",
+            _jst_xh(3),
+        ),
+        VendorPart(
+            "jst-xh2-tight",
+            "JST-XH 2-way plug and header pair, crimped, its wires turned "
+            "along the board at the plug",
+            "datasheet: JST XH series",
+            _jst_xh(2, JST_BEND_TIGHT),
+        ),
+        VendorPart(
+            "jst-xh4",
+            "JST-XH 4-way plug and header pair, crimped",
+            "datasheet: JST XH series",
+            _jst_xh(4),
+        ),
+        VendorPart(
+            "jst-xh6",
+            "JST-XH 6-way plug and header pair, crimped",
+            "datasheet: JST XH series",
+            _jst_xh(6),
+        ),
+        VendorPart(
+            "jst-xh10",
+            "JST-XH 10-way plug and header pair, crimped",
+            "datasheet: JST XH series",
+            _jst_xh(10),
+        ),
+        VendorPart(
+            "perfboard-small",
+            "Perfboard, 2.54 mm pitch, cut to 16 x 14 mm (the buttons, the debug "
+            "board)",
+            "listing: 2.54 mm perfboard",
+            _perfboard_small,
+        ),
+        VendorPart(
+            "m2.5x6",
+            "M2.5 x 6 socket-head screw (holds a board on its carrier)",
+            "datasheet: ISO 4762",
+            _m25_screw,
+            metal=True,
+            functional=False,
+        ),
+        VendorPart(
+            "m2.5-nut",
+            "M2.5 hex nut",
+            "datasheet: ISO 4032",
+            _m25_nut,
+            metal=True,
+            functional=False,
+        ),
+        VendorPart(
+            "m3-thumbscrew-16",
+            "M3 x 16 thumbscrew with a 10 mm knurled head (the cable clamp's)",
+            "listing: M3 knurled thumbscrew",
+            _thumbscrew16,
+            metal=True,
+            functional=False,
+        ),
+        VendorPart(
+            "dupont6",
+            "Dupont 1 x 6 female housing and crimps",
+            "listing: 2.54 mm Dupont housing",
+            _dupont(6),
+        ),
+        VendorPart(
+            "dupont10",
+            "Dupont 1 x 10 female housing and crimps",
+            "listing: 2.54 mm Dupont housing",
+            _dupont(10),
+        ),
+        VendorPart(
+            "header-6f",
+            "1 x 6 female header, 2.54 mm (the debug socket)",
+            "listing: 2.54 mm female header",
+            _header_socket(6),
+        ),
+        VendorPart(
+            "test-pins",
+            "Two male header pins, 2.54 mm (the 5 V and GND test pins)",
+            "listing: 2.54 mm male header",
+            _test_pins,
+            metal=True,
+        ),
+        VendorPart(
+            "perfboard",
+            "Perfboard, 2.54 mm pitch, cut to 40 x 32 mm (the hub)",
+            "listing: 2.54 mm perfboard",
+            _perfboard,
+        ),
+        VendorPart(
+            "polyfuse",
+            "Resettable fuse, 1.1 A hold, radial (the solenoid's supply)",
+            "listing: radial PTC fuse",
+            _small_board(8.0, 3.0, 9.0),
+        ),
+        VendorPart(
+            "micro-usb-90",
+            "Micro-USB 90-degree plug on a lead to the hub, 120 mm (the Pi's power)",
+            "listing: typical 90-degree micro-USB plug",
+            _micro_usb_90,
+            metal=True,
+        ),
+        VendorPart(
+            "mini-hdmi-90",
+            "Mini-HDMI to HDMI cable with a 90-degree mini-HDMI plug",
+            "listing: typical 90-degree mini-HDMI plug",
+            _mini_hdmi_90,
+            metal=True,
+        ),
+        VendorPart(
+            "micro-usb",
+            "Micro-USB cable (the Pi's USB device or host cable)",
+            "listing: typical straight micro-USB plug",
+            _micro_usb,
+            metal=True,
+        ),
+        VendorPart(
+            "m3x50",
+            "M3 x 50 socket-head bolt (the through-bolts)",
+            "datasheet: ISO 4762",
+            _screw(50.0),
+            metal=True,
+            functional=False,
+        ),
+        VendorPart(
+            "m3-washer",
+            "M3 washer, 7 mm outside",
+            "datasheet: ISO 7089",
+            _washer,
+            metal=True,
+            functional=False,
+        ),
+        VendorPart(
+            "m3-thumbscrew",
+            "M3 x 10 thumbscrew with a 10 mm knurled head (the drawer's lock)",
+            "listing: M3 knurled thumbscrew",
+            _thumbscrew,
+            metal=True,
+            functional=False,
+        ),
+        VendorPart(
+            "o-ring",
+            "O-ring, 3 mm bore, 1.5 mm section (keeps the thumbscrew captive)",
+            "listing: 3 x 1.5 mm O-ring",
+            _o_ring,
+            functional=False,
+        ),
+        VendorPart(
+            "coin-motor",
+            "10 mm coin vibration motor, 3 V, with leads",
+            "listing: 1027 coin vibration motor",
+            _coin_motor,
+            metal=True,
+        ),
+        VendorPart(
+            "motor-driver",
+            "Motor driver: NPN or logic MOSFET, diode and 10 k pull-down on "
+            "perfboard, 12 x 10 mm",
+            "listing: hand-built from the wiring table",
+            _small_board(12.0, 10.0, 4.0),
+            metal=True,
+        ),
+        VendorPart(
+            "solenoid",
+            "5 V push-pull solenoid, 20 x 12 x 11 mm frame, 4 mm stroke (JF-0520B)",
+            "listing: JF-0520B solenoid",
+            _solenoid,
+            metal=True,
+        ),
+        VendorPart(
+            "mosfet-module",
+            "Logic-level MOSFET module with a flyback diode and 10 k pull-down, "
+            "up to 12 x 10 x 4 mm",
+            "listing: AO3400 / IRLZ44N trigger modules",
+            _small_board(12.0, 10.0, 4.0),
+            metal=True,
+        ),
+        VendorPart(
+            "lra",
+            "10 mm coin LRA (linear resonant actuator), 2 V rms, with leads",
+            "listing: 1030 coin LRA",
+            _lra,
+            metal=True,
+        ),
+        VendorPart(
+            "drv2605l",
+            "DRV2605L haptic driver board, I2C address 0x5A, up to 18 x 13 x 3 mm",
+            "listing: Adafruit 2305 and generic DRV2605L boards",
+            _small_board(18.0, 13.0, 3.0),
+            metal=True,
+        ),
     )
 }
 
 # Cables and wire are bought by length and bend where they must; the bill
 # of materials lists them, and the checks model only their plugs.
 CONSUMABLES = {
-    "pi-ribbon": "Pi Zero camera cable (22-way to 15-way), 150 mm",
+    "pi-ribbon": "Pi Zero camera cable (22-way to 15-way), 38 mm",
     "hookup-wire": "24 AWG stranded hook-up wire, about 1 m in two colours",
     "usb-tether-esp32": "USB cable to cut for its 5 V and GND wires, 2 m",
 }

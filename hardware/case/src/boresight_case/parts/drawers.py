@@ -2,10 +2,11 @@
 
 A drawer is a frame that slides up into the grip's bay: a top block whose
 two flat contacts meet the spring contacts under the bay's ceiling as it
-latches, a spine down its back, and a base that closes the grip's bottom.
-A groove down its front fits the bay's key rib, so it goes in only one way
-round. A tongue in the base's front edge hooks into a notch in the grip's
-front wall; press it back, from below, to release the drawer.
+is pushed home, a spine down its back, and a base that closes the grip's
+bottom, with a foot under the grip's base. A groove down its front fits
+the bay's key rib, so it goes in only one way round. A captive thumbscrew
+through the foot turns by hand into a nut in the boss at the bottom of
+the grip's front, and locks it in: nothing printed flexes to hold it.
 
 Each kind adds what it holds: a cell holder between the base and a stop
 plate, the 18650's charger with its port through the base, or the tether's
@@ -23,9 +24,9 @@ from build123d import Location, Part, Plane
 from boresight_case import layout as L
 from boresight_case.geom import Y, union
 from boresight_case.interfaces import Fit
-from boresight_case.joints import BAY_SLIDE
-from boresight_case.model import PETG, Module, Printed, bought
-from boresight_case.parts.grip import CONTACT_A, LATCH_NOTCH, bay_shape, grip_box
+from boresight_case.joints import BAY_SLIDE, THUMBSCREW_FIX
+from boresight_case.model import PLA_OR_PETG, Module, Printed, bought
+from boresight_case.parts.grip import CONTACT_A, bay_shape, grip_box
 from boresight_case.vendor import CONTACT_PLATE, HOLDERS, TP4056, TP4056_PORT
 
 D, F = L.GRIP_D, L.GRIP_F
@@ -38,8 +39,6 @@ TOP_T = 2.5
 BASE_S = L.GRIP_LENGTH - 5.0  # the base's inner face
 SPINE_A = -L.BAY_DEPTH / 2 + 2.75  # the spine's front face
 HOLDER_A0 = SPINE_A  # holders sit against the spine
-TONGUE_A = 15.5  # the latch tongue's back face
-HOOK = 0.9  # how far the hook stands proud of the drawer's front
 CABLE_Y = 8.0  # the tether's cable, across y
 CABLE_A = 11.0  # and along a, in front of the top block
 TP4056_A = 8.0  # the charger's PCB back face
@@ -58,13 +57,39 @@ def _band(fit: Fit, s0: float, s1: float, a0: float = -30, a1: float = 30) -> Pa
     return outline(fit) & grip_box(a0, a1, -30, 30, s0, s1)
 
 
+def _foot(fit: Fit) -> Part:
+    """The foot under the grip's base, forward under the front boss, with
+    the thumbscrew's hole and a recess in its top for the O-ring that keeps
+    the thumbscrew captive. It stops at the bay's back, so the drawer still
+    prints standing on its spine."""
+
+    back = -L.BAY_DEPTH / 2 + fit.clearance
+    s0, s1 = L.GRIP_LENGTH, L.GRIP_LENGTH + L.DRAWER_FOOT
+    body = grip_box(back, L.GRIP_DEPTH / 2, -L.GRIP_WIDTH / 2, L.GRIP_WIDTH / 2, s0, s1)
+    nose = grip_box(
+        L.GRIP_DEPTH / 2 - 0.01,
+        L.FRONT_BOSS_A[1],
+        -L.FRONT_BOSS_Y,
+        L.FRONT_BOSS_Y,
+        s0,
+        s1,
+    )
+    from boresight_case.geom import teardrop
+
+    hole = teardrop(
+        L.grip_point(s1 + 0.5, L.THUMB_A), tuple(-D), 1.7, L.DRAWER_FOOT + 1, UP
+    )
+    ring = teardrop(L.grip_point(s0 + 1.6, L.THUMB_A), tuple(-D), 3.3, 1.7, UP)
+    return body + nose - hole - ring
+
+
 def _frame(fit: Fit, top_a1: float = 30.0) -> Part:
-    """Spine, top block (to `top_a1` along a) and base, with the contact
-    plates' pockets and the latch tongue."""
+    """Spine, top block (to `top_a1` along a), base and foot, with the
+    contact plates' pockets."""
     spine = _band(fit, TOP_S, L.GRIP_LENGTH, -30, SPINE_A)
     top = _band(fit, TOP_S, TOP_S + TOP_T, -30, top_a1)
     base = _band(fit, BASE_S, L.GRIP_LENGTH)
-    frame = spine + top + base
+    frame = spine + top + base + _foot(fit)
     sx = CONTACT_PLATE[0] / 2 + 0.2
     pockets = union(
         grip_box(a - sx, a + sx, -sx, sx, TOP_S - 0.1, TOP_S + CONTACT_PLATE[2])
@@ -75,37 +100,23 @@ def _frame(fit: Fit, top_a1: float = 30.0) -> Part:
         grip_box(a + 2.0, a + 3.5, -1.5, 1.5, TOP_S - 0.1, TOP_S + TOP_T + 0.1)
         for a in CONTACT_A
     )
-    return frame - pockets - tabs + _latch(fit) - _latch_cuts(fit)
+    return frame - pockets - tabs
 
 
-def _latch(fit: Fit) -> Part:
-    """The tongue's hook: on its front face, a 45-degree lead-in on top so
-    the drawer pushes past the bay's front wall."""
-    front = L.BAY_DEPTH / 2 - fit.clearance
-    (s0, s1), (y0, y1) = LATCH_NOTCH
-    hook_s = (s0 + 0.5, s0 + 0.5 + HOOK + 1.2)
-    ys = (y0 + 0.5, y1 - 0.5)
-    pts = [
-        (front - 0.01, hook_s[1]),
-        (front + HOOK, hook_s[1]),
-        (front + HOOK, hook_s[0] + HOOK),
-        (front - 0.01, hook_s[0]),
-    ]
-    from boresight_case.geom import prism
-
-    # Drawn in the (a, s) plane, extruded across y (F x D is +y).
-    origin = L.grip_point(0, 0, ys[0])
-    return prism(origin, F, D, pts, ys[1] - ys[0])
-
-
-def _latch_cuts(fit: Fit) -> Part:
-    """A slit behind the tongue and a gap at its free end, so it flexes."""
-    (_, _), (y0, y1) = LATCH_NOTCH
-    slit = grip_box(
-        TONGUE_A - 2.0, TONGUE_A, y0 - 1.5, y1 + 5.0, BASE_S - 0.1, L.GRIP_LENGTH + 0.1
+def lock_parts(module: str) -> list:
+    """The thumbscrew in the foot, and its O-ring."""
+    e = THUMBSCREW_FIX.entry
+    d = L.GRIP_D * -1  # up into the grip
+    screw = Location(Plane(origin=e, z_dir=tuple(d)))
+    ring = Location(
+        Plane(
+            origin=tuple(L.grip_point(L.GRIP_LENGTH + 0.75, L.THUMB_A)), z_dir=tuple(d)
+        )
     )
-    gap = grip_box(TONGUE_A - 2.0, 30, y0 - 1.5, y0, BASE_S - 0.1, L.GRIP_LENGTH + 0.1)
-    return slit + gap
+    return [
+        bought("m3-thumbscrew", screw, "thumbscrew", module, teardown=False),
+        bought("o-ring", ring, "thumbscrew O-ring", module),
+    ]
 
 
 def holder_location(kind: str, s0: float) -> Location:
@@ -153,7 +164,7 @@ def drawer(fit: Fit, kind: str) -> Module:
         if kind == "18650":
             shape = shape + _charger_mount(fit) - _charger_cuts(fit)
         m.add(bought(f"holder-{kind}", holder_location(kind, s0), "cell holder", name))
-        m.fit(name, "cell holder")  # snapped past the lips
+        m.fit(name, "cell holder")  # pressed past the lips
         if kind == "18650":
             m.add(bought("tp4056", charger_location(), "charger", name))
             m.fit(name, "charger")  # its port through the base
@@ -166,7 +177,10 @@ def drawer(fit: Fit, kind: str) -> Module:
             )
         )
         m.add(bought("flat-contact", where, f"flat contact {'+-'[i]}", name))
-    m.add(Printed(name, shape, UP, name, material=PETG, perimeters=3, infill=25))
+    m.add(*lock_parts(name))
+    m.fit(name, "thumbscrew O-ring")  # in its recess
+    m.fit("thumbscrew", "thumbscrew O-ring")
+    m.add(Printed(name, shape, UP, name, material=PLA_OR_PETG, perimeters=3, infill=25))
     # Printed last so the module's printed part leads its purchased ones.
     m.printed.insert(0, m.printed.pop())
     return m
@@ -234,7 +248,7 @@ def _charger_cuts(fit: Fit) -> Part:
         -pw / 2 - 0.3,
         pw / 2 + 0.3,
         BASE_S - 1.0,
-        L.GRIP_LENGTH + 1.0,
+        L.GRIP_LENGTH + L.DRAWER_FOOT + 1.0,
     )
     return pcb + port
 
@@ -260,7 +274,11 @@ def _cable_exit(fit: Fit) -> Part:
     from boresight_case.geom import teardrop
 
     return teardrop(
-        L.grip_point(BASE_S - 0.5, CABLE_A, CABLE_Y), tuple(D), 2.6, 6.0, UP
+        L.grip_point(BASE_S - 0.5, CABLE_A, CABLE_Y),
+        tuple(D),
+        2.6,
+        6.0 + L.DRAWER_FOOT,
+        UP,
     )
 
 

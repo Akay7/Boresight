@@ -35,12 +35,23 @@ def mesh_of(shape) -> m3.Manifold:
 @cache
 def meshes(cfg: Config, skins: bool = False) -> dict[str, m3.Manifold]:
     """Every part of the configuration as a mesh: printed parts by name,
-    purchased parts by label, cables by name."""
+    purchased parts by label. Leads are routes, not parts: see
+    `lead_meshes`."""
     a = assembly(cfg, skins)
     out = {name: mesh_of(p.shape) for name, p in a.printed.items()}
     out.update({b.label: mesh_of(b.shape) for b in a.bought})
-    out.update({name: mesh_of(s) for name, s in a.extras.items()})
     return out
+
+
+@cache
+def lead_meshes(cfg: Config, skins: bool = False) -> dict[str, m3.Manifold]:
+    """Every lead's route as a mesh, by name."""
+    return {name: mesh_of(s) for name, s in assembly(cfg, skins).extras.items()}
+
+
+@cache
+def everything(cfg: Config, skins: bool = False) -> dict[str, m3.Manifold]:
+    return {**meshes(cfg, skins), **lead_meshes(cfg, skins)}
 
 
 @cache
@@ -48,20 +59,29 @@ def oriented(cfg: Config, name: str, skins: bool = False) -> m3.Manifold:
     return to_manifold(assembly(cfg, skins).printed[name].oriented())
 
 
-ESP32_DRAWERS = [
-    Config(board="esp32-cam", power=p) for p in ("aa", "aaa", "18650", "usb")
+POWERS = ("aa", "aaa", "18650", "usb")
+ESP32_DRAWERS = [Config(board="esp32-cam", power=p) for p in POWERS]
+PI_DRAWERS = [Config(board="pi-zero-2w", power=p) for p in POWERS]
+PI_CAMERAS = [Config(board="pi-zero-2w", power="aa", camera=c) for c in ("cm2", "cm3")]
+BARREL_COUNTS = [
+    Config(barrels=0),
+    Config(barrels=2),
+    Config(board="pi-zero-2w", barrels=2),
 ]
-PI_CAMERAS = [Config(board="pi-zero-2w", power="usb", camera=c) for c in ("cm2", "cm3")]
-TRIGGERS = [Config(trigger="mx"), Config(trigger="microswitch")]
+FEEDBACK = [
+    Config(board=b, power=p, feedback=f)
+    for b in ("esp32-cam", "pi-zero-2w")
+    for f, p in (("vibration", "aa"), ("solenoid", "18650"), ("lra", "usb"))
+]
 MECHANISM_CONFIGS = [
     Config(mechanism=m, trigger=t)
-    for m in ("filament", "bolt", "button")
+    for m in ("bolt", "button")
     for t in ("mx", "microswitch")
 ]
 
 
-@pytest.fixture(params=ESP32_DRAWERS + PI_CAMERAS, ids=lambda c: c.name)
+@pytest.fixture(params=ESP32_DRAWERS + PI_DRAWERS + BARREL_COUNTS, ids=lambda c: c.name)
 def core_config(request) -> Config:
-    """One configuration per kit and drawer (the switch plate and style do
-    not change the core)."""
+    """One configuration per kit, drawer and barrel count (the switch plate
+    and style do not change the core)."""
     return request.param
