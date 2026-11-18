@@ -9,6 +9,7 @@ single entry needs no key.
 from __future__ import annotations
 
 import json
+import logging
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,13 +22,30 @@ from boresight.zeroing import Zero
 
 DEFAULT_CONFIG_PATH = Path("/etc/boresight-gun.toml")
 
+logger = logging.getLogger(__name__)
+
+# "usb": a USB absolute mouse for another machine (the HID gadget).
+# "local": the display this computer drives, through the same overlay and
+# uinput pointer the server uses.
+OUTPUTS = ("usb", "local")
+
 
 class ConfigError(ValueError):
     pass
 
 
+CAMERA_SOURCES = ("auto", "webcam", "rpicam", "picamera2")
+
+
 @dataclass(frozen=True)
 class CameraConfig:
+    # "auto": rpicam where `rpicam-vid` is installed, a webcam otherwise.
+    # "webcam": any camera OpenCV opens (USB/V4L2). "rpicam": a Pi CSI
+    # camera through the `rpicam-vid` program. "picamera2": a Pi CSI camera
+    # through the OS's Picamera2 library (needs a venv that sees it).
+    source: str = "auto"
+    # A webcam's index or device path; for rpicam, the camera's index.
+    device: int | str = 0
     width: int = 640
     height: int = 480
     fps: int = 30
@@ -42,6 +60,18 @@ class PinsConfig:
     trigger: int = 17
     led: int | None = 27
     debounce_ms: int = 10
+
+
+@dataclass(frozen=True)
+class OverlayConfig:
+    """The local output's on-screen markers: the server's overlay settings,
+    meaning the same here."""
+
+    # The display, by output name or index; None for the primary one.
+    display: str | int | None = None
+    extra_margin_px: int = 0
+    # "4:3": tags in the bars beside a centred picture of that shape.
+    picture_aspect: str | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +94,11 @@ class GunConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)
     pins: PinsConfig = field(default_factory=PinsConfig)
     tuning: TuningConfig = field(default_factory=TuningConfig)
+    output: str = "usb"
+    overlay: OverlayConfig = field(default_factory=OverlayConfig)
+
+
+SECTIONS = ("camera", "pins", "tuning", "overlay")
 
 
 @dataclass(frozen=True)
@@ -71,7 +106,9 @@ class Loaded:
     """The config with every file it names read and checked."""
 
     config: GunConfig
-    marker_map: MarkerMap
+    # None for the local output: its layout is the one the overlay draws,
+    # known once the overlay reports its geometry.
+    marker_map: MarkerMap | None
     lens: LensModel | None
     zero: Zero | None
 
@@ -91,15 +128,16 @@ def _section(data: dict, name: str, cls):
 
 
 def parse_config(data: dict) -> GunConfig:
-    top = {
-        key: value
-        for key, value in data.items()
-        if key not in ("camera", "pins", "tuning")
-    }
-    allowed = set(GunConfig.__dataclass_fields__) - {"camera", "pins", "tuning"}
+    top = {key: value for key, value in data.items() if key not in SECTIONS}
+    allowed = set(GunConfig.__dataclass_fields__) - set(SECTIONS)
     unknown = set(top) - allowed
     if unknown:
         raise ConfigError(f"unknown key(s): {', '.join(sorted(unknown))}")
+    if top.get("output", "usb") not in OUTPUTS:
+        raise ConfigError(
+            f"output must be {' or '.join(repr(o) for o in OUTPUTS)}, "
+            f"not {top['output']!r}"
+        )
     for key in ("layout", "lens_file", "zero_file"):
         if key in top:
             top[key] = Path(top[key]) if top[key] else None
@@ -109,15 +147,49 @@ def parse_config(data: dict) -> GunConfig:
             camera=_section(data, "camera", CameraConfig),
             pins=_section(data, "pins", PinsConfig),
             tuning=_section(data, "tuning", TuningConfig),
+            overlay=_section(data, "overlay", OverlayConfig),
         )
     except TypeError as error:
         raise ConfigError(str(error)) from error
+    overlay = config.overlay
+    if not isinstance(overlay.extra_margin_px, int) or overlay.extra_margin_px < 0:
+        raise ConfigError("[overlay] extra_margin_px must be a whole number, 0 or more")
+    if overlay.picture_aspect:
+        from boresight.overlay.layout import OverlayGeometryError, parse_picture_aspect
+
+        try:
+            parse_picture_aspect(overlay.picture_aspect)
+        except OverlayGeometryError as error:
+            raise ConfigError(f"[overlay] picture_aspect: {error}") from None
     camera = config.camera
     if camera.width < 1 or camera.height < 1 or camera.fps < 1:
         raise ConfigError("[camera] width, height and fps must be positive")
+    if camera.source not in CAMERA_SOURCES:
+        raise ConfigError(
+            f"[camera] source must be one of {', '.join(CAMERA_SOURCES)}, "
+            f"not {camera.source!r}"
+        )
+    if camera.source == "rpicam" and (problem := rpicam_size_problem(camera)):
+        raise ConfigError(problem)
     if config.pins.debounce_ms < 1:
         raise ConfigError("[pins] debounce_ms must be at least 1")
     return config
+
+
+def rpicam_size_problem(camera: CameraConfig) -> str | None:
+    """Why `rpicam-vid` would pad frames of this size, or None.
+
+    Its raw output is the camera buffer as is. Rows are padded unless the
+    width is a multiple of 64, and the planes unless the height is a
+    multiple of 16, and a reader expecting packed frames would drift.
+    """
+    if camera.width % 64 or camera.height % 16:
+        return (
+            f"[camera] {camera.width}x{camera.height} does not suit the rpicam "
+            "source: the width must be a multiple of 64 and the height of 16 "
+            "(e.g. 640x480, 1024x768, 1280x720)"
+        )
+    return None
 
 
 def _pick(store: dict, key: str | None, what: str, path: Path) -> dict:
@@ -184,10 +256,19 @@ def load(path: Path | str | None = None, *, overrides: dict | None = None) -> Lo
     if overrides:
         data = {**data, **overrides}
     config = parse_config(data)
-    try:
-        marker_map = load_marker_map(config.layout)
-    except (OSError, MarkerMapError) as error:
-        raise ConfigError(f"marker layout {config.layout}: {error}") from error
+    marker_map = None
+    if config.output == "local":
+        if "layout" in data:
+            logger.info(
+                "the local output solves against the overlay's own layout; "
+                "layout %s is ignored",
+                config.layout,
+            )
+    else:
+        try:
+            marker_map = load_marker_map(config.layout)
+        except (OSError, MarkerMapError) as error:
+            raise ConfigError(f"marker layout {config.layout}: {error}") from error
     lens = load_lens(config)
     if lens is not None:
         size = (config.camera.width, config.camera.height)

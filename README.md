@@ -52,10 +52,10 @@ any subset that surrounds the aim point stays within ~18mm.
 | --- | --- |
 | Android phone | Any phone with a modern browser and a rear camera. Doubles as the trigger — no dedicated webcam module or microcontroller needed |
 | *or* ESP32-CAM (AI-Thinker) | OV2640 camera, Wi-Fi and 4 MB PSRAM on one small board. Streams to the same server as the phone; see [The ESP32-CAM client](#the-esp32-cam-client) |
-| *or* Raspberry Pi Zero 2 W + CSI camera | A self-contained gun: the Pi aims with its own camera and plugs into the host as a USB mouse, with no server and no Wi-Fi. See [The Raspberry Pi gun](#the-raspberry-pi-gun) |
+| *or* Raspberry Pi Zero 2 W + a CSI camera or USB webcam | A self-contained gun: the Pi aims with its own camera and plugs into the host as a USB mouse, with no server and no Wi-Fi. See [The Raspberry Pi gun](#the-raspberry-pi-gun) |
 | USB-serial adapter, 3.3 V logic | ESP32-CAM only. The board has no USB port of its own, so flashing goes through one |
 | 5 V supply, at least 1 A | ESP32-CAM only. The camera and radio draw current in bursts, and a weak supply shows up as brown-out resets. The printed case's battery drawers and regulator are one |
-| Printed case | The recommended shell for the ESP32-CAM or the Pi gun: modular, printable, with AA, AAA, 18650 or USB power, an MX-style or lever microswitch trigger, and swappable skins. See [The printed case](#the-printed-case) |
+| Printed case | The recommended shell for the ESP32-CAM or the Pi gun: modular and printable, held together by steel bolts, with AA, AAA, 18650 or USB power, one or two barrels or none, an MX-style or lever microswitch trigger, an optional feedback device, and swappable covers. See [The printed case](#the-printed-case) |
 | *or* NES Zapper shell | Gut the phototransistor board. With the phone, the trigger microswitch goes unused since the trigger is on-screen; with an ESP32-CAM it is wired to GPIO13 and becomes the trigger |
 | Matte cardstock | Marker substrate. Never glossy |
 
@@ -1135,10 +1135,11 @@ Inside a shell the PCB antenna loses range. The board has a u.FL
 connector for an external antenna, selected by moving a 0 Ω resistor
 next to it.
 
-The [printed case](#the-printed-case) holds the board on its muzzle
-bulkhead and wires it as above: the trigger plug to GPIO13 and GND, its
-regulator to 5V and GND with the capacitor at the board, and a light guide
-from the GPIO33 LED to a window on top.
+The [printed case](#the-printed-case) holds the board in a nose on its
+muzzle, antenna down and well clear of every bolt, and wires it as above
+through plugs on the board's own header pins: the trigger to GPIO13 and
+GND through the hub, the hub's regulator to 5V and GND with the capacitor
+in the nose, and a light guide from the GPIO33 LED to a window on top.
 
 ### Configure and flash
 
@@ -1210,6 +1211,13 @@ the command above.
 - If the board does not answer, move the GND wire to another GND pin.
 - If the adapter has no 5V pin, wire its 3.3 V to the board's **3V3**
   pin instead, and check every wire before plugging the adapter in.
+
+In the printed case the board needs none of this wiring: a plug on its
+header's 3V3 side, pins 3-8, runs to a debug socket and a BOOT button on
+the nose's top. The socket's pins are GND, nc, nc, RX, TX, nc, the common
+FTDI order, so the adapter plugs straight in; VCC stays unconnected and the
+gun powers the board. Hold BOOT while switching the gun on to flash, and
+plug in at any time to read the log.
 
 `firmware/boresight-cam/README.md` has the details, and the firewall
 section above applies unchanged.
@@ -1436,7 +1444,7 @@ It says nothing about the sensor, Wi-Fi, the LED or timing. See
 
 ## The Raspberry Pi gun
 
-A Raspberry Pi Zero 2 W with a CSI camera is a gun that needs nothing else.
+A Raspberry Pi Zero 2 W with a camera is a gun that needs nothing else.
 It runs the same detection, solve, smoothing and aim-hold as the server,
 on the Pi, and presents itself to whatever it is plugged into as a USB
 absolute mouse: a PC, a console, an Android box, with no software and no
@@ -1448,16 +1456,31 @@ on-screen zeroing on the Pi. The marker layout is a file (`markers.toml`,
 the server's format), and a lens calibration or zero made on the server can
 be copied over; without them the aim is uncalibrated.
 
-    sudo deploy/pi/install.sh        # on the Pi, from a checkout
+It can also aim at the display it drives itself (`output = "local"`), for
+example a TV on its HDMI port while any emulator runs on its desktop. It
+then uses the server's own on-screen overlay and uinput pointer, so the
+emulator reads it as the mouse, exactly as with a phone on a PC.
 
-The full walkthrough — wiring, configuration, power and what to do when the
-host sees nothing — is in [deploy/pi/README.md](deploy/pi/README.md).
+It installs like Boresight anywhere, and no script installs a system
+package:
+
+    uv sync --extra gun              # on the Pi, in a checkout
+    sudo deploy/pi/install.sh        # USB output only: gadget and boot service
+
+The camera is a CSI camera, read through the `rpicam-vid` program Raspberry
+Pi OS ships, or a USB webcam, through OpenCV; `[camera] source = "auto"`
+picks the CSI camera where `rpicam-vid` exists. The system dependencies to
+install yourself, and the full walkthrough — wiring, configuration, power
+and what to do when the host sees nothing — are in
+[deploy/pi/README.md](deploy/pi/README.md).
 
 **Never yet run on a Pi.** The report format, pin rules, debouncing, aim
 path and failure handling are tested on an ordinary computer (`boresight-gun
 --emulate`, and `tests/test_gun_*.py`), and the pipeline imports with only
-OpenCV and NumPy installed. The camera and GPIO adapters, the gadget script
-and the frame rate on a Cortex-A53 are unmeasured.
+OpenCV and NumPy installed. The `rpicam` source runs against a stand-in
+`rpicam-vid`, and the `webcam` source against a video file. Real cameras,
+the GPIO adapters, the gadget script and the frame rate on a Cortex-A53 are
+unmeasured.
 
 Install on a PC with `pip install boresight` for the aim pipeline alone, or
 `pip install 'boresight[server]'` for the server.
@@ -1675,22 +1698,26 @@ Full detail — the build, the manifest, manual verification against
 ## The printed case
 
 A modular, printable case for both self-contained guns lives in
-[hardware/case/](hardware/case/README.md). One core (receiver, barrel,
-grip, rear cap and trigger cassette) takes either board kit: the
-ESP32-CAM on the muzzle bulkhead, or the Pi Zero 2 W on a sled with a
-Camera Module 2 or 3 at the muzzle. The grip takes a 4×AA, 4×AAA, 18650
-or USB-tether drawer; the trigger is a lever pivoting on a piece of
-filament or an M3 bolt, or a push button, with an MX-style keyboard switch
-or a lever microswitch; and two skin styles change how it looks. It comes apart with
-one hex key: every screw goes into a captive nut, every wire between
-modules is a plug.
+[hardware/case/](hardware/case/README.md). Its bones (receiver, barrels,
+grip and rear cap) join at ports, and steel bolts through the plastic
+hold every bone, module and cover: no printed hook or latch holds
+anything. It takes either board kit: the ESP32-CAM in a nose on the
+muzzle, or the Pi Zero 2 W on a sled in the barrel behind a Camera Module 2
+or 3, its HDMI and USB plugging in through a window under the barrel. The
+grip takes a 4×AA, 4×AAA, 18650 or USB-tether drawer, for either board;
+the trigger in the grip is a blade on an M3 pivot bolt or a push button,
+with an MX-style keyboard switch or a lever microswitch; a vibration motor,
+recoil solenoid or haptic LRA and, on the Pi, Start and Select buttons are
+optional; and two cover styles change how it looks. A hub above the grip
+holds the regulator, the power switch and a socket for every module's
+lead. It comes apart with one hex key.
 
 It is generated from code (build123d) and checked by computer for bed
-fit, support-free printing, interference with every part, the camera's
-view and the skins' keep-out zones. It has never been printed. The
-trigger, LED and power use the pins the firmware and the Pi gun already
-default to: GPIO13 on the ESP32-CAM; GPIO17 (pin 11) and GPIO27 (pin 13)
-on the Pi.
+fit, support-free printing, interference with every part, the bolts'
+clearance from everything that works, the antennas, the camera's view and
+the covers' keep-out zones. It has never been printed. The trigger, LED
+and power use the pins the firmware and the Pi gun already default to:
+GPIO13 on the ESP32-CAM; GPIO17 (pin 11) and GPIO27 (pin 13) on the Pi.
 
     cd hardware/case
     uv sync

@@ -17,7 +17,10 @@
 # hid_path = "/dev/hidg0"
 
 [camera]
-width = 640
+source = "auto"      # auto: rpicam where rpicam-vid is installed, else webcam;
+                     # or "rpicam", "webcam", "picamera2"
+device = 0           # webcam index or path ("/dev/video0"); rpicam camera index
+width = 640          # rpicam: a multiple of 64 (height: of 16)
 height = 480
 fps = 30
 exposure_us = 4000   # fixed: automatic exposure chases the bright panel

@@ -10,6 +10,9 @@ makes the guarantee structural rather than procedural.
 
 from __future__ import annotations
 
+import math
+import re
+
 from boresight.marker_map import Marker, MarkerMap
 
 # Tag edge as a fraction of screen width.
@@ -174,3 +177,135 @@ def overlay_layout(
         screen_size_mm=(screen_px[0] * scale, screen_px[1] * scale),
         markers=markers,
     )
+
+
+# The smallest tag worth drawing, as a fraction of screen width: the
+# "~20px in frame" floor `DEFAULT_TAG_FRACTION` is derived from, before
+# its headroom is added.
+MIN_TAG_FRACTION = 0.026
+
+# Six of the eight: the top and bottom midpoints (4 and 6) would sit over
+# the picture between the bars.
+BAR_MARKER_IDS = (0, 1, 2, 3, 5, 7)
+
+
+def quiet_patch_px(tag_px: int) -> int:
+    """The opaque margin painted around a tag of `tag_px`."""
+    return max(1, round(tag_px * QUIET_PATCH_FRACTION))
+
+
+def min_bar_px(screen_px: tuple[int, int], margin_px: int = 0) -> int:
+    """The narrowest side bar that holds a tag of the minimum size."""
+    tag = max(1, math.ceil(screen_px[0] * MIN_TAG_FRACTION))
+    return tag + 2 * quiet_patch_px(tag) + 2 * margin_px
+
+
+def bar_layout(
+    screen_px: tuple[int, int],
+    viewport: tuple[int, int, int, int],
+    margin_px: int = 0,
+) -> MarkerMap:
+    """The layout for tags drawn in the bars beside a centred picture.
+
+    `viewport` is `(x, y, width, height)`: the picture, which no tag or
+    quiet-zone patch may touch. The tags are 0-3 at the corners of the
+    bars and 7 and 5 at the middle of the left and right bar, numbered as
+    the printed layout is. Each is as large as the narrower bar allows,
+    patch and `margin_px` included, and three must stack in the height.
+
+    Positions are in screen pixels with a scale of 1.0, against the whole
+    screen, exactly as `overlay_layout` returns them; the scale cancels
+    under the pipeline's normalization. Raises `OverlayGeometryError`,
+    naming the screen and the bar width it would need, when the bars are
+    too narrow for a detectable tag.
+    """
+    width, height = screen_px
+    if width <= 0 or height <= 0:
+        raise OverlayGeometryError(f"screen size must be positive, got {screen_px}")
+    if margin_px < 0:
+        raise OverlayGeometryError(f"margin must not be negative, got {margin_px}")
+    view_x, view_y, view_w, view_h = viewport
+    if view_x < 0 or view_w <= 0 or view_x + view_w > width:
+        raise OverlayGeometryError(
+            f"viewport {viewport} does not fit a {width}x{height} screen"
+        )
+    left_bar = view_x
+    right_bar = width - (view_x + view_w)
+    bar = min(left_bar, right_bar)
+
+    # Largest tag whose patch fits the bar across and three patches down.
+    room_across = bar - 2 * margin_px
+    room_down = (height - 2 * margin_px) // 3
+    tag = int(min(room_across, room_down) / (1 + 2 * QUIET_PATCH_FRACTION)) + 1
+    while tag > 0 and (
+        tag + 2 * quiet_patch_px(tag) > room_across
+        or tag + 2 * quiet_patch_px(tag) > room_down
+    ):
+        tag -= 1
+    if tag < width * MIN_TAG_FRACTION:
+        raise OverlayGeometryError(
+            f"a {width}x{height} output leaves {bar}px bars beside the picture; "
+            f"tags need bars at least {min_bar_px(screen_px, margin_px)}px wide"
+        )
+
+    patch = quiet_patch_px(tag)
+    # Patches flush with the outer edge, any spare pixels toward the
+    # picture: a sliver of black a pixel wide between a patch and the edge
+    # of the frame is enough to stop a tag decoding.
+    left_x = margin_px + patch
+    right_x = width - margin_px - patch - tag
+    top_y = margin_px + patch
+    bottom_y = height - margin_px - patch - tag
+    mid_y = round((height - tag) / 2)
+    positions = {
+        0: (left_x, top_y),
+        1: (right_x, top_y),
+        2: (right_x, bottom_y),
+        3: (left_x, bottom_y),
+        5: (right_x, mid_y),
+        7: (left_x, mid_y),
+    }
+    return MarkerMap(
+        screen_size_mm=(float(width), float(height)),
+        markers={
+            marker_id: Marker(
+                marker_id=marker_id, x_mm=float(x), y_mm=float(y), size_mm=float(tag)
+            )
+            for marker_id, (x, y) in positions.items()
+        },
+    )
+
+
+_ASPECT = re.compile(r"^\s*(\d+)\s*:\s*(\d+)\s*$")
+
+
+def parse_picture_aspect(text: str) -> float:
+    """`"4:3"` -> 1.333...; raises `OverlayGeometryError` for anything else."""
+    match = _ASPECT.match(text)
+    if not match or int(match.group(1)) == 0 or int(match.group(2)) == 0:
+        raise OverlayGeometryError(
+            f"a picture aspect is WIDTH:HEIGHT, like 4:3 or 8:7, not {text!r}"
+        )
+    return int(match.group(1)) / int(match.group(2))
+
+
+def centred_picture(
+    screen_px: tuple[int, int], aspect: float
+) -> tuple[int, int, int, int]:
+    """`(x, y, width, height)` of a full-height picture of `aspect`, centred
+    on the screen, as an emulator in windowed full screen shows it. Its
+    width takes the screen width's parity, so the two bars are equal."""
+    width, height = screen_px
+    picture_w = min(width, round(height * aspect))
+    picture_w -= (width - picture_w) % 2
+    return ((width - picture_w) // 2, 0, picture_w, height)
+
+
+def picture_bar_layout(
+    screen_px: tuple[int, int], picture_aspect: str, margin_px: int = 0
+) -> MarkerMap:
+    """The tags beside a centred picture of `picture_aspect` ("4:3"). The
+    overlay draws this and the solver is given this, from the same three
+    numbers the overlay reports."""
+    aspect = parse_picture_aspect(picture_aspect)
+    return bar_layout(screen_px, centred_picture(screen_px, aspect), margin_px)

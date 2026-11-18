@@ -1,29 +1,30 @@
 #!/bin/sh
-# Sets a Raspberry Pi Zero 2 W up as a Boresight gun: the program, the USB
-# gadget, and a service that starts both at power-up. Run as root from a
-# checkout, on Raspberry Pi OS Lite (Trixie or later: the package needs
-# Python 3.12). Safe to run again.
+# Root setup for the gun's USB output on a Raspberry Pi Zero 2 W: USB
+# device mode, the HID mouse gadget, and a service that starts the gun at
+# power-up with no login. It installs no packages. Install the gun first,
+# as on any system, from this checkout:
+#
+#     uv sync --extra gun
+#
+# then run this as root from the same checkout. Safe to run again.
 set -eu
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root: sudo $0" >&2; exit 1; }
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
-PREFIX=/opt/boresight
+GUN="$REPO/.venv/bin/boresight-gun"
 CONFIG_TXT=/boot/firmware/config.txt
 [ -f "$CONFIG_TXT" ] || CONFIG_TXT=/boot/config.txt
 
-echo "== packages"
-# The camera stack and OpenCV come from apt: the wheels for them on a Pi
-# are slow to build or missing. The venv sees them.
-apt-get update
-apt-get install -y python3-venv python3-picamera2 python3-gpiozero \
-    python3-lgpio python3-opencv python3-numpy
+if [ ! -x "$GUN" ]; then
+    echo "$GUN is missing: install the gun first, in $REPO:" >&2
+    echo "    uv sync --extra gun" >&2
+    echo "(see deploy/pi/README.md for the system dependencies)" >&2
+    exit 1
+fi
 
-echo "== program"
-python3 -m venv --system-site-packages "$PREFIX"
-# --no-deps: OpenCV and NumPy are the system's.
-"$PREFIX/bin/pip" install --no-deps --upgrade "$REPO"
+echo "== configuration"
 install -d /etc/boresight
 [ -e /etc/boresight/markers.toml ] ||
     install -m 644 "$REPO/src/boresight/config/markers.toml" /etc/boresight/markers.toml
@@ -39,7 +40,9 @@ install -m 755 "$HERE/boresight-gadget.sh" /usr/local/sbin/boresight-gadget
 
 echo "== services"
 install -m 644 "$HERE/boresight-gadget.service" /etc/systemd/system/
-install -m 644 "$HERE/boresight-gun.service" /etc/systemd/system/
+# The unit names the gun program in this checkout's venv.
+sed "s|@GUN@|$GUN|" "$HERE/boresight-gun.service" >/etc/systemd/system/boresight-gun.service
+chmod 644 /etc/systemd/system/boresight-gun.service
 systemctl daemon-reload
 systemctl enable boresight-gadget.service boresight-gun.service
 

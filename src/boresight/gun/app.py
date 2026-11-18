@@ -94,7 +94,12 @@ class Gun:
         trigger: TriggerInput,
         indicator: StatusIndicator,
         clock: Callable[[], float] = time.monotonic,
+        pipeline=None,
     ) -> None:
+        """`pipeline` is a server session's (`marker_source.SessionPipeline`):
+        its own smoothing, hold and current layout, as the local output
+        uses. Without one, the gun builds its own over `backend` from the
+        configured layout, as the USB output does."""
         self._loaded = loaded
         self._camera = camera
         self._backend = backend
@@ -106,6 +111,12 @@ class Gun:
         self.solved = 0
         self.camera_failed: BaseException | None = None
 
+        if pipeline is not None:
+            pipeline.zero = loaded.zero
+            self._aim = lambda frame, t: pipeline.process_frame(
+                frame, t=t, lens=loaded.lens
+            )
+            return
         tuning = loaded.config.tuning
         cursor = (
             SmoothingCursorBackend(
@@ -114,19 +125,16 @@ class Gun:
             if tuning.smoothing
             else backend
         )
-        self._pipeline = AimPipeline(loaded.marker_map, cursor)
-        self._holding = HoldingPipeline(self._pipeline, cursor, hold_s=tuning.hold_s)
-        self._detector = self._pipeline.session_detector()
+        solver = AimPipeline(loaded.marker_map, cursor)
+        holding = HoldingPipeline(solver, cursor, hold_s=tuning.hold_s)
+        detector = solver.session_detector()
+        self._aim = lambda frame, t: holding.process_frame(
+            frame, t=t, detector=detector, lens=loaded.lens, zero=loaded.zero
+        )
 
     def process(self, frame: np.ndarray, t: float) -> bool:
         """One frame through the pipeline. Whether it solved."""
-        result = self._holding.process_frame(
-            frame,
-            t=t,
-            detector=self._detector,
-            lens=self._loaded.lens,
-            zero=self._loaded.zero,
-        )
+        result = self._aim(frame, t)
         solved = result.outcome is FrameOutcome.SOLVED
         self.frames += 1
         self.solved += solved

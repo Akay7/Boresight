@@ -256,6 +256,7 @@ def create_app(
             app.state.marker_map,
             display=saved_view.display,
             overlay_extra_margin_px=saved_view.overlay_extra_margin_px,
+            overlay_picture_aspect=saved_view.overlay_picture_aspect or None,
             tracked_detection=tracked_detection,
             tuning=lambda: live_settings.tuning,
         )
@@ -1403,6 +1404,14 @@ def main(argv: list[str] | None = None) -> int:
         "panel reservation isn't detected automatically (default: 0; "
         "see `python -m boresight.overlay --help`)",
     )
+    markers.add_argument(
+        "--overlay-picture-aspect",
+        default=None,
+        metavar="W:H",
+        help="put the on-screen tags in the bars beside a centred picture "
+        "of this shape, e.g. 4:3 for an emulator on a 16:9 screen "
+        "(default: at the screen's corners and edges)",
+    )
     detection = parser.add_argument_group("detection", "the [detection] table")
     detection.add_argument(
         "--tracked-detection",
@@ -1498,6 +1507,7 @@ def main(argv: list[str] | None = None) -> int:
                 "tuning.hold_s": args.aim_hold_s,
                 "tuning.rel_scale": args.rel_scale,
                 "view.overlay_extra_margin_px": args.overlay_extra_margin_px,
+                "view.overlay_picture_aspect": args.overlay_picture_aspect,
                 "view.display": args.display,
                 "recording.seconds": args.record_seconds,
                 "recording.max_mb": args.record_max_mb,
