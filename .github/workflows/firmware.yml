@@ -2,9 +2,10 @@
 # every version tag.
 #
 # "Generic": a fresh checkout has no firmware/boresight-cam/sdkconfig, so
-# the build takes sdkconfig.defaults only -- no Wi-Fi, server or token
-# compiled in -- and the image boots into setup mode, where a phone
-# configures it. One image serves every gun.
+# the build takes sdkconfig.defaults only. No board build has a Wi-Fi
+# network, server or token -- those are set in setup mode -- so the image
+# boots into setup mode, where a phone configures it. One image serves
+# every gun.
 #
 # On a `v*` tag it also publishes a GitHub Release: the four flashing
 # parts with their manifest (which the project site's flasher offers, see
@@ -35,13 +36,14 @@ jobs:
         run: firmware/boresight-cam/tools/idf.sh device build
       - name: Check that nothing secret went in
         working-directory: firmware/boresight-cam
+        # A board's Wi-Fi, server and token are set only in setup mode, so
+        # the board build has no such options at all: any of them showing
+        # up means the build could carry them again.
         run: |
-          for key in WIFI_SSID WIFI_PASSWORD SERVER_HOST TOKEN; do
-            if ! grep -qx "CONFIG_BORESIGHT_${key}=\"\"" sdkconfig; then
-              echo "CONFIG_BORESIGHT_${key} is not empty in the generic build" >&2
-              exit 1
-            fi
-          done
+          if grep -E '^(# )?CONFIG_BORESIGHT_(WIFI_[A-Z_]+|SERVER_HOST|SERVER_PORT|TOKEN)\b' sdkconfig; then
+            echo "the board build has network or token options: they belong to setup mode only" >&2
+            exit 1
+          fi
           if grep -qx 'CONFIG_BORESIGHT_TLS=y' sdkconfig || [ -e main/server_cert.pem ]; then
             echo "the generic build must not embed a server certificate" >&2
             exit 1

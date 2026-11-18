@@ -221,7 +221,7 @@ static esp_err_t send_form(httpd_req_t *req, const char *body, bp_field_set_t in
                field_value(body, BP_FIELD_HOST, s->host, buffer, sizeof buffer),
                "maxlength=\"63\" placeholder=\"empty: find it on the network\"");
     error_for(req, invalid, BP_FIELD_HOST,
-              "An address like 192.168.1.40, a host name, or empty.");
+              "An address like 192.168.1.20, a host name, or empty.");
     number_input(req, "Port", BP_FIELD_PORT, body, s->port, (bp_range_t){1, 65535},
                  invalid);
     secret_input(req, "Token", BP_FIELD_TOKEN, s->token[0] != '\0', "clear_token",
@@ -255,8 +255,15 @@ static esp_err_t send_form(httpd_req_t *req, const char *body, bp_field_set_t in
     send(req, "</fieldset><button>Save and restart</button></form>"
               "<form method=\"post\" action=\"/reset\"><button class=\"secondary\">"
               "Reset to build defaults</button></form>"
+#if CONFIG_BORESIGHT_EMULATOR
               "<p class=\"note\">Reset forgets everything saved here; the device "
-              "then uses the values it was built with.</p>");
+              "then uses the values it was built with.</p>"
+#else
+              "<p class=\"note\">Reset forgets everything saved here, the Wi-Fi, "
+              "server and token included: the device restarts into this setup "
+              "page, with the camera back at the values it was built with.</p>"
+#endif
+    );
 
     /* The firmware upload. Sent as the raw file by the script below; the
      * setup network has nothing else to load a script from. */

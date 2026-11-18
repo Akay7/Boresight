@@ -23,35 +23,33 @@ menu "Boresight camera"
 
     menu "Network"
 
-        config BORESIGHT_WIFI_SSID
-            string "Wi-Fi SSID"
-            default ""
-            help
-                2.4 GHz network the server's machine is reachable on. The
-                ESP32 has no 5 GHz radio.
-
-        config BORESIGHT_WIFI_PASSWORD
-            string "Wi-Fi password"
-            default ""
+        # A board's Wi-Fi network, server and token are set only from the
+        # setup page and stored on the device: nothing here, so no board
+        # image can carry them. The emulator, which has no Wi-Fi and no
+        # discovery, builds in the server it reaches through QEMU, so the
+        # end-to-end suite starts connected (sdkconfig.emulator).
 
         config BORESIGHT_SERVER_HOST
-            string "Server address"
+            string "Server address (emulator)"
+            depends on BORESIGHT_EMULATOR
             default ""
             help
-                The "host" line the server prints under "For a device" at
-                startup -- a LAN IP, not 0.0.0.0.
+                The host as QEMU's user networking sees it: 10.0.2.2 is
+                the machine running the emulator.
 
         config BORESIGHT_SERVER_PORT
-            int "Server port"
+            int "Server port (emulator)"
+            depends on BORESIGHT_EMULATOR
             range 1 65535
             default 7331
 
         config BORESIGHT_TOKEN
-            string "Token"
+            string "Token (emulator)"
+            depends on BORESIGHT_EMULATOR
             default ""
             help
-                The "token" line the server prints at startup. Required by
-                any server bound to a network address.
+                The token the test server is started with. Settings stored
+                through the emulated setup page take precedence.
 
         config BORESIGHT_TLS
             bool "Connect over TLS (wss://)"

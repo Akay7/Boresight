@@ -57,8 +57,22 @@ delete, and it handles rootless Docker.
 
 The two profiles build into `build/` and `build-emulator/` from separate
 configuration. The emulator's `sdkconfig` lives inside `build-emulator/`,
-so building it never touches the device's, which holds your Wi-Fi password
-and token.
+so building it never touches the device's.
+
+A board's Wi-Fi network, server address and port, and token are not
+build settings: they are set in
+[setup mode](../../README.md#setup-mode) and stored on the board, so no
+board image carries them. `menuconfig` has the camera's defaults and ranges,
+the pins and TLS. The emulator is the exception: it has no Wi-Fi and
+cannot discover the server, so `sdkconfig.emulator` builds in the server
+it reaches through QEMU (`10.0.2.2`, port 7391) and the test token, and
+the end-to-end suite starts connected.
+
+A `sdkconfig` from before this has Wi-Fi, server and token lines that no
+longer apply. Reconfigure once so the build stops carrying them, which
+also deletes them from the file:
+
+    tools/idf.sh device reconfigure
 
 ## Run without a board
 
@@ -157,12 +171,12 @@ Requires ESP-IDF v5.1 or later
 ([install guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/)).
 
     idf.py set-target esp32
-    idf.py menuconfig          # Boresight camera -> Network, Camera, Pins
+    idf.py menuconfig          # optional: Boresight camera -> Camera, Pins, TLS
     idf.py build
 
-The configuration lands in `sdkconfig`, which is gitignored: it holds your
-Wi-Fi password and token. `sdkconfig.defaults` is tracked and holds no
-secrets.
+The configuration lands in `sdkconfig`, which is gitignored.
+`sdkconfig.defaults` is tracked. Neither holds a secret: the network and
+token are set in setup mode once the board is flashed.
 
 The ESP32-CAM has no USB port of its own. Flash through a USB-serial
 adapter (3.3 V logic, 5 V to the board's 5V pin), with **GPIO0 held to GND
