@@ -211,7 +211,8 @@ the one run, so the project does not depend on it:
 
 The flasher is a page of the project site (`mkdocs.yml` and `website/` at
 the repository root), not of the Boresight server. Served locally, it
-flashes the build in `build/` from Chrome or Edge over Web Serial:
+flashes the build in `build/` from Chrome, Edge or Firefox over Web
+Serial:
 
     uv run --group docs mkdocs serve      # http://127.0.0.1:8000/Boresight/flash/
 

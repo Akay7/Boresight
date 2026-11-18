@@ -31,7 +31,7 @@ boot.
 - **THEN** the device reports the missing setting on its serial log; the
   board also enters setup mode, and the emulator shows the error pattern
 
-#### Scenario: A stored setting overrides the emulator's build configuration
+#### Scenario: A stored setting overrides the build configuration
 - **WHEN** the emulator's build configuration names server port 7391 and
   port 9100 is stored on the emulated device
 - **THEN** the emulated device connects to port 9100

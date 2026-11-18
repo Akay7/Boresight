@@ -46,7 +46,7 @@ after which the device SHALL restart. On a board this leaves it with no
 network configured, so it opens setup mode by itself, with the camera
 settings back at their build configuration's values.
 
-#### Scenario: Erasing stored settings leaves a board unconfigured
+#### Scenario: Erasing stored settings restores the build defaults
 - **WHEN** the user chooses to reset a board to its build defaults
 - **THEN** the stored settings are erased, the board restarts into setup
   mode by itself, and its page shows no network set and the build

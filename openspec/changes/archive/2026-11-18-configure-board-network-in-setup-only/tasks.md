@@ -14,7 +14,7 @@ modifies requirements that change introduces.
 
 - [x] 2.1 Drop `configuration_complete()`'s board branch that points at `menuconfig`, keeping the emulator's missing-address check and the empty-token warning; verify both builds, and that the emulator suite still passes
 - [x] 2.2 On the setup page, describe "Reset to build defaults" as forgetting the Wi-Fi, server and token, after which the board opens setup mode by itself; verify the page renders in the emulator (the suite's setup tests) and the token check of `add-esp32-cam-setup-portal` task 3.4 still holds (no response contains the token)
-- [ ] 2.3 README "Configure and flash", "Setup mode" and "TLS": the network is set only from the setup page; the command-line flash path no longer configures the network; the one-time move for a board configured through `menuconfig`; verify each instruction against the firmware's behaviour (task 4.x)
+- [x] 2.3 README "Configure and flash", "Setup mode" and "TLS": the network is set only from the setup page; the command-line flash path no longer configures the network; the one-time move for a board configured through `menuconfig`; verify each instruction against the firmware's behaviour (task 4.x)
 
 ## 3. CI
 
@@ -24,9 +24,9 @@ modifies requirements that change introduces.
 
 Power the board from 5 V.
 
-- [ ] 4.1 Update the bench board, configured through setup mode, over Wi-Fi with the new image; verify it streams with its stored network and token (`(device)` in the boot log) and no setup step
-- [ ] 4.2 Reset to build defaults from the setup page; verify the board restarts into setup mode by itself, the page shows no network set and the build's camera values, and saving the network again brings it back to streaming
-- [ ] 4.3 Leave the reset board in setup mode for 10 minutes; verify the setup network closes and the board stays on the error pattern until reset (also `add-esp32-cam-setup-portal`'s unconfigured case, tasks 3.5 and 7.4)
+- [x] 4.1 Update the bench board, configured through setup mode, over Wi-Fi with the new image; verify it streams with its stored network and token (`(device)` in the boot log) and no setup step
+- [x] 4.2 Reset to build defaults from the setup page; verify the board restarts into setup mode by itself, the page shows no network set and the build's camera values, and saving the network again brings it back to streaming
+- [x] 4.3 Leave the reset board in setup mode for 10 minutes; verify the setup network closes and the board stays on the error pattern until reset (also `add-esp32-cam-setup-portal`'s unconfigured case, tasks 3.5 and 7.4)
 - [x] 4.4 Run `uv run pre-commit run --all-files`, the host tests and the emulator suite; verify all pass
       (2026-11-18: all hooks pass, host tests pass, emulator suite 8 passed. Two server tests had read the developer's own `.boresight/config.toml`; `tests/conftest.py` now points the default settings path at an empty directory for every test.)
 
