@@ -298,6 +298,9 @@ static esp_err_t send_message(httpd_req_t *req, const char *title, const char *t
 
 static esp_err_t get_page(httpd_req_t *req)
 {
+    char host[64] = "";
+    httpd_req_get_hdr_value_str(req, "Host", host, sizeof host);
+    ESP_LOGI(TAG, "page requested as http://%s/", host);
     return send_form(req, NULL, 0);
 }
 
@@ -466,6 +469,12 @@ static esp_err_t post_update(httpd_req_t *req)
 static esp_err_t redirect_home(httpd_req_t *req, httpd_err_code_t error)
 {
     (void)error;
+    /* Logged: a phone's sign-in check arrives here, and whether it does
+     * at all is what to know when the prompt does not appear. */
+    char host[64] = "";
+    httpd_req_get_hdr_value_str(req, "Host", host, sizeof host);
+    ESP_LOGI(TAG, "%s http://%s%s: redirected to the page",
+             http_method_str((enum http_method)req->method), host, req->uri);
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", s_home);
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

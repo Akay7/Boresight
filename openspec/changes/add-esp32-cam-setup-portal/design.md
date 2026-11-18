@@ -98,15 +98,24 @@ read.
 `WIFI_MODE_APSTA`, so the device can scan while serving:
 - **The network:** SSID `Boresight-` plus the last two bytes of the SoftAP
   MAC in hex, open, channel 1, at most 2 stations, with the stock DHCP
-  server and 192.168.4.1 as the device's address.
+  server and **4.3.2.1** as the device's address. Not the default
+  192.168.4.1: on the bench, an Android phone looked up
+  `connectivitycheck.gstatic.com`, was answered 192.168.4.1, and never
+  made its check request, so it reported "no internet" where a PC
+  offered the sign-in page. WLED uses 4.3.2.1 for the same reason. The
+  network has no internet, so the address collides with nothing.
+- **The sign-in address in DHCP:** option 114 (RFC 8910) carries
+  `http://4.3.2.1/`, which phones that honour it open without a check.
 - **Name lookups:** a small UDP responder on port 53 answers every A query
-  with 192.168.4.1 and anything else with an empty answer. The packet
+  with 4.3.2.1 and anything else with an empty answer, and logs each
+  query, so a phone's checks can be seen. The packet
   logic is a pure function in `boresight_proto`, host-tested against
   captured query bytes.
 - **The page server:** `esp_http_server` serves `GET /`, `GET /scan`,
   `POST /save` and `POST /reset`. A catch-all handler answers any other
   path, including the phones' sign-in checks (`/generate_204`,
-  `/hotspot-detect.html`, `/connecttest.txt`), with a redirect to `/`.
+  `/hotspot-detect.html`, `/connecttest.txt`), with a redirect to `/`,
+  and logs it.
 - **The page:** one inline HTML document with inline CSS and no
   JavaScript requirement. The phone has no internet on this network, so
   nothing can come from a CDN.

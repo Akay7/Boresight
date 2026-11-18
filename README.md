@@ -1100,13 +1100,16 @@ sends frames in the same wire format, so nothing between the socket and
 the cursor knows which device is aiming. It identifies itself with a
 `hello` message, which is how the server's logs tell the two apart.
 
-**Never yet run on a board.** The wire format, debouncing, pin checks,
-reconnect back-off and LED patterns are unit-tested on the host
-(`firmware/boresight-cam/test_host`), and the server side has been
-exercised by a stand-in client streaming the fixtures as fragmented
-messages over a real socket. Nothing has been flashed. Every camera
-default — resolution, frame rate, exposure — is a guess, exactly as the
-phone's were.
+**Running on a board since November 2026.** On an AI-Thinker board
+(ESP32-D0WD-V3, OV2640, 2 MB PSRAM) it streams 1024x768 at about 12.5
+frames a second with a 140–220 ms round trip, aims at on-screen markers,
+and its trigger reaches the server. Setup mode, discovery, updating over
+Wi-Fi and falling back from a firmware that does not start have all
+been checked on it. The wire format, debouncing, pin checks, back-off
+and LED patterns are also unit-tested on the host
+(`firmware/boresight-cam/test_host`), and the emulator suite covers the
+rest without a board. The camera defaults — resolution, frame rate,
+exposure — work but are not tuned.
 
 ### Wiring
 
@@ -1211,6 +1214,9 @@ the command above.
 - If the board does not answer, move the GND wire to another GND pin.
 - If the adapter has no 5V pin, wire its 3.3 V to the board's **3V3**
   pin instead, and check every wire before plugging the adapter in.
+  That is enough to flash, but not to run: an ESP-01 adapter's 3.3 V
+  output browns the board out once its radio is busy, for instance as
+  soon as setup mode opens its network. Run it from 5 V.
 
 In the printed case the board needs none of this wiring: a plug on its
 header's 3V3 side, pins 3-8, runs to a debug socket and a BOOT button on
@@ -1267,7 +1273,14 @@ device opens setup mode at boot:
 In setup mode the device stops streaming and opens a Wi-Fi network of its
 own, `Boresight-` and four hex digits from its MAC address, with no
 password. Join it from a phone and the setup page opens by itself, as a
-hotel Wi-Fi login does (or open <http://192.168.4.1/>). The page offers:
+hotel Wi-Fi login does (or open <http://4.3.2.1/>). The address is
+deliberately not a `192.168.x.x` one: given a private address for its
+sign-in check, an Android phone skips the check and reports "no
+internet" instead of offering the page. The network has no internet, so
+the address collides with nothing. On the bench the sign-in page came up
+about a second after an Android phone joined, and after **Save and
+restart** the board was streaming again about 20 seconds later,
+including finding the server. The page offers:
 
 | Setting | Notes |
 | --- | --- |
@@ -1894,11 +1907,11 @@ in, so the two sequences pair positionally.
 - [ ] Wi-Fi latency/jitter measurement and tuning — the instrument
       exists (round-trip time and drop counts are on the phone's
       screen); nobody has read it against real hardware yet
-- [ ] ESP32-CAM client: `firmware/boresight-cam/` streams over the same
+- [x] ESP32-CAM client: `firmware/boresight-cam/` streams over the same
       socket in the same wire format and wires the shell's real trigger;
       the server lists it by name at `GET /sessions` (see "The ESP32-CAM
-      client"). Host-tested and exercised by a stand-in client against a
-      live server, never yet flashed onto a board
+      client"). Running on a board: streaming, aiming and the trigger
+      checked, with setup mode, discovery and Wi-Fi updates
 - [ ] (Future) ESP32 hardware HID round-trip path
 - [ ] (Future) IMU dropout bridging
 - [ ] (Future) Recoil solenoid

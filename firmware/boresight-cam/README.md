@@ -181,6 +181,9 @@ no EN pin, so the jumper does their job.
 - If the board does not answer, move the GND wire to another GND pin.
 - If the adapter has no 5V pin, wire its 3.3 V to the board's **3V3**
   pin instead, and check every wire before plugging the adapter in.
+  That is enough to flash, but not to run: an ESP-01 adapter's 3.3 V
+  output browns the board out once its radio is busy, for instance as
+  soon as setup mode opens its network. Run it from 5 V.
 
 The diagram is drawn by `docs/flashing.py` with
 [schemdraw](https://schemdraw.readthedocs.io/). After editing it,

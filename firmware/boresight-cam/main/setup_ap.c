@@ -26,8 +26,34 @@ static const char *TAG = "setup_ap";
 #define SETUP_MAX_STATIONS 2
 #define DNS_PORT 53
 
-/* The address the stock DHCP server gives the access point itself. */
-static const uint8_t SETUP_IP[4] = {192, 168, 4, 1};
+/* The access point's own address (see SETUP_ADDRESS_BYTES), which every
+ * name lookup is answered with. */
+static const uint8_t SETUP_IP[4] = {SETUP_ADDRESS_BYTES};
+/* DHCP option 114 (RFC 8910): the sign-in page, handed to a joining phone
+ * outright, so a phone that honours it needs no check at all. The DHCP
+ * server keeps this pointer, not a copy. */
+static const char SETUP_PORTAL_URI[] = SETUP_HOME;
+
+/* Gives the access point SETUP_IP, and its DHCP server option 114. The
+ * server is stopped for both, as esp_netif requires. */
+static esp_err_t set_address(esp_netif_t *ap)
+{
+    esp_netif_ip_info_t info = {0};
+    esp_netif_set_ip4_addr(&info.ip, SETUP_IP[0], SETUP_IP[1], SETUP_IP[2], SETUP_IP[3]);
+    info.gw = info.ip;
+    esp_netif_set_ip4_addr(&info.netmask, 255, 255, 255, 0);
+    esp_err_t err = esp_netif_dhcps_stop(ap);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        return err;
+    }
+    ESP_RETURN_ON_ERROR(esp_netif_set_ip_info(ap, &info), TAG, "address");
+    ESP_RETURN_ON_ERROR(esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET,
+                                               ESP_NETIF_CAPTIVEPORTAL_URI,
+                                               (void *)SETUP_PORTAL_URI,
+                                               sizeof SETUP_PORTAL_URI - 1),
+                        TAG, "sign-in option");
+    return esp_netif_dhcps_start(ap);
+}
 
 static char s_networks[SETUP_MAX_NETWORKS][BP_SSID_MAX + 1];
 static size_t s_network_count;
@@ -88,6 +114,30 @@ void setup_rescan(void)
     scan();
 }
 
+/* "name (type)" of a query's question, for the log: which sign-in checks
+ * a phone makes is the first thing to know when its prompt does not
+ * appear. Nothing here is trusted; bp_dns_answer does the real parsing. */
+static void describe_query(const uint8_t *query, int length, char *out, size_t size)
+{
+    size_t used = 0;
+    int at = 12; /* past the header */
+    out[0] = '\0';
+    while (at < length && query[at] != 0 && query[at] <= 63 && used + 1 < size) {
+        const int label = query[at++];
+        if (used > 0 && used + 1 < size) {
+            out[used++] = '.';
+        }
+        for (int i = 0; i < label && at < length && used + 1 < size; i++) {
+            const char c = (char)query[at++];
+            out[used++] = (c > 32 && c < 127) ? c : '?';
+        }
+    }
+    out[used] = '\0';
+    at++; /* the terminating zero */
+    const unsigned type = at + 1 < length ? ((unsigned)query[at] << 8 | query[at + 1]) : 0;
+    snprintf(out + used, size - used, " (type %u)", type);
+}
+
 static void dns_task(void *arg)
 {
     (void)arg;
@@ -112,8 +162,12 @@ static void dns_task(void *arg)
         if (length <= 0) {
             continue;
         }
+        char asked[96];
+        describe_query(query, length, asked, sizeof asked);
         int reply_length =
             bp_dns_answer(query, (size_t)length, SETUP_IP, reply, sizeof reply);
+        ESP_LOGI(TAG, "lookup %s: %s", asked,
+                 reply_length < 0 ? "ignored" : "answered");
         if (reply_length > 0) {
             sendto(sock, reply, (size_t)reply_length, 0, (struct sockaddr *)&from,
                    from_length);
@@ -129,8 +183,9 @@ esp_err_t setup_network_start(char *name, size_t size)
     }
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif init");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
-    esp_netif_create_default_wifi_ap();
+    esp_netif_t *ap_netif = esp_netif_create_default_wifi_ap();
     esp_netif_create_default_wifi_sta();
+    ESP_RETURN_ON_ERROR(set_address(ap_netif), TAG, "setup network address");
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&init), TAG, "wifi init");

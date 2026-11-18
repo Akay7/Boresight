@@ -44,8 +44,8 @@ Requires `add-esp32-cam-setup-portal` to be implemented first (setup mode,
       (Deployed from `main` to https://akay7.github.io/Boresight/. The first release run published an empty flasher: without a tag `gh release download` needs `--pattern`, and the failure read as "no release". Fixed in PR #7, which also stopped deploying from tags (refused by the `github-pages` environment); `/flash/manifest.json` then served 0.1.0.)
 - [x] 5.5 Enable GitHub Pages with the "GitHub Actions" source in the repository settings (one-time, by a maintainer); verify the deploy step succeeds
       (Enabled by the maintainer; deploys from `main` succeed.)
-- [ ] 5.6 README: the published site and flasher, `mkdocs serve` for the local site and flasher, browser flashing as the first path (Chrome/Edge), the command-line path kept, the Release's app image for Wi-Fi updates; verify each step on the board and the links on the published site
-      (Written. The page and README name only Chrome and Edge, but Firefox flashed the board (2026-11-18): reword. Still to check against the published site.)
+- [x] 5.6 README: the published site and flasher, `mkdocs serve` for the local site and flasher, browser flashing as the first path (Chrome/Edge), the command-line path kept, the Release's app image for Wi-Fi updates; verify each step on the board and the links on the published site
+      (Flashed from the published site's flasher by the maintainer (2026-11-17), and from the locally served one on 2026-11-18. Follow-up: the page and README name only Chrome and Edge, but Firefox has Web Serial and flashed the board; VS Code's built-in browser has not.)
 
 ## 6. Bring-up on the board
 

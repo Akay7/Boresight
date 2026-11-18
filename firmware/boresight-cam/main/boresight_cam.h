@@ -87,6 +87,14 @@ void setup_http_stop(void);
 size_t setup_networks(char names[][BP_SSID_MAX + 1], size_t max);
 void setup_rescan(void);
 #if !CONFIG_BORESIGHT_EMULATOR
+/* The board's address on its own setup network, and the page there.
+ * Public-looking, as WLED's is, not 192.168.4.1: an Android phone given a
+ * private address for its sign-in check's public name never makes the
+ * check, and says "no internet" instead of offering the page. The setup
+ * network has no internet, so the address collides with nothing. */
+#define SETUP_ADDRESS_BYTES 4, 3, 2, 1
+#define SETUP_HOME "http://4.3.2.1/"
+
 /* Opens the setup network; `name` gets its SSID. */
 esp_err_t setup_network_start(char *name, size_t size);
 void setup_network_stop(void);
