@@ -81,3 +81,13 @@ void camera_release(camera_frame_t *frame)
 {
     (void)frame;
 }
+
+/* Frames embedded in the image: no driver, no interrupt, nothing to stop
+ * around a flash write. */
+void camera_pause(void)
+{
+}
+
+void camera_resume(void)
+{
+}

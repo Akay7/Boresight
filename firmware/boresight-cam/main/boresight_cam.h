@@ -119,6 +119,15 @@ typedef struct {
 bool camera_grab(camera_frame_t *frame);
 void camera_release(camera_frame_t *frame);
 
+/* Stops the camera, once the frame being sent is released, and starts it
+ * again with the same settings. A long flash write -- erasing a sector --
+ * must not run with the camera on: its interrupt stays live while flash
+ * is unreadable, and esp32-camera's overflow warning there reads its
+ * message from flash and crashes the board. No frame is grabbed while it
+ * is paused. Both do nothing before camera_start(). */
+void camera_pause(void);
+void camera_resume(void);
+
 /* Checked before anything starts: a button on a strapping pin can stop the
  * board booting at all, so it must be caught while the log is readable. */
 bool buttons_valid(void);
