@@ -30,28 +30,35 @@ Requires `add-esp32-cam-setup-portal` to be implemented first (setup mode,
       (Checked in headless Chrome on localhost, steps and Connect button shown, and over a non-secure LAN origin: "cannot flash" with the files. Firefox takes that same branch, having no `navigator.serial`.)
 - [x] 4.3 Add `website/flasher.py` (no Boresight imports): a bundle (`manifest.json` and `files/`) from a build's `flash_args`, version and build time from the app descriptor, `new_install_prompt_erase`, no Improv wait; runnable on its own; verify tests with a fake build: the four parts at their offsets, `ota_data_initial` present, nothing at NVS, a missing part refused
 - [x] 4.4 Remove `/flash` and its files from the Boresight server (router, `create_app` parameter, `main()` wiring, `web/flash`, `web/vendor`); verify a server test that `/flash/` serves no flashing page and the full suite passes
-- [ ] 4.5 Flash the board from the locally served site's flashing page in Chrome through the CP2104 adapter, without erase; verify it boots with its stored settings, then once with erase and verify it boots into setup mode
-      (Needs the board and the adapter.)
+- [x] 4.5 Flash the board from the locally served site's flashing page in Chrome through the CP2104 adapter, without erase; verify it boots with its stored settings, then once with erase and verify it boots into setup mode
+      (On the board, 2026-11-18, from the locally served site in Firefox (which has Web Serial; VS Code's built-in browser has not): without erase it booted `running 0.1.0 from ota_0` with `quality 15 (device)` kept; with erase, the generic image opened setup mode by itself.)
 
 ## 5. The project site and CI
 
 - [x] 5.1 Add `mkdocs.yml` and `website/hooks.py`: the four READMEs as pages, README-to-page links, copied images, other repository links to GitHub, the flasher and its bundle (from `BORESIGHT_FIRMWARE`, else this checkout's build, else none), served on `127.0.0.1:8000`; a `docs` dependency group with `mkdocs-material`; `.site/` ignored; verify `uv run --group docs mkdocs build --strict` passes and `mkdocs serve` serves the home page, the firmware page with its wiring image, and the flasher with the local build
       (`mkdocs build --strict` passes; `mkdocs serve` served all four pages, the wiring image and the flasher with the local build under /Boresight/, rebuilt on a README edit without looping; a broken link fails the strict build.)
 - [x] 5.2 Tests for the hook's link rewriting (README link to page, image copied, source link to GitHub, unknown file reported); verify they pass in the default suite without MkDocs installed
-- [ ] 5.3 Add the `firmware` CI workflow: build the device profile in `espressif/idf:v5.4` from `sdkconfig.defaults` only, check the four secret settings are empty and no certificate is embedded, upload a flasher bundle; on `v*` tags check the tag against `PROJECT_VER` and create a GitHub Release with the bundle; verify the steps locally on a fresh generic build, then on a push
-      (Written; build, secrets check and bundle run locally on a fresh generic build, which also booted into setup mode in QEMU. Awaiting a push and a first tag.)
-- [ ] 5.4 Add the `site` CI workflow: `mkdocs build --strict` on every push and pull request; on `main` and tags deploy to GitHub Pages with the latest release's bundle from `gh release download`, or none before the first release; verify on a push to `main`
-      (Written; the strict build with a release-style bundle run locally. Awaiting a push to main.)
-- [ ] 5.5 Enable GitHub Pages with the "GitHub Actions" source in the repository settings (one-time, by a maintainer); verify the deploy step succeeds
-      (A repository setting for the maintainer.)
+- [x] 5.3 Add the `firmware` CI workflow: build the device profile in `espressif/idf:v5.4` from `sdkconfig.defaults` only, check the four secret settings are empty and no certificate is embedded, upload a flasher bundle; on `v*` tags check the tag against `PROJECT_VER` and create a GitHub Release with the bundle; verify the steps locally on a fresh generic build, then on a push
+      (Build, secrets check and bundle run locally on a fresh generic build, which also booted into setup mode in QEMU. The `v0.1.0` tag ran it on GitHub: release `v0.1.0` published with the four parts, the manifest and the app image.)
+- [x] 5.4 Add the `site` CI workflow: `mkdocs build --strict` on every push and pull request; on `main`, and again on `main` after `firmware.yml` completes, deploy to GitHub Pages with the latest release's bundle from `gh release download --pattern '*'`, or none before the first release; verify on a push to `main`
+      (Deployed from `main` to https://akay7.github.io/Boresight/. The first release run published an empty flasher: without a tag `gh release download` needs `--pattern`, and the failure read as "no release". Fixed in PR #7, which also stopped deploying from tags (refused by the `github-pages` environment); `/flash/manifest.json` then served 0.1.0.)
+- [x] 5.5 Enable GitHub Pages with the "GitHub Actions" source in the repository settings (one-time, by a maintainer); verify the deploy step succeeds
+      (Enabled by the maintainer; deploys from `main` succeed.)
 - [ ] 5.6 README: the published site and flasher, `mkdocs serve` for the local site and flasher, browser flashing as the first path (Chrome/Edge), the command-line path kept, the Release's app image for Wi-Fi updates; verify each step on the board and the links on the published site
-      (Written; to be checked on the board and against the published site.)
+      (Written. The page and README name only Chrome and Edge, but Firefox flashed the board (2026-11-18): reword. Still to check against the published site.)
 
 ## 6. Bring-up on the board
 
-- [ ] 6.1 Move the bench board to the two-slot layout from the browser without erase; verify its stored settings are in effect after boot
-- [ ] 6.2 Update it over Wi-Fi from setup mode with a newer build; verify the version in the server's `client identified` line and that settings are kept
-- [ ] 6.3 Install the crash-at-boot test image over Wi-Fi; verify the board rolls back by itself and logs it
+Power the board from 5 V into its 5V pin, every GND shared, not from the
+adapter's 3.3 V: hosting setup mode's network browns it out there and it
+restarts into normal operation, which looks like a firmware fault.
+
+- [x] 6.1 Move the bench board to the two-slot layout from the browser without erase; verify its stored settings are in effect after boot
+      (The bench board was already on the two-slot layout (moved over the command line). Flashed again from the browser without erase on 2026-11-18: the setting stored on the device (`quality 15 (device)`) was in effect.)
+- [x] 6.2 Update it over Wi-Fi from setup mode with a newer build; verify the version in the server's `client identified` line and that settings are kept
+      (On the board, 2026-11-18: uploaded from setup mode, it booted `running 0.1.0 from ota_1` with `quality 15 (device)` and streamed. The first attempt was rolled back after a watchdog reset: marking the image good erases a flash sector, and esp32-camera's interrupt, live during the erase, read its overflow message from flash and crashed. The camera is now paused for that write; after that, `camera: paused`, `firmware 0.1.0 started: kept`, no reset. Same version both sides, so the slot, not the version, showed the update.)
+- [x] 6.3 Install the crash-at-boot test image over Wi-Fi; verify the board rolls back by itself and logs it
+      (On the board, 2026-11-18: the reset-at-boot image installed into ota_0, logged `TEST IMAGE: resetting before start`, and the next boot logged `update to 0.1.0 in ota_0 did not start: rolled back to 0.1.0 in ota_1`, then streamed.)
 - [x] 6.4 Run `uv run pre-commit run --all-files`, the host tests and the emulator suite; verify all pass
 
 ## Workflow follow-up

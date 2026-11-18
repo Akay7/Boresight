@@ -19,16 +19,16 @@
 
 ## 3. Setup mode on the board
 
-- [ ] 3.1 Add the boot-time trigger-hold check (input with pull-up, sample up to 5 s if pressed at boot, LED to the setup pattern at 5 s) and the setup/normal branch before the camera starts; verify `tools/idf.sh device build` and, on the board, that a 2 s hold boots normally while a 5 s hold shows the setup pattern
-      (Implemented and built; the emulator suite covers the shared page code. Awaiting the check on the board.)
-- [ ] 3.2 Add `main/setup_ap.c`: an APSTA scan, then an open SoftAP `Boresight-XXXX` (SoftAP MAC), channel 1, at most 2 stations; verify on the board that the network appears and a phone joins without a password
-      (Implemented and built; the emulator suite covers the shared page code. Awaiting the check on the board.)
+- [x] 3.1 Add the boot-time trigger-hold check (input with pull-up, sample up to 5 s if pressed at boot, LED to the setup pattern at 5 s) and the setup/normal branch before the camera starts; verify `tools/idf.sh device build` and, on the board, that a 2 s hold boots normally while a 5 s hold shows the setup pattern
+      (On the board, 2026-11-18: a 5 s hold logged `trigger held for 5 s: opening setup mode` with the setup pattern; a short hold started normally. Holding was only ever caught at boot or not at all, so the "released early" path itself was not seen.)
+- [x] 3.2 Add `main/setup_ap.c`: an APSTA scan, then an open SoftAP `Boresight-XXXX` (SoftAP MAC), channel 1, at most 2 stations; verify on the board that the network appears and a phone joins without a password
+      (On the board, 2026-11-18, powered from 5 V: `setup network "Boresight-26A1" open (no password) at 192.168.4.1`, networks listed, and a phone and a PC joined without a password. It first crashed here: the scan's records overflowed the main task's stack (fixed by making them static); on the adapter's 3.3 V the network browned the board out.)
 - [ ] 3.3 Add the captive DNS responder task on UDP 53 using `bp_dns_answer`; verify on the board that a phone joining the network shows its sign-in prompt
-      (Implemented and built; the emulator suite covers the shared page code. Awaiting the check on the board.)
+      (On the board, 2026-11-18: a PC joining showed the sign-in page by itself; an Android phone did not, though the same phone does for WLED. To investigate: log the phone's lookups and requests in setup mode; candidates are WLED's public-looking AP address (4.3.2.1) and DHCP option 114 (RFC 8910).)
 - [ ] 3.4 Add `main/setup_http.c` with `esp_http_server`: `GET /` (escaped current values, "set"/"not set" for secrets, network list), `GET /scan`, `POST /save` (validate, store, confirm, restart after ~1.5 s), `POST /reset` (erase namespace, restart), and a catch-all redirect to `/`; verify `tools/idf.sh device build`, and with curl on the board's network that the page never contains the stored token
-      (Implemented and built; the emulator suite covers the shared page code. Awaiting the check on the board.)
+      (On the board, 2026-11-18: the page showed the network and "set" for the password and token, refused an invalid field without storing anything, saved and restarted, and reset to defaults. Left: the curl check, from a machine on the setup network, that the page never contains the token.)
 - [ ] 3.5 Add the one-shot 10-minute setup timer: restart when an SSID is in effect, otherwise stop the AP and park on the error pattern; verify on the board for both a configured and an unconfigured device
-      (Implemented and built; the emulator suite covers the shared page code. Awaiting the check on the board.)
+      (On the board, 2026-11-18, configured: `setup mode ran out after 10 minutes with nothing saved`, network closed, restarted with the settings unchanged and streamed again. The unconfigured case (parked on the error pattern) was not run.)
 - [x] 3.6 Measure the device app size after 3.1–3.4 (`idf.py size` via `tools/idf.sh device size`); verify it fits the factory partition with margin, or switch to a custom partition table and record why
 - [ ] 3.7 README "The ESP32-CAM client": a "Setup mode" subsection (when it opens, the network name, what the page edits, the 10-minute lifetime, reset to defaults, the open-network trade-off), the LED table row, and `menuconfig` values described as defaults; firmware README likewise; verify every instruction against the board
       (Implemented and built; the emulator suite covers the shared page code. Awaiting the check on the board.)
@@ -52,15 +52,19 @@
 
 - [x] 6.1 Add the `espressif/mdns` managed component (device profile), call `mdns_init()` after the network is up, and when the effective host is empty, query `_boresight._tcp` before each attempt, logging every result and connecting to the first IPv4 one; verify `tools/idf.sh device build`, and `idf.py size` still fits
 - [x] 6.2 Treat a TXT `tls` that disagrees with the build as a configuration error (error pattern, maximum back-off, a log naming the mismatch); verify with the host test from 1.7 and a device build
-- [ ] 6.3 README: leaving the address empty, what the device logs when it finds a server, and the TLS-mismatch message; verify on the board (task 7.3)
-      (Implemented and built; the emulator suite covers the shared page code. Awaiting the check on the board.)
+- [x] 6.3 README: leaving the address empty, what the device logs when it finds a server, and the TLS-mismatch message; verify on the board (task 7.3)
+      (The README's discovery and TLS-mismatch lines match the board's log word for word (2026-11-18, task 7.3).)
 
 ## 7. Hardware bring-up (ESP32-CAM, phone, PC)
 
 - [ ] 7.1 Erased board: flash, confirm setup opens by itself, join from a phone, the sign-in page appears, save Wi-Fi, an empty address and the token, and confirm it restarts and streams; record the time from joining to streaming in the README
-- [ ] 7.2 Configured board: a 5 s trigger hold at boot opens setup, changing only the JPEG quality keeps the stored password and token, and the board streams with the new quality (`camera: applied` log); reset to defaults restores the build values
-- [ ] 7.3 Discovery: the board with an empty address finds the server; after the PC's address changes and the server restarts it reconnects without reconfiguration; a TLS server with a plain-text build is refused with the mismatch logged
+      (On the board, 2026-11-18, with a generic image built locally (as CI does) and flashed from the browser with erase: setup opened by itself, the phone saved Wi-Fi, the token and an empty address, the board restarted, found the server and streamed about 18 s after saving. Left: the sign-in page did not appear on the phone (see 3.3), and the time is not in the README yet.)
+- [x] 7.2 Configured board: a 5 s trigger hold at boot opens setup, changing only the JPEG quality keeps the stored password and token, and the board streams with the new quality (`camera: applied` log); reset to defaults restores the build values
+      (On the board, 2026-11-18: changing only the quality logged `password set (build)`, `token set (build)`, `quality 15 (device)` and `camera: applied: … JPEG quality 15`, then streamed; reset to defaults logged `build defaults apply` and streamed at quality 12.)
+- [x] 7.3 Discovery: the board with an empty address finds the server; after the PC's address changes and the server restarts it reconnects without reconfiguration; a TLS server with a plain-text build is refused with the mismatch logged
+      (On the board, 2026-11-18: with the address empty it logged `found "Boresight on asus-pa-px13" at 192.168.1.40:7331` and streamed. The server moving was tried as a port change (7332), not an address change: found again and streamed without reconfiguration. A `--tls` server was refused with the mismatch logged, never sent the token, and the board resumed when a plain server returned. The first lookups after joining sometimes miss (two misses, about 10 s) before the server is found.)
 - [ ] 7.4 Lifetime: left alone, setup closes after 10 minutes, with the configured board reconnecting and the unconfigured board parked on the error pattern
+      (On the board, 2026-11-18: configured, setup closed 600 s after opening and the board reconnected (see 3.5). The unconfigured case was not run.)
 - [x] 7.5 Run `uv run pre-commit run --all-files` and the host tests; verify both pass
 
 ## Workflow follow-up

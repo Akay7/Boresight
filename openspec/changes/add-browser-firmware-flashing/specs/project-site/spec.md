@@ -42,13 +42,25 @@ resolve, rather than publish a broken one.
 
 ### Requirement: The site is published from the main branch
 The project SHALL publish the site on GitHub Pages from every push to
-the main branch and from every version tag, so the published docs
-follow the code. Its flashing page SHALL offer the latest released
-firmware image.
+the main branch, so the published docs follow the code, and again
+whenever a release has been published, from the main branch, so its
+flashing page offers the latest released firmware image. It SHALL NOT
+deploy from a tag: GitHub Pages refuses that by default, and a run
+started by the tag would precede the release it should carry.
 
 #### Scenario: Docs follow main
 - **WHEN** a README change is pushed to the main branch
 - **THEN** the published site shows it once the publishing run completes
+
+#### Scenario: A release reaches the flasher
+- **WHEN** a version tag is pushed and its release is published
+- **THEN** the site is published again from the main branch, and its
+  flashing page offers that release's image and version
+
+#### Scenario: A release that cannot be fetched is not hidden
+- **WHEN** a release exists but the publishing run cannot download it
+- **THEN** the run fails rather than publishing a flashing page that
+  says there is no firmware
 
 ### Requirement: The site can be served locally
 The project SHALL provide a single command that serves the site on

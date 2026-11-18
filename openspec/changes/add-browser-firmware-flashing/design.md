@@ -220,9 +220,19 @@ files, no vendored script in its package.
 
 `site.yml`, on every push and pull request:
 - builds the site strictly;
-- on `main` and on tags, also deploys it to GitHub Pages, with the latest
-  release's bundle fetched by `gh release download` at build time (no
-  CORS involved).
+- on `main`, also deploys it to GitHub Pages, with the latest release's
+  bundle fetched by `gh release download --pattern '*'` at build time (no
+  CORS involved). Without a tag the command downloads nothing unless
+  given a pattern, so a failure is not read as "no release": the run
+  skips the download only when `gh release view` finds none, and fails
+  otherwise;
+- runs again on `main` when `firmware.yml` completes, which is how a
+  release reaches the flasher.
+
+Not from tags: the `github-pages` environment that enabling Pages
+creates lets only the default branch deploy, so a tag's run was refused
+(`v0.1.0`), and it would in any case start before the release it should
+carry exists.
 
 Before the first release the flashing page says there is no firmware
 yet. Enabling Pages ("GitHub Actions" source) is a one-time repository

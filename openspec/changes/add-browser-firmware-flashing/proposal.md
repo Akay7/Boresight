@@ -90,8 +90,8 @@ time and every time after.
 - **CI:** a firmware job building the generic image in the pinned
   ESP-IDF container, and publishing a GitHub Release on version tags; a
   site job building the docs site strictly on every push and deploying it
-  to GitHub Pages from `main` and from tags, with the latest release's
-  image in the flasher.
+  to GitHub Pages from `main`, and again from `main` once a release is
+  published, with the latest release's image in the flasher.
 - **Docs:** the README and the firmware README get browser flashing,
   Wi-Fi updates and the one-time move to the new layout.
 - **Depends on** `add-esp32-cam-setup-portal`: the generic image relies
