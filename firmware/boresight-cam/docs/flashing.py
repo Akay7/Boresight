@@ -21,13 +21,15 @@ from board import (
     WIRE_WIDTH,
     YELLOW,
     esp32_cam,
+    left,
     render,
+    right,
 )
 
 ADAPTER_SPACING = 1.1
 # The adapter's pins along its top edge, left to right: ordered so that
 # no two wires cross on their way round the board.
-ADAPTER = ["GND", "5V", "3V3", "BOOT", "EN", "RX", "TX"]
+ADAPTER = ["5V", "GND", "3V3", "BOOT", "EN", "RX", "TX"]
 UNUSED = {"3V3", "BOOT", "EN"}
 # What to do with the wiring is in the READMEs, next to the picture.
 
@@ -62,7 +64,7 @@ def draw(d) -> None:
             leadlen=LEAD,
         )
         .at(first_pin)
-        .anchor("GND")
+        .anchor("5V")
     )
     adapter.label(
         "USB-serial adapter\n3.3 V logic\nUSB to the PC",
@@ -72,22 +74,22 @@ def draw(d) -> None:
     d += adapter
     p = adapter.absanchors
 
-    pin_top = p["GND"].y
+    pin_top = p["5V"].y
     low, high = pin_top + 0.7, pin_top + 1.3
     left_out, left_in = a["A1"].x - 1.0, a["A1"].x - 0.5
     right_in, right_out = a["B1"].x + 0.5, a["B1"].x + 1.0
 
     # Outer wire on the lower level, inner on the higher: none cross.
     # TX and RX cross over: the adapter's TX is the board's receive line.
-    route(d, p["GND"], low, left_out, a["A2"], BLACK)
-    route(d, p["5V"], high, left_in, a["A1"], RED)
-    route(d, p["RX"], high, right_in, a["B2"], GREEN)
-    route(d, p["TX"], low, right_out, a["B3"], YELLOW)
+    route(d, p["5V"], low, left_out, left(a, "5V"), RED)
+    route(d, p["GND"], high, left_in, left(a, "GND"), BLACK)
+    route(d, p["RX"], high, right_in, right(a, "U0T"), GREEN)
+    route(d, p["TX"], low, right_out, right(a, "U0R"), YELLOW)
 
     d += (
         elm.Arc2(k=-0.8)
-        .at(a["B5"])
-        .to(a["B6"])
+        .at(right(a, "GND", 1))
+        .to(right(a, "IO0"))
         .color(BLUE)
         .linewidth(WIRE_WIDTH)
         .label("jumper,\nflashing only", loc="bot", ofst=0.35, color=BLUE)

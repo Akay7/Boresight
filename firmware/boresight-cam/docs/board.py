@@ -2,10 +2,11 @@
 trigger.py.
 
 The board is one box with its two 8-pin header rows down its two sides,
-camera end up, as it lies on the bench. Each row is in the order
-AI-Thinker's datasheet gives it, from the end nearest the 5V pin. Its
-pins' anchors are A1-A8 down the left row and B1-B8 down the right,
-counted from the bottom.
+seen from the front (the camera side) with the SD-card slot at the top,
+as in Random Nerd Tutorials' pinout: 5V and 3V3 face each other at the
+top. The rows' order is the one AI-Thinker's schematic gives headers P2
+and P1. Its pins' anchors are A1-A8 up the left row and B1-B8 up the
+right, counted from the bottom.
 """
 
 from itertools import pairwise
@@ -26,7 +27,7 @@ BLUE = "#1f77b4"
 GREY = "#999999"
 
 # The board's rows, each listed from the bottom up.
-LEFT_ROW = ["5V", "GND", "IO12", "IO13", "IO15", "IO14", "IO2", "IO4"]
+LEFT_ROW = ["IO4", "IO2", "IO14", "IO15", "IO13", "IO12", "GND", "5V"]
 RIGHT_ROW = ["GND", "U0T", "U0R", "VCC", "GND", "IO0", "IO16", "3V3"]
 
 
@@ -44,9 +45,21 @@ def esp32_cam(drawing) -> dict:
         size=(5.0, 8 * CAM_SPACING + 0.5),
         leadlen=LEAD,
     ).at((0, 0))
-    cam.label("ESP32-CAM\nAI-Thinker\n\ncamera end up", loc="center")
+    cam.label("ESP32-CAM\nAI-Thinker\n\nfront view,\nSD slot\nat the top", loc="center")
     drawing += cam
     return cam.absanchors
+
+
+def left(anchors: dict, name: str):
+    """The left row's pin called `name`."""
+    return anchors[f"A{LEFT_ROW.index(name) + 1}"]
+
+
+def right(anchors: dict, name: str, nth: int = 0):
+    """The right row's pin called `name`, the `nth` from the bottom (it
+    has two GNDs)."""
+    slots = [i for i, pin in enumerate(RIGHT_ROW) if pin == name]
+    return anchors[f"B{slots[nth] + 1}"]
 
 
 def wire(drawing, *points, color) -> None:

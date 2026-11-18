@@ -1117,9 +1117,9 @@ phone's were.
 | Status LED | GPIO33 | The on-board red LED |
 | Power | 5V and GND | At least 1 A; a 470–1000 µF capacitor across 5V/GND at the board stops brown-outs |
 
-![Trigger wiring: one side of the button to IO13, the other to the GND two pins below it, both on the 5V side of the board](firmware/boresight-cam/docs/trigger.svg)
+![Trigger wiring: one side of the button to IO13, the other to the GND two pins above it, beside 5V, both on the same row](firmware/boresight-cam/docs/trigger.svg)
 
-The button's two legs go to IO13 and the GND two pins below it, either
+The button's two legs go to IO13 and the GND two pins above it, either
 way round; any normally-open push button or microswitch will do. With no
 button wired yet, a jumper wire between the same two pins does the same
 job, for instance held there through a reset to open [setup

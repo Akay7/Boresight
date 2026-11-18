@@ -13,7 +13,7 @@ the flashing diagram; what to do with the wiring is in the READMEs.
 from pathlib import Path
 
 import schemdraw.elements as elm
-from board import BLACK, GREEN, WIRE_WIDTH, esp32_cam, render, wire
+from board import BLACK, GREEN, WIRE_WIDTH, esp32_cam, left, render, wire
 
 LANE = 1.0  # out from the pin ends to the wires' turn
 REACH = 2.4  # out from the pin ends to the button
@@ -22,14 +22,14 @@ OVERHANG = 0.8  # how far the button's ends stand past the two pins
 
 def draw(d) -> None:
     a = esp32_cam(d)
-    io13, gnd = a["A4"], a["A2"]
+    io13, gnd = left(a, "IO13"), left(a, "GND")  # IO12 between them
     lane, button = io13.x - LANE, io13.x - REACH
-    top, bottom = io13.y + OVERHANG, gnd.y - OVERHANG
+    top, bottom = gnd.y + OVERHANG, io13.y - OVERHANG
 
     # Out from each pin, then away from the other so the button stands
     # clear of the header, then across to its ends.
-    wire(d, io13, (lane, io13.y), (lane, top), (button, top), color=GREEN)
-    wire(d, gnd, (lane, gnd.y), (lane, bottom), (button, bottom), color=BLACK)
+    wire(d, gnd, (lane, gnd.y), (lane, top), (button, top), color=BLACK)
+    wire(d, io13, (lane, io13.y), (lane, bottom), (button, bottom), color=GREEN)
     d += (
         elm.Button()
         .at((button, top))
