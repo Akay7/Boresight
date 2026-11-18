@@ -33,6 +33,14 @@ static char s_networks[SETUP_MAX_NETWORKS][BP_SSID_MAX + 1];
 static size_t s_network_count;
 static SemaphoreHandle_t s_networks_lock;
 
+/* Static, not on the stack: 24 records are about 2.4 KB, more than the
+ * main task (3.5 KB, where the first scan runs) can spare -- it overflowed
+ * and the board restarted out of setup mode. Only one scan runs at a
+ * time: the first before the page is served, the rest from the page's
+ * single server task. */
+#define SCAN_RECORDS 24
+static wifi_ap_record_t s_records[SCAN_RECORDS];
+
 static void scan(void)
 {
     /* Blocking, a second or two. The access point may drop off its
@@ -41,8 +49,8 @@ static void scan(void)
         ESP_LOGW(TAG, "network scan failed");
         return;
     }
-    uint16_t found = 24;
-    wifi_ap_record_t records[24];
+    uint16_t found = SCAN_RECORDS;
+    wifi_ap_record_t *records = s_records;
     if (esp_wifi_scan_get_ap_records(&found, records) != ESP_OK) {
         return;
     }
