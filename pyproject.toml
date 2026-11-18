@@ -65,10 +65,10 @@ local = [
 docs = ["mkdocs-material>=9.5"]
 dev = [
     "boresight[server]",
-    "pytest>=8.3",
-    "ruff>=0.16.0",
-    "pre-commit>=4.6.1",
-    "httpx2>=2.9.1",
+    "pytest>=9.2",
+    "ruff>=0.17.5",
+    "pre-commit>=4.7.0",
+    "httpx2>=2.16.2",
 ]
 
 [build-system]
