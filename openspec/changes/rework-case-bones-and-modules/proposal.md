@@ -61,11 +61,12 @@ it before any CAD work starts. It supersedes the unfinished draft
     and is held by the port's own two bolts, and the board sits 24 mm
     out in front.
   - This keeps the antenna about 30 mm from the nearest steel and outside
-    the tube. The ESP32-CAM gun is about 35 mm longer: 262 mm, or 162 mm
+    the tube. The ESP32-CAM gun is about 35 mm longer: 242 mm, or 142 mm
     compact.
-  - Two 1×6 plugs push onto the board's own header pins. One goes to the
-    hub; the other goes to a serial socket and a BOOT button under the
-    nose, so the board can be flashed and its log read in place.
+  - The board rides antenna down. Two 1×6 plugs push onto its own header
+    pins. One goes to the hub; the other goes to a serial socket and a
+    BOOT button on the nose's top, so the board can be flashed and its log
+    read in place.
 - **One hub, short leads.**
   - A hub module on the receiver's rails, right above the grip, holds:
     - the 5 V regulator, now 1.5 A;
@@ -140,7 +141,7 @@ and 14.3 (physical print), are open.
     shipped set.
 - **Docs:** the root README's case section, `deploy/pi/README.md` (cables
   at the window, battery running) and the ESP32-CAM flashing guide (the
-  socket under the nose).
+  socket on the nose's top).
 - **Superseded:** the untracked draft
   `openspec/changes/add-case-pi-battery-and-feedback/` is removed. Its
   feedback requirements move here, rewritten for the new layout.
@@ -149,7 +150,8 @@ and 14.3 (physical print), are open.
   (Pi), and the status LED on GPIO27 (Pi) and the board's own LED
   (ESP32-CAM).
 - **New things to buy:**
-  - M3 × 45 bolts and nylon-insert nuts;
+  - M3 × 50 bolts, washers and nylon-insert nuts, M3 thumbscrews and M2.5
+    screws for the boards on the carriers;
   - a 1.5 A buck-boost module;
   - a right-angle micro-USB power plug and a 38 mm Pi Zero camera ribbon;
   - JST-XH leads and 1×6 Dupont housings;

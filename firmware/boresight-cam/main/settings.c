@@ -1,6 +1,9 @@
 /*
- * The device's effective settings: the build configuration's values, with
- * whatever setup mode stored on the device laid over them.
+ * The device's effective settings: the defaults, with whatever setup mode
+ * stored on the device laid over them. On a board the defaults have no
+ * network at all -- Wi-Fi, server and token come only from setup mode --
+ * and the camera's come from the build configuration. The emulator also
+ * builds in the server it reaches.
  *
  * Each setting is its own NVS key in the "boresight" namespace, present
  * only when it differs from the build's value, so a setting nobody changed
@@ -32,6 +35,12 @@ static const char *TAG = "settings";
 /* Emulator only: the `setup` console command's request, read once. */
 #define KEY_SETUP_NEXT "setup_next"
 
+#if !CONFIG_BORESIGHT_EMULATOR
+/* The server's own default port (DEFAULT_PORT, src/boresight/netaccess.py):
+ * a board connects there until another port is stored. */
+#define DEFAULT_SERVER_PORT 7331
+#endif
+
 /* The ranges main/Kconfig.projbuild gives these options; kept in step by
  * hand, since Kconfig ranges do not reach C. */
 static const bp_camera_limits_t LIMITS = {
@@ -60,11 +69,18 @@ static bp_resolution_t build_resolution(void)
 void settings_build_defaults(bp_settings_t *out)
 {
     memset(out, 0, sizeof *out);
-    strlcpy(out->ssid, CONFIG_BORESIGHT_WIFI_SSID, sizeof out->ssid);
-    strlcpy(out->password, CONFIG_BORESIGHT_WIFI_PASSWORD, sizeof out->password);
+#if CONFIG_BORESIGHT_EMULATOR
+    /* The server QEMU's user networking reaches (sdkconfig.emulator), so
+     * the end-to-end suite starts connected. */
     strlcpy(out->host, CONFIG_BORESIGHT_SERVER_HOST, sizeof out->host);
     out->port = CONFIG_BORESIGHT_SERVER_PORT;
     strlcpy(out->token, CONFIG_BORESIGHT_TOKEN, sizeof out->token);
+#else
+    /* A board's network comes only from setup mode: no Wi-Fi, address or
+     * token here, so no image carries them, and the port is the server's
+     * own default until one is stored. */
+    out->port = DEFAULT_SERVER_PORT;
+#endif
     out->resolution = build_resolution();
     out->jpeg_quality = CONFIG_BORESIGHT_JPEG_QUALITY;
     out->max_fps = CONFIG_BORESIGHT_MAX_FPS;
@@ -156,11 +172,31 @@ void settings_load(void)
      * seem to take is explained by a value stored on the device. Secrets
      * are only said to be set or not. */
     const bp_settings_t *s = &s_effective;
-    ESP_LOGI(TAG, "wifi \"%s\" (%s), password %s (%s)", s->ssid, source(ssid),
-             s->password[0] ? "set" : "not set", source(password));
+#if CONFIG_BORESIGHT_EMULATOR
+    (void)ssid; /* no Wi-Fi in the emulator */
+    (void)password;
     ESP_LOGI(TAG, "server \"%s\" (%s), port %u (%s), token %s (%s)",
              s->host[0] ? s->host : "(discover)", source(host), (unsigned)s->port,
              source(port), s->token[0] ? "set" : "not set", source(token));
+#else
+    /* A board's network has one source, the device: a value is stored
+     * there or not set at all, and the port is the default until stored. */
+    if (ssid) {
+        ESP_LOGI(TAG, "wifi \"%s\" (device), password %s", s->ssid,
+                 password ? "set (device)" : "not set");
+    } else {
+        ESP_LOGI(TAG, "wifi not set");
+    }
+    const char *port_source = port ? "device" : "default";
+    const char *token_state = token ? "set (device)" : "not set";
+    if (host) {
+        ESP_LOGI(TAG, "server \"%s\" (device), port %u (%s), token %s", s->host,
+                 (unsigned)s->port, port_source, token_state);
+    } else {
+        ESP_LOGI(TAG, "server not set: discover, port %u (%s), token %s",
+                 (unsigned)s->port, port_source, token_state);
+    }
+#endif
     ESP_LOGI(TAG,
              "camera %s (%s), quality %d (%s), max %d fps (%s), exposure %d (%s), "
              "gain %d (%s)",

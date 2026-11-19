@@ -2,10 +2,12 @@
 
 Printed standing on its base. From the bottom up: the drawer bay, keyed by
 a rib down its front wall; the bay's ceiling, a 45-degree gable with a
-10 mm flat carrying the two spring contacts the drawer presses on; a
+10 mm flat where the drawer's contacts meet the battery lead's springs; a
 small compartment for the wiring, flaring at 45 degrees into a bore up
-through the grip's top; and the tenon that enters the receiver's floor.
-The power switch and regulator are in the rear cap.
+through the grip's top; and the tenon that enters the receiver's floor,
+with its through-bolt's crush bar. The top of its front is the trigger's
+pocket. Down its back, a boss that the backstrap bolt crosses; at the
+bottom of its front, a boss with the drawer thumbscrew's nut pocket.
 """
 
 from __future__ import annotations
@@ -26,19 +28,21 @@ from boresight_case.geom import (
     union,
 )
 from boresight_case.interfaces import Fit
-from boresight_case.joints import ATTACHMENTS, BAY_SLIDE, GRIP_JOINT
+from boresight_case.joints import (
+    BACKSTRAP_BOLT,
+    BAY_SLIDE,
+    GRIP_BOLT,
+    GRIP_JOINT,
+    THUMBSCREW_FIX,
+)
 from boresight_case.model import Module, Printed, bought
-from boresight_case.vendor import CONTACT_PLATE
+from boresight_case.vendor import CONTACT_PLATE, M3_NUT_AF, M3_NUT_H
 
 UP = tuple(-L.GRIP_D)  # printed standing on its base
 D, F = L.GRIP_D, L.GRIP_F
 
 CONTACT_A = (-7.5, 7.5)  # the two spring contacts on the ceiling flat
-CABLE_HOLE = (14.0, 8.0)  # a, y of the hole for the Pi's USB cable through the ceiling
-# The drawer latch's notch, in the front wall's inside just above the base:
-# s range, y range.
-LATCH_NOTCH = ((112.75, 115.5), (4.5, 9.5))
-CHARGE_WINDOW = (105.0, 7.0)  # s, y of the 18650 charger's LED window, front wall
+CHARGE_WINDOW = (105.0, 10.0)  # s, y of the 18650 charger's LED window, front wall
 COMPARTMENT_FLOOR = L.BAY_CEILING_S - L.CEILING_T
 
 
@@ -131,8 +135,11 @@ def _compartment() -> Part:
 
 
 def _tenon(fit: Fit) -> Part:
-    """The tenon, its front face cut to the socket's 45-degree slope."""
-    t = GRIP_JOINT.tenon(fit, UP)
+    """The tenon and its crush bar, its front face cut to the socket's
+    45-degree slope."""
+    t = GRIP_JOINT.tube(fit)
+    inner = GRIP_JOINT.tenon_outer(fit)[1] / 2 - GRIP_JOINT.wall
+    t = t + GRIP_BOLT.crush_tube(-inner - 0.01, inner + 0.01, UP)
     x_front = L.GRIP_TOP.X + L.GRIP_JOINT[0] / 2  # the socket's front at the floor
     off = fit.clearance * 2**0.5
     z0, z1 = L.FLOOR_Z - 6, L.FLOOR_Z + L.GRIP_JOINT_DEPTH + 2
@@ -176,10 +183,53 @@ def _contact_tabs() -> Part:
     )
 
 
-def _latch_notch() -> Part:
-    (s0, s1), (y0, y1) = LATCH_NOTCH
-    front = L.BAY_DEPTH / 2
-    return grip_box(front - 0.1, front + 1.15, y0, y1, s0, s1)
+def trigger_pocket(fit: Fit) -> Part:
+    """The trigger housing's place in the top of the grip's front."""
+    from boresight_case.parts.trigger import pocket_outline
+
+    return pocket_outline(fit.clearance)
+
+
+def _bosses() -> Part:
+    """The boss down the back (the backstrap bolt's) and the boss at the
+    bottom of the front (the thumbscrew nut's), each sloping at 45 degrees
+    into the grip at its upper end so it prints without support."""
+    half_w = L.GRIP_WIDTH / 2
+    pieces = []
+    for (s0, s1), (a0, a1), half in (
+        (L.BACK_BOSS_S, L.BACK_BOSS_A, half_w),
+        (L.FRONT_BOSS_S, L.FRONT_BOSS_A, L.FRONT_BOSS_Y),
+    ):
+        out = a1 - a0
+        wall = a1 if a0 < -1 else a0  # the face it stands on
+        sign = -1 if a0 < -1 else 1  # outward along a
+        pts = [
+            (wall, s1),
+            (wall + sign * out, s1),
+            (wall + sign * out, s0 + out),
+            (wall, s0),
+        ]
+        # Drawn in the (a, s) plane through y = -half, extruded across +y.
+        origin = L.grip_point(0, 0, -half)
+        pieces.append(prism(origin, F, D, pts, 2 * half))
+    return union(pieces)
+
+
+def _thumbscrew_cuts(fit: Fit) -> Part:
+    """The thumbscrew's hole up into the front boss, and a slot from the
+    boss's front face that its nut drops into, flats across the axis."""
+    c = fit.clearance
+    seat = L.GRIP_LENGTH + L.DRAWER_FOOT - THUMBSCREW_FIX.clamp  # the nut's lower face
+    hole = cylinder(L.grip_point(L.GRIP_LENGTH + 0.5, L.THUMB_A), tuple(-D), 1.7, 14.0)
+    slot = grip_box(
+        L.THUMB_A - M3_NUT_AF / 2 - c,
+        L.FRONT_BOSS_A[1] + 1.0,
+        -M3_NUT_AF / 2 - c,
+        M3_NUT_AF / 2 + c,
+        seat - M3_NUT_H - c,
+        seat,
+    )
+    return hole + slot
 
 
 def _charge_window() -> Part:
@@ -192,60 +242,33 @@ def _charge_window() -> Part:
 
 @cache
 def grip(fit: Fit) -> Module:
-    bosses = union(ATTACHMENTS[("grip", s)].core_boss(UP) for s in ("left", "right"))
     body = _outer() - _compartment() - (BAY_SLIDE.pocket() & bay_shape())
-    body = body + _tenon(fit) + bosses
+    body = body + _tenon(fit) + _bosses()
     cuts = [
-        GRIP_JOINT.tenon_cuts(fit, UP),
-        cylinder(L.grip_point(COMPARTMENT_FLOOR - 1, *CABLE_HOLE), tuple(D), 3.0, 10.0),
+        GRIP_BOLT.hole(-L.HALF_W, L.HALF_W, UP),
+        BACKSTRAP_BOLT.hole(-L.GRIP_WIDTH / 2 - 1, L.GRIP_WIDTH / 2 + 1, UP),
+        trigger_pocket(fit),
         _contact_tabs(),
-        _latch_notch(),
         _charge_window(),
+        _thumbscrew_cuts(fit),
     ]
-    cuts += [ATTACHMENTS[("grip", s)].core_cuts(fit, UP) for s in ("left", "right")]
     shape = body - union(cuts)
-
     m = Module("grip")
     m.add(Printed("grip", shape, UP, "grip", perimeters=4, infill=25))
-    if fit.fastener == "insert":
-        m.add(
-            bought(
-                "m3-insert",
-                GRIP_JOINT.insert_location(fit),
-                "insert, grip joint",
-                "grip",
-            )
-        )
-    else:
-        m.add(
-            bought(
-                "m3-nut", GRIP_JOINT.nut_location(fit, UP), "nut, grip joint", "grip"
-            )
-        )
-    m.fit("grip", m.bought[-1].label)
-    for side in ("left", "right"):
-        a = ATTACHMENTS[("grip", side)]
-        if fit.fastener == "insert":
-            m.add(
-                bought(
-                    "m3-insert",
-                    a.insert_location(),
-                    f"insert, grip skin {side}",
-                    "grip",
-                )
-            )
-        else:
-            m.add(
-                bought("m3-nut", a.nut_location(UP), f"nut, grip skin {side}", "grip")
-            )
-        m.fit("grip", m.bought[-1].label)
     return m
 
 
-def contacts(module: str = "grip") -> list:
-    """The two spring contacts a battery or ESP32-CAM tether build fits
-    under the bay's ceiling."""
+def contacts(module: str = "battery lead") -> list:
+    """The battery lead's two spring contacts, under the bay's ceiling:
+    the drawer's flat contacts meet them as it is pushed home."""
     return [
         bought("spring-contact", where, f"spring contact {'+-'[i]}", module)
         for i, where in enumerate(contact_locations())
     ]
+
+
+def thumbscrew_nut(fit: Fit, module: str = "drawer lock"):
+    """The thumbscrew's nut, dropped into its slot in the front boss."""
+    return bought(
+        "m3-nut", THUMBSCREW_FIX.nut_location(fit, UP), "nut, thumbscrew", module
+    )

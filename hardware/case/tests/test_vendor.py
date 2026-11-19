@@ -30,3 +30,19 @@ def test_cameras_carry_their_field_of_view():
 
 def test_consumables_are_described():
     assert all(text for text in CONSUMABLES.values())
+
+
+def test_both_boards_antennas_are_solids_the_antenna_check_can_use():
+    from boresight_case.keepouts import antenna_solids
+
+    for board, solid in antenna_solids().items():
+        assert solid.is_valid and solid.volume > 20, board
+    for key in ("esp32-cam", "pi-zero-2w"):
+        assert VENDOR[key].metal
+
+
+def test_the_esp32_cams_header_rows_name_every_pin_the_plugs_use():
+    from boresight_case.vendor import esp32_plug_pins
+
+    assert esp32_plug_pins("hub") == ("5V", "GND", "IO12", "IO13", "IO15", "IO14")
+    assert esp32_plug_pins("debug") == ("IO0", "GND", "VCC", "U0R", "U0T", "GND")

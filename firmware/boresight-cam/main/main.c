@@ -70,18 +70,14 @@ static const char *reset_reason_name(esp_reset_reason_t reason)
 
 static bool configuration_complete(void)
 {
-    /* Kconfig cannot mark a string as required, and failing the build
-     * would break building a fresh checkout at all, so it is checked here,
-     * where the log says exactly what is missing. */
+    /* The emulator's server address is a build setting Kconfig cannot
+     * mark as required, and failing the build would break building a
+     * fresh checkout at all, so it is checked here, where the log says
+     * exactly what is missing. */
     const bp_settings_t *s = settings();
     bool complete = true;
-#if !CONFIG_BORESIGHT_EMULATOR
-    if (strlen(s->ssid) == 0) {
-        ESP_LOGE(TAG, "not configured: Wi-Fi SSID "
-                      "(idf.py menuconfig -> Boresight camera -> Network)");
-        complete = false;
-    }
-#endif
+    /* A board with no Wi-Fi network never gets here: it opens setup mode
+     * first, the only place its network is set. */
 #if CONFIG_BORESIGHT_EMULATOR
     /* A board with no address finds the server by its announcement; the
      * emulator cannot, since QEMU's user networking carries no multicast. */

@@ -2,12 +2,15 @@
 name = "boresight-case"
 version = "0.1.0"
 description = "Parametric, printable modular case for the Boresight light gun"
-requires-python = ">=3.12"
+# 3.14, as the root develops on. Only the version in .python-version is
+# tested, so it is also the minimum.
+requires-python = ">=3.14"
 dependencies = [
     # The CAD kernel (OpenCascade through OCP). Kept out of the boresight
-    # package and its environment on purpose: it is large, and its wheels
-    # lag new CPython releases, which is why this project pins 3.12 in
-    # .python-version while the root follows the newest Python.
+    # package and its environment on purpose: it is large. Its wheels lag
+    # new CPython releases, so a new Python reaches this project only once
+    # cadquery-ocp-novtk ships wheels for it and build123d's
+    # requires-python allows it (0.13: below 3.15).
     "build123d>=0.13,<0.14",
     # Mesh booleans for the geometry checks. The same checks then work on
     # a third-party STL skin, which an OpenCascade check cannot load
@@ -19,7 +22,7 @@ dependencies = [
 boresight-case = "boresight_case.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3"]
+dev = ["pytest>=9.2"]
 
 [build-system]
 requires = ["hatchling"]
@@ -38,4 +41,11 @@ testpaths = ["tests"]
 filterwarnings = [
     "error::DeprecationWarning",
     "error::PendingDeprecationWarning",
+    # lib3mf 2.5.0 (build123d's 3MF export) declares packed ctypes
+    # structures with `_pack_` but no `_layout_`, which Python 3.14 warns
+    # about on import. Harmless here: the implicit layout is the MSVC one
+    # it always was, its structures are packed uint32 fields laid out the
+    # same either way, and 3MF output matched 3.12's byte for byte. It
+    # becomes an error in 3.19; drop this once lib3mf sets `_layout_`.
+    "ignore:Due to '_pack_':DeprecationWarning:lib3mf",
 ]

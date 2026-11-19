@@ -155,7 +155,7 @@ The battery, trigger and feedback leads SHALL each be at most 60 mm long.
 
 ### Requirement: The ESP32-CAM can be flashed and read in place
 The ESP32-CAM nose SHALL carry a 6-pin socket and a BOOT button on its
-underside, wired by a plug on the board's own header pins:
+top, away from the antenna, wired by a plug on the board's own header pins:
 - GND, TX (U0T) and RX (U0R) on the socket, for a 3.3 V USB-serial
   adapter;
 - the BOOT button between IO0 and GND;
@@ -195,9 +195,7 @@ PCB antenna: the ESP32-CAM's or the Pi Zero 2 W's.
 - **THEN** no bolt touches a module, a lead or a camera's view, and
   nothing metal is within 10 mm of either antenna
 
-## MODIFIED Requirements
-
-### Requirement: The core is a set of modules with one joint type
+### Requirement: The core is bones joined at one kind of port
 The case's structure SHALL be bones (receiver, barrel, grip, rear cap) and
 modules. Every end of the receiver and barrel SHALL be the same port: a
 31 × 45 mm opening, 12 mm deep, keyed by a rib under its top wall and held
@@ -213,13 +211,57 @@ module SHALL fit any port.
 - **WHEN** a tenon or camera module is offered to a port upside down
 - **THEN** the key rib stops it before its bolt holes line up
 
+### Requirement: Which configurations are valid
+A configuration SHALL name: board kit, power drawer, trigger mechanism,
+switch plate, number of barrels (0, 1 or 2), feedback device or none,
+whether the Start and Select buttons are fitted, and style.
+- The ESP32-CAM kit SHALL accept any drawer and any number of barrels.
+- The Pi kit SHALL accept any drawer, at least one barrel, and the
+  buttons.
+- The solenoid SHALL be refused on the USB tether.
+
+#### Scenario: A Pi on batteries
+- **WHEN** a configuration pairs the Pi kit with a battery drawer and one
+  barrel
+- **THEN** the build succeeds, and the gun has the hub's switch and
+  regulator and the window under the barrel
+
+#### Scenario: A Pi with no barrel is refused
+- **WHEN** a configuration pairs the Pi kit with no barrel
+- **THEN** the build refuses before generating any part, and names the
+  board, the barrel count and the reason
+
+#### Scenario: A solenoid on the tether is refused
+- **WHEN** a configuration pairs the recoil solenoid with the USB tether
+- **THEN** the build refuses before generating any part, and names the
+  device, the drawer and the reason
+
+#### Scenario: An ESP32-CAM on the tether
+- **WHEN** a configuration pairs the ESP32-CAM kit with the USB tether
+- **THEN** the build succeeds and the board is powered from the cable
+
+### Requirement: The trigger's mechanism is swappable in the grip
+The trigger SHALL be one of two mechanisms in the same grip pocket, held
+by the same one bolt: a lever turning on an M3 bolt, or a push button
+pressed straight back. Changing mechanism SHALL replace only that
+mechanism's printed parts and pivot. The switch plates, the switch and
+the lead to the hub SHALL be the same for both.
+
+#### Scenario: A button instead of a lever
+- **WHEN** a builder replaces the lever module with the button module,
+  keeping the MX plate
+- **THEN** the switch plate, switch and lead are reused, the module is
+  held by the same one bolt, and pressing the button actuates the switch
+
+## MODIFIED Requirements
+
 ### Requirement: The core alone is a working gun
 Every functional part (board, camera, cells, regulator, switches, trigger,
 LEDs, feedback device, wiring) SHALL be held by modules on the bones. A
 gun assembled with no covers SHALL aim and fire as it does with covers,
 with printed spacer collars taking the covers' place under the bolts.
 
-#### Scenario: Bench test without covers
+#### Scenario: Bench test without skins
 - **WHEN** a gun is assembled with its bones, modules and spacer collars
   and no covers
 - **THEN** every functional part is held in place, and the gun aims and
@@ -348,48 +390,6 @@ regulator and to the solenoid.
 - **THEN** the regulator, the board and any feedback device draw no
   current from the cells
 
-### Requirement: Valid configurations
-A configuration SHALL name: board kit, power drawer, trigger mechanism,
-switch plate, number of barrels (0, 1 or 2), feedback device or none,
-whether the Start and Select buttons are fitted, and style.
-- The ESP32-CAM kit SHALL accept any drawer and any number of barrels.
-- The Pi kit SHALL accept any drawer, at least one barrel, and the
-  buttons.
-- The solenoid SHALL be refused on the USB tether.
-
-#### Scenario: A Pi on batteries
-- **WHEN** a configuration pairs the Pi kit with a battery drawer and one
-  barrel
-- **THEN** the build succeeds, and the gun has the hub's switch and
-  regulator and the window under the barrel
-
-#### Scenario: A Pi with no barrel is refused
-- **WHEN** a configuration pairs the Pi kit with no barrel
-- **THEN** the build refuses before generating any part, and names the
-  board, the barrel count and the reason
-
-#### Scenario: A solenoid on the tether is refused
-- **WHEN** a configuration pairs the recoil solenoid with the USB tether
-- **THEN** the build refuses before generating any part, and names the
-  device, the drawer and the reason
-
-#### Scenario: An ESP32-CAM on the tether
-- **WHEN** a configuration pairs the ESP32-CAM kit with the USB tether
-- **THEN** the build succeeds and the board is powered from the cable
-
-### Requirement: The trigger's mechanism is swappable
-The trigger SHALL be one of two mechanisms in the same grip pocket, held
-by the same one bolt: a lever turning on an M3 bolt, or a push button
-pressed straight back. Changing mechanism SHALL replace only that
-mechanism's printed parts and pivot. The switch plates, the switch and
-the lead to the hub SHALL be the same for both.
-
-#### Scenario: A button instead of a lever
-- **WHEN** a builder replaces the lever module with the button module,
-  keeping the MX plate
-- **THEN** the switch plate, switch and lead are reused, the module is
-  held by the same one bolt, and pressing the button actuates the switch
-
 ### Requirement: The trigger and LED use the existing pins
 The trigger SHALL be wired through the hub between the board's trigger
 input and GND, on the pins the existing software defaults to: GPIO13 on
@@ -421,7 +421,7 @@ soldered joint SHALL cross a module boundary. The case SHALL need no
 custom-made circuit board, only off-the-shelf modules, perfboard and
 wires.
 
-#### Scenario: Removing the trigger module
+#### Scenario: Removing the trigger cassette
 - **WHEN** the trigger module is taken out
 - **THEN** its lead unplugs at the hub, and no wire needs cutting or
   desoldering
@@ -461,3 +461,15 @@ window in the barrel's floor and never run through the grip.
 runs from any battery drawer". The USB tether drawer stays for the
 ESP32-CAM; a Pi on a host cable uses the tether drawer fitted without its
 cable.
+
+### Requirement: The core is a set of modules with one joint type
+**Reason**: The core is now bones joined at one port, each held by two through-bolts, not by one screw per joint.
+**Migration**: See "The core is bones joined at one kind of port".
+
+### Requirement: Valid configurations
+**Reason**: The Pi now runs from every battery drawer, so the rule refusing it is gone; barrels, feedback and buttons join the configuration.
+**Migration**: See "Which configurations are valid".
+
+### Requirement: The trigger's mechanism is swappable
+**Reason**: The filament-pin pivot is dropped, and the trigger moves into the grip.
+**Migration**: See "The trigger's mechanism is swappable in the grip".

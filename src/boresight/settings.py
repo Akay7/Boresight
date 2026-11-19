@@ -116,6 +116,12 @@ class ViewPreferences(BaseModel):
     debug: bool = False
     marker_source: Literal["printed", "screen"] = "printed"
     overlay_extra_margin_px: int = Field(0, ge=0, le=OVERLAY_MARGIN_MAX_PX)
+    # "4:3" puts the on-screen tags in the bars beside a centred picture
+    # of that shape, as an emulator shows a 4:3 game on a 16:9 screen;
+    # empty keeps them at the screen's corners and edges.
+    overlay_picture_aspect: str = Field(
+        "", pattern=r"^([1-9][0-9]{0,2}:[1-9][0-9]{0,2})?$"
+    )
     # The display the gun aims at, by output name; empty for the
     # primary display (`displays.py`).
     display: str = Field("", max_length=128)
@@ -201,6 +207,7 @@ CLI_FLAGS: dict[str, str] = {
     "tuning.hold_s": "--aim-hold-s",
     "tuning.rel_scale": "--rel-scale",
     "view.overlay_extra_margin_px": "--overlay-extra-margin-px",
+    "view.overlay_picture_aspect": "--overlay-picture-aspect",
     "view.display": "--display",
     "server.host": "--host",
     "server.port": "--port",

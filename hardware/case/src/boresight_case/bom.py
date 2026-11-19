@@ -1,4 +1,5 @@
-"""The bill of materials: what to print and what to buy for a configuration."""
+"""The bill of materials: what to print and what to buy for a configuration,
+and every lead to make."""
 
 from __future__ import annotations
 
@@ -7,31 +8,46 @@ import io
 from collections import Counter
 from dataclasses import dataclass
 
+from boresight_case import wiring
 from boresight_case.assembly import Assembly
 from boresight_case.vendor import CONSUMABLES, VENDOR
 
 
 @dataclass(frozen=True)
 class Line:
-    kind: str  # "print", "buy" or "consumable"
+    kind: str  # "print", "buy", "lead" or "consumable"
     name: str
     count: int
     spec: str
 
 
 def lines(a: Assembly) -> list[Line]:
+    first = {}
+    for p in a.printed.values():
+        first.setdefault(p.part, p)
+    counts = a.part_counts()
     out = [
         Line(
             "print",
-            p.name,
-            p.count,
+            part,
+            counts[part],
             f"{p.material}, {p.perimeters} perimeters, {p.infill}% infill",
         )
-        for p in a.printed.values()
+        for part, p in first.items()
     ]
-    counts = Counter(b.key for b in a.bought)
-    for key in sorted(counts):
-        out.append(Line("buy", key, counts[key], VENDOR[key].spec))
+    bought = Counter(b.key for b in a.bought)
+    for key in sorted(bought):
+        out.append(Line("buy", key, bought[key], VENDOR[key].spec))
+    for lead in wiring.leads(a.config):
+        out.append(
+            Line(
+                "lead",
+                lead.name,
+                1,
+                f"{lead.plug} to {lead.socket}, {lead.length} mm: "
+                + "; ".join(lead.pins),
+            )
+        )
     cfg = a.config
     consumables = ["hookup-wire"]
     if cfg.board == "pi-zero-2w":
@@ -47,28 +63,31 @@ def part_file(name: str) -> str:
     return f"parts/{name}.stl"
 
 
-def screws(a: Assembly) -> Counter:
-    """Every M3 screw in the gun, by key."""
+def bolts(a: Assembly) -> Counter:
+    """Every M3 bolt and screw in the gun, by key."""
     return Counter(b.key for b in a.bought if b.key.startswith("m3x"))
 
 
-def teardown_screws(a: Assembly) -> Counter:
-    """The screws a full teardown undoes, by key: the budget's."""
+def teardown_bolts(a: Assembly) -> Counter:
+    """The bolts a full teardown undoes, by key: the budget's."""
     return Counter(b.key for b in a.bought if b.teardown)
 
 
 def markdown(a: Assembly) -> str:
     cfg = a.config
     rows = lines(a)
+    barrels = ("no barrel (compact)", "one barrel", "two barrels (long)")[cfg.barrels]
     out = [
         f"# Bill of materials: {cfg.name}",
         "",
-        f"Board {cfg.board} (camera {cfg.camera}), power drawer {cfg.power}, "
-        f"trigger {cfg.mechanism} with {cfg.trigger}, style {cfg.style}. "
+        f"Board {cfg.board} (camera {cfg.camera}), {barrels}, "
+        f"power drawer {cfg.power}, "
+        f"trigger {cfg.mechanism} with {cfg.trigger}, feedback {cfg.feedback}, "
+        f"{'Start and Select buttons, ' if cfg.buttons else ''}style {cfg.style}. "
         "Part files are under `parts/` at the top of the output (STL; 3MF "
         "beside each). Printed for a "
         f"{' x '.join(f'{v:g}' for v in cfg.printer.volume)} mm bed, clearance "
-        f"{cfg.printer.clearance:g} mm, {cfg.printer.fastener}s.",
+        f"{cfg.printer.clearance:g} mm.",
         "",
         "## Print",
         "",
@@ -82,14 +101,17 @@ def markdown(a: Assembly) -> str:
     ]
     out += ["", "## Buy", "", "| Part | Count | What |", "| --- | --- | --- |"]
     out += [f"| `{r.name}` | {r.count} | {r.spec} |" for r in rows if r.kind == "buy"]
+    out += ["", "## Leads", ""]
+    out += wiring.markdown_table(cfg)
     out += [""]
     out += [f"Plus: {r.spec}." for r in rows if r.kind == "consumable"]
-    total = sum(screws(a).values())
-    teardown = sum(teardown_screws(a).values())
+    teardown = teardown_bolts(a)
     out += [
         "",
-        f"{total} screws in all, M3 socket-head; a full teardown undoes {teardown} "
-        "of them with the 2.5 mm hex key.",
+        f"A full teardown undoes {sum(teardown.values())} bolts with the 2.5 mm hex "
+        f"key: {teardown.get('m3x50', 0)} M3 x 50 through-bolts and "
+        f"{teardown.get('m3x12', 0)} M3 x 12 (the trigger's). The drawer's "
+        "thumbscrew turns by hand.",
     ]
     return "\n".join(out) + "\n"
 

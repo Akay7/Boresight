@@ -1,147 +1,191 @@
-"""The board kits (tasks 7.1, 7.2, 7.3)."""
+"""The board kits (tasks 9.1 to 9.3, 10.1, 10.2)."""
 
 import pytest
-from build123d import Location
 from conftest import ESP32_DRAWERS, PI_CAMERAS, assembly, meshes, oriented
 
 from boresight_case import checks
 from boresight_case import layout as L
 from boresight_case.config import Config
 from boresight_case.geom import box
-from boresight_case.keepouts import zones
+from boresight_case.joints import barrel_port
 from boresight_case.mesh import intersection_volume, to_manifold
 from boresight_case.parts import kits
-from boresight_case.parts.receiver import _vents
-from boresight_case.vendor import ESP32_ANTENNA, ESP32_PINS, SD_CARD_PROTRUDE
+from boresight_case.vendor import SD_CARD_PROTRUDE
+
+PI = Config(board="pi-zero-2w")
+ESP = Config()
 
 
-def _printed(cfg):
-    a = assembly(cfg)
-    return {n: m for n, m in meshes(cfg).items() if n in a.printed}
+def _printed(cfg, skins=False):
+    a = assembly(cfg, skins)
+    return {n: m for n, m in meshes(cfg, skins).items() if n in a.printed}
 
 
-@pytest.mark.parametrize("cfg", [ESP32_DRAWERS[0], *PI_CAMERAS], ids=lambda c: c.name)
-def test_bulkhead_and_sled_print_without_support(cfg):
-    names = [n for n in assembly(cfg).printed if n.startswith(("bulkhead", "sled"))]
-    for name in names:
-        assert checks.overhangs(name, oriented(cfg, name)) == []
-        assert checks.bed_fit(name, oriented(cfg, name), cfg.printer.volume) == []
+@pytest.mark.parametrize("cfg", [ESP, PI], ids=lambda c: c.board)
+def test_kit_parts_print_without_support(cfg):
+    for name, p in assembly(cfg).printed.items():
+        if p.module in ("camera", "sled", "pi-retainer", "clamp", "nose"):
+            assert checks.overhangs(name, oriented(cfg, name)) == [], name
+            assert (
+                checks.bed_fit(name, oriented(cfg, name), cfg.printer.volume) == []
+            ), name
 
 
-def test_esp32_board_fits_its_bulkhead():
-    m = meshes(ESP32_DRAWERS[0])
-    for part in ("ESP32-CAM", "camera", "capacitor", "light guide"):
-        assert intersection_volume(m[part], m["bulkhead-esp32-cam"]) < 1.0, part
-        assert intersection_volume(m[part], m["barrel"]) < 1.0, part
-
-
-def test_ov2640_view_is_clear():
-    cfg = ESP32_DRAWERS[0]
-    view = to_manifold(kits.frustum("ov2640"))
-    assert checks.overlapping(view, _printed(cfg), "field of view", "ov2640") == []
-
-
-@pytest.mark.parametrize("cfg", ESP32_DRAWERS, ids=lambda c: c.power)
-def test_no_metal_within_10_mm_of_the_antenna(cfg):
-    x0, x1, y0, y1, z0, z1 = ESP32_ANTENNA
-    antenna = to_manifold(kits.esp32_location() * box(x0, x1, y0, y1, z0, z1))
-    a = assembly(cfg)
-    m = meshes(cfg)
-    metal = {
-        b.label: m[b.label]
-        for b in a.bought
-        if b.vendor.metal and b.label != "ESP32-CAM"
-    }
-    assert checks.too_close("antenna", antenna, metal, 10.0, "antenna") == []
-
-
-def test_header_pins_take_plug_on_leads():
-    """Each used pin's plug-on lead, with room to bend its wire, is clear
-    of printed material, so the board can be reflashed without solder."""
-    m = meshes(ESP32_DRAWERS[0])
-    printed = _printed(ESP32_DRAWERS[0])
-    for pin in ESP32_PINS:
-        lead = {f"lead on {pin}": m[f"lead on {pin}"]}
-        for name, part in printed.items():
-            assert checks.overlapping(part, lead, "lead", name) == [], (pin, name)
+# -- the Pi kit ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("cfg", PI_CAMERAS, ids=lambda c: c.camera)
-def test_camera_module_fits_the_shared_pegs_and_sees_out(cfg):
+def test_either_camera_module_sits_on_the_same_standoffs_and_sees_out(cfg):
     m = meshes(cfg)
-    assert intersection_volume(m["camera"], m["bulkhead-pi-camera"]) < 1.0
+    assert intersection_volume(m["camera"], m["camera-pi"]) < 1.0
     view = to_manifold(kits.frustum(cfg.camera))
     assert checks.overlapping(view, _printed(cfg), "field of view", cfg.camera) == []
 
 
-def test_both_camera_modules_use_the_same_bulkhead():
-    a = assembly(PI_CAMERAS[0]).printed["bulkhead-pi-camera"].shape
-    b = assembly(PI_CAMERAS[1]).printed["bulkhead-pi-camera"].shape
-    assert a.volume == pytest.approx(b.volume)
+def test_the_pi_rides_its_sled_in_the_barrel_ports_down():
+    a = assembly(PI)
+    pi = a.bought_by_label()["Pi Zero 2 W"].shape.bounding_box()
+    x0, x1 = L.barrel_x(0)
+    assert x0 < pi.min.X and pi.max.X < x1 - L.PORT_DEPTH
+    assert pi.min.Z < L.PI_Z0  # its ports, below its port edge
 
 
-@pytest.mark.parametrize("cfg", PI_CAMERAS, ids=lambda c: c.camera)
-def test_pi_heatsink_plug_and_cable_fit(cfg):
-    m = meshes(cfg)
-    printed = _printed(cfg)
-    for part in (
-        "Pi Zero 2 W",
-        "heatsink",
-        "USB plug",
-        "lead on pins 9-11-13",
-        "usb cable",
-    ):
-        assert checks.overlapping(m[part], printed, "fit", part) == [], part
-
-
-def test_sd_card_comes_out_with_only_the_rear_cap_off():
-    """The card's path straight back out of the Pi meets no printed part
-    but the rear cap."""
-    cfg = PI_CAMERAS[1]
+def test_the_sd_card_comes_out_with_only_the_barrel_off():
+    """The card's way straight back out of the Pi meets nothing printed in
+    the barrel."""
     card = kits.pi_location() * box(-SD_CARD_PROTRUDE, 12, 10.5, 22.5, 1.4, 2.8)
     bb = card.bounding_box()
-    path = box(bb.min.X - 40, bb.min.X + 0.5, bb.min.Y, bb.max.Y, bb.min.Z, bb.max.Z)
+    path = box(bb.min.X - 20, bb.min.X + 0.5, bb.min.Y, bb.max.Y, bb.min.Z, bb.max.Z)
+    barrel_side = {
+        n: mm
+        for n, mm in _printed(PI).items()
+        if n in ("barrel", "sled-pi-zero-2w", "pi-retainer", "camera-pi")
+    }
+    hits = checks.overlapping(to_manifold(path), barrel_side, "sd path", "sd card", 0.1)
+    assert hits == []
+
+
+def test_the_pi_camera_board_clears_the_muzzle_bolts_crush_tubes():
+    """The open check: the camera board's edge to the muzzle port's crush
+    tubes, expected about 1 mm, at least 0.5."""
+    camera = meshes(PI)["camera"]
+    tubes = to_manifold(
+        barrel_port(0).bolts[0].crush_tube(-12.75, 12.75, kits.MODULE_UP)
+        + barrel_port(0).bolts[1].crush_tube(-12.75, 12.75, kits.MODULE_UP)
+    )
+    assert camera.min_gap(tubes, 3.0) >= 0.5
+
+
+@pytest.mark.parametrize(
+    "cfg", [PI, Config(board="pi-zero-2w", barrels=2)], ids=lambda c: str(c.barrels)
+)
+def test_every_plug_reaches_its_port_through_the_window_with_covers(cfg):
+    m = meshes(cfg, True)
+    printed = _printed(cfg, True)
+    for plug in ("HDMI plug", "USB plug", "power plug"):
+        assert checks.overlapping(m[plug], printed, "plug", plug) == [], plug
+        assert m[plug].min_gap(m["Pi Zero 2 W"], 0.5) < 0.05
+
+
+def test_a_short_window_fails_naming_the_plug():
+    from boresight_case.geom import NEG_X
+
+    a = assembly(PI)
+    barrel = a.printed["barrel"].shape
+    # Close the window's first 10 mm: the HDMI plug no longer passes.
+    x0 = L.WINDOW_X[0]
+    filled = barrel + box(x0, x0 + 15.0, *L.WINDOW_Y, L.FLOOR_Z, L.FLOOR_IN)
     hits = checks.overlapping(
-        to_manifold(path), _printed(cfg), "sd path", "sd card", 0.1
+        to_manifold(filled), {"HDMI plug": meshes(PI)["HDMI plug"]}, "plug", "barrel"
     )
-    assert {p.parts[0] for p in hits} == {"rear-cap"}
+    assert [h.parts for h in hits] == [("HDMI plug", "barrel")]
+    assert NEG_X  # the barrel prints standing on its muzzle
 
 
-def test_vents_lie_inside_the_vent_zone():
-    """Every slot opens into the zone: pushed out through its wall, each
-    slot lies wholly inside it."""
-    from build123d import Location as Loc
+def test_the_clamp_bar_holds_the_cables_under_the_barrel():
+    m = meshes(PI)
+    assert m["clamp thumbscrew"].min_gap(m["nut, clamp"], 1.0) < 0.05
+    assert intersection_volume(m["cable-clamp"], m["barrel"]) < 0.5
+    clamp = assembly(PI).printed["cable-clamp"].shape.bounding_box()
+    assert clamp.max.Z <= L.FLOOR_Z + 0.01
 
-    zone = to_manifold(zones()["vents"])
-    vents = _vents()
-    side = to_manifold(Loc((0, -3.0, 0)) * vents) ^ to_manifold(
-        box(-200, 0, -100, -L.HALF_W, -100, 100)
+
+def test_the_pi_and_its_heatsink_face_the_vents():
+    from boresight_case.keepouts import zones
+
+    heatsink = assembly(PI).bought_by_label()["heatsink"].shape.bounding_box()
+    vents = zones(PI)["vents"].bounding_box()
+    assert vents.min.X <= heatsink.min.X and heatsink.max.X <= vents.max.X
+
+
+# -- the ESP32-CAM nose ----------------------------------------------------------------
+
+
+def test_the_nose_holds_the_board_24_mm_ahead_of_the_muzzle_antenna_down():
+    board = assembly(ESP).bought_by_label()["ESP32-CAM"].shape.bounding_box()
+    assert board.min.X == pytest.approx(
+        L.muzzle_x(1) + L.NOSE_BOARD_BACK - 8.5, abs=0.01
     )
-    top = to_manifold(Loc((0, 0, 3.0)) * vents) ^ to_manifold(
-        box(-200, 0, -100, 100, L.HALF_H, 100)
-    )
-    assert side.volume() > 10 and top.volume() > 10
-    assert (side - zone).volume() < 0.1
-    assert (top - zone).volume() < 0.1
+    from boresight_case.keepouts import antenna_solids
+
+    antenna = antenna_solids()["esp32-cam"].bounding_box()
+    assert antenna.max.Z < 0  # down
 
 
-def test_pi_vents_face_the_processor():
-    x0, x1 = L.SOC_VENT_X
-    soc_x = L.PI_X0 + 30.0
-    assert x0 <= soc_x <= x1
+def test_the_header_plugs_clear_the_port_bolts_by_2_mm():
+    m = meshes(ESP)
+    for plug in ("hub plug", "debug plug"):
+        for b in barrel_port(0).bolts:
+            assert m[plug].min_gap(m[b.name], 5.0) >= 2.0, (plug, b.name)
 
 
-def test_light_guide_reaches_the_barrel_window():
-    m = meshes(ESP32_DRAWERS[0])
-    guide = (
-        assembly(ESP32_DRAWERS[0]).bought_by_label()["light guide"].shape.bounding_box()
-    )
-    assert guide.max.Z > L.HALF_H  # it pokes out through the barrel's top
-    assert m["light guide"].min_gap(m["barrel"], 1.0) > 0
+def test_the_board_and_its_parts_fit_the_nose():
+    m = meshes(ESP)
+    for part in (
+        "ESP32-CAM",
+        "camera",
+        "capacitor",
+        "light guide",
+        "debug socket",
+        "BOOT button",
+        "debug board",
+    ):
+        for printed in ("nose-esp32-cam", "nose-sleeve", "barrel"):
+            assert intersection_volume(m[part], m[printed]) < 1.0, (part, printed)
 
 
-def test_esp32_board_rests_on_the_floor_of_its_bulkhead():
-    board = assembly(Config()).bought_by_label()["ESP32-CAM"].shape.bounding_box()
-    assert board.max.Z < L.IN_HALF_H
-    loc = kits.esp32_location()
-    assert isinstance(loc, Location)
+def test_the_debug_socket_and_boot_button_open_on_the_noses_top():
+    a = assembly(ESP)
+    top = L.HALF_H
+    socket = a.bought_by_label()["debug socket"].shape.bounding_box()
+    boot = a.bought_by_label()["BOOT button"].shape.bounding_box()
+    assert socket.max.Z == pytest.approx(top - L.WALL, abs=0.01)
+    assert boot.max.Z > top
+
+
+def test_the_ov2640_view_is_clear():
+    view = to_manifold(kits.frustum("ov2640"))
+    assert checks.overlapping(view, _printed(ESP), "field of view", "ov2640") == []
+
+
+@pytest.mark.parametrize("cfg", ESP32_DRAWERS, ids=lambda c: c.power)
+def test_the_esp32_cam_kit_fits_every_drawer(cfg):
+    assert checks.interference(meshes(cfg), assembly(cfg).press_fits) == []
+
+
+def test_the_compact_gun_is_142_mm_long():
+    cfg = Config(barrels=0)
+    a = assembly(cfg)
+    lo = a.printed["rear-cap"].shape.bounding_box().min.X
+    hi = max(p.shape.bounding_box().max.X for p in a.printed.values())
+    assert abs((hi - lo) - 142.0) <= 5.0, hi - lo
+    standard = assembly(Config())
+    hi1 = max(p.shape.bounding_box().max.X for p in standard.printed.values())
+    assert abs((hi1 - lo) - 242.0) <= 5.0
+
+
+def test_the_nose_and_the_pi_camera_module_take_the_ports_tenon():
+    """Each fills the muzzle port with the standard tenon's outside."""
+    for cfg, name in ((ESP, "nose-esp32-cam"), (PI, "camera-pi")):
+        m = meshes(cfg)
+        assert intersection_volume(m[name], m["barrel"]) < 0.5

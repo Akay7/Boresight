@@ -65,6 +65,16 @@ hollow box.
 **Bench builds.** With no covers, 3 mm printed spacer collars stand in
 for the flanges, so the same bolts work.
 
+**Covers on bolt lines.** Every cover section ends on a line of port
+bolts: the receiver's at x −6, each barrel's from 6 mm behind its tenon's
+mouth to 6 mm before its own muzzle, and a ring at the muzzle. So each
+port's bolts clamp the covers either side of the seam: the washer and the
+nut bridge it, and the nut's hex pocket, 2 mm deep from the right cover's
+outer face, is split between the two right-hand covers. The grip's covers
+come up the receiver's flank to z −21, where they meet the receiver's at
+the grip bolt. (Lapping one cover over another at each joint needed an
+overhang no cover could print.)
+
 **Bolt count.** A standard gun has eight bolts:
 - two at the rear cap port;
 - two at the barrel port;
@@ -102,6 +112,15 @@ the parts' print orientation and bed fit stay as they are.
   boss.
 - **Rear cap:** a tenon and a plate.
 
+Nuts for the trigger bolt, the drawer's thumbscrew and the cable clamp sit
+in pockets in the bones, but belong to the modules whose bolts they take,
+so a bone taken out carries nothing bought.
+
+**Drawer lock.** The drawer's foot reaches forward under a boss at the
+bottom of the grip's front. Its captive M3 × 10 thumbscrew, kept by an
+O-ring, turns into a nut in that boss. A foot reaching back would print
+hanging in mid-air.
+
 **Windows.** Side windows sit between the rails and the bolt bands. They
 have 45° ends, so they print standing with no supports ("The bones").
 The top and bottom bands, the rails and the port rings carry the load.
@@ -126,26 +145,41 @@ zone, the outer 12 mm at each end, so it never crosses a carrier.
 ### Trigger in the grip
 
 **Pocket.** The grip's front grows a pocket at its top, where it meets
-the receiver's floor. The trigger module's housing fits the pocket and
-is held by one M3 × 12 from below into a nut. Its front part reaches
-forward under the receiver.
+the receiver's floor. The trigger module's housing (x −67…−8, its top
+plate against the receiver's underside) fits the pocket. Behind x −55.75
+the housing's top slopes down at 45°, so the grip keeps material under its
+tenon and both print without support. The housing is held by one M3 × 12
+up through its top plate, behind the blade, into a nut in a boss on the
+receiver floor's inside; a hex key reaches its head from below, past the
+blade, up a channel in the right side wall. The nut belongs to the
+trigger module, so the receiver carries nothing bought.
 
-**Blade and switch.** The blade hangs from a pivot at z ≈ −35.5; the
-lever's pivot is the M3 bolt. The blade's tail rises above the pivot.
-When the finger pulls the blade back, the tail swings forward onto the
-switch plate.
+**Blade and switch.** The blade hangs from the M3 pivot bolt at
+(−42, −54). Its tail rises 18 mm above the pivot, and its pad presses
+the switch in front of it when the blade is pulled back toward the palm.
 
-**Switch plates.** MX or microswitch. They mount in the housing's front,
-facing back.
+**Switch plates.** MX or microswitch, sliding down grooves in the
+housing, facing back. The microswitch hangs hinge-down below the contact.
 
-**Stop and spring.** The stop screw and return spring stay as today.
+**Stop.** An arm from the blade reaches forward, in the blade's own plane
+and under the switch, to the front block. As the blade turns, the arm's
+tip drops onto a stop screw coming up from below in a nylon-insert nut,
+adjusted with the hex key from below. (A stop screw from the front, as in
+the old cassette, would have to pass the switch.)
 
-**Mechanisms.** The button mechanism keeps its plunger and cap, pressing
-the same plate. The filament-pin pivot is dropped, because a plastic pin
-would be the one non-steel pivot.
+**Spring.** A ballpoint-pen spring between the blade's back, 14 mm below
+the pivot, and a wall behind it.
 
-**Reach.** From the back of the grip to the blade the reach is about
-65 mm ("End result").
+**Mechanisms.** The button is a paddle pressed straight back, its head on
+the switch, which mounts on the same plate turned round behind it. A
+tongue along its top slides between the top plate and a guide bolt
+across the housing. Its stop is a screw in the spring wall, its head
+proud, set through a hole in the plunger's pad; the same spring returns
+it. The filament-pin pivot is dropped, because a plastic pin would be the
+one non-steel pivot.
+
+**Reach.** At the finger's height, from the grip's back to the face the
+finger pulls: about 68 mm for the blade and 69 mm for the button.
 
 *Alternative:* keeping the cassette under the receiver. Rejected: the
 trigger then sat far ahead of the hand, and the cassette needed its own
@@ -153,13 +187,17 @@ screw into the receiver.
 
 ### Pi in the barrel, cables at the window
 
-**Placement.** The sled sits at x 4…83.5 in barrel coordinates, with the
-Pi's PCB at 8…73 and its port edge facing down. The ports are at:
+**Placement.** The sled fills the barrel's run, x 5…88 in barrel
+coordinates, with the Pi's PCB at 8…73 and its port edge facing down. A
+lug at the sled's front holds the camera board on its standoffs, and a
+retainer on the right rails, with four posts to the Pi's mounting pads,
+holds the Pi on its pegs. Neither needs a screw. The ports are at:
 - mini-HDMI x 20.4;
 - USB data x 49.4;
 - PWR x 62.
 
-The window in the barrel floor is x 14…68. The Pi camera module fills
+The window in the barrel floor is x 5…68, its rear end gabled at 45° for
+printing, so the right-angle HDMI plug clears it from x 14. The Pi camera module fills
 the muzzle port, with its PCB at x 88.5, and the 38 mm Pi Zero ribbon
 spans the gap. The micro-SD faces the barrel's rear end. In a long gun
 the Pi sits in the last barrel.
@@ -169,13 +207,14 @@ the Pi sits in the last barrel.
 - **PWR:** a right-angle micro-USB plug, its lead running back along the
   floor to the hub.
 
-**Cable clamp.** A clamp bar under the window, held by one captive M3
-thumbscrew into a nut, grips the cables just below their plugs. It is
-not counted as a teardown bolt, since it turns by hand.
+**Cable clamp.** A clamp bar just ahead of the window, x 72…80 under the
+barrel, held by one captive M3 × 16 thumbscrew into a nut in a boss on
+the floor's inside, grips the cables against the barrel's underside. It
+is not counted as a teardown bolt, since it turns by hand.
 
-**Cooling.** Vent slots in the barrel's right wall and the right cover
-sit over the processor. There is room for a 14 × 14 × 6 heatsink. The
-window also breathes.
+**Cooling.** The barrel's right side window is the vent over the
+processor, and the retainer's plate has a window behind it. There is
+room for a 14 × 14 × 6 heatsink. The floor's window also breathes.
 
 *Alternatives:*
 - **Pi in the receiver, HDMI to the rear cap.** That is the previous
@@ -194,11 +233,28 @@ front.
 23 mm back (6 mm pins, 2.5 mm header, 14.5 mm housing). At this position
 they clear the port bolts by about 3 mm.
 
-**Antenna.** It sits at x 124…129, z 14.25…20.25, about 30 mm from the
-nearest bolt and outside the tube.
+**Orientation.** The board rides antenna down. From the AI-Thinker
+board's datasheet (pinout drawing and photos): the front carries the
+micro-SD slot at the 5V/3V3 end with the camera folded over it, and the
+camera's connector and the flash LED at the other end; the back carries
+the ESP32-S module, its shield and its PCB antenna at the end away from the
+micro-SD slot, and the header pins. So with the antenna down, the 5V end
+and the camera are up: the board stays centred in the nose and the lens
+sits about 10 mm above the bore (from the drawing, until a board is
+measured).
 
-**Muzzle cap.** The cap is a cover over the nose; its lens opening
-follows the camera.
+**Antenna.** On the board's back at its lower end, x 123…124,
+z −20.25…−14.25, about 27 mm from the nearest bolt.
+
+**Holding the board.** The ESP32-CAM has no mounting holes. It rests
+against stops in front of its edges and under and over it, and a
+retainer sleeve inside the nose's tenon, crossed by the port's two bolts
+(the sleeve carries the crush tubes), presses it there with two prongs
+along the nose's lower corners.
+
+**Muzzle ring.** The covers end in a ring round the muzzle port's bolts
+and forward, the same part for both kits and every barrel count. The nose
+itself is not covered.
 
 **Plugs on the header.** The header rows are those in `vendor.py`.
 - **Row +1, pins 1–6** (5V, GND, IO12, IO13, IO15, IO14) carry power,
@@ -206,16 +262,19 @@ follows the camera.
 - **Row −1, pins 3–8** (IO0, GND, VCC, U0R, U0T, GND) go to the debug
   socket.
 
-**Debug socket.** A 1×6 female header and a tactile BOOT button under
-the nose. The socket's pins are GND, nc, nc, RX (U0R), TX (U0T), nc.
-This follows the FTDI order, so a common adapter plugs in directly. VCC
-stays unconnected, and the gun powers the board.
+**Debug socket.** A 1×6 female header and a tactile BOOT button on a
+small debug board, screwed (M2.5) up under the nose's top, so both come
+out on top. With the antenna down, under the nose would put their metal
+within 10 mm of it. The socket's pins are GND, nc, nc, RX (U0R), TX (U0T),
+nc. This follows the FTDI order, so a common adapter plugs in directly.
+VCC stays unconnected, and the gun powers the board.
 
-**Status LED and capacitor.** A light guide carries the on-board red LED
-(GPIO33) to a window on the nose's top. The 470–1000 µF capacitor sits
-in the nose across 5V and GND at the plug.
+**Status LED and capacitor.** A 12 mm light guide carries the on-board
+red LED (GPIO33) to a window on the nose's top. The 470–1000 µF capacitor
+hangs under the debug board, across 5V and GND, well clear of the
+antenna.
 
-**Length.** The gun is about 35 mm longer: 262 mm standard, 162 mm
+**Length.** The gun is about 35 mm longer: 242 mm standard, 142 mm
 compact.
 
 *Alternatives:*
@@ -227,8 +286,12 @@ compact.
 
 ### The hub
 
-The hub is a carrier on the receiver's rails at x −92…−52, directly above
-the grip, where the drawer's contacts come up through the grip's tenon.
+The hub is a carrier on the receiver's left rails at x −88…−46, directly
+above the grip, where the drawer's contacts come up through the grip's
+tenon. Its perfboard (40 × 32 mm) stands 7 mm off the plate on bosses,
+held by two M2.5 screws. The battery's and the trigger's sockets face
+down, so their leads come up out of the grip's bore (and stay under
+60 mm); the others face the receiver's middle.
 It carries:
 - **Regulator:** a 1.5 A buck-boost module set to 5.1 V.
 - **Ideal diode:** an LM66100-class part on the regulator's output, so a
@@ -292,7 +355,7 @@ Keys:
 - `mechanism`: "bolt" or "button". The value "filament" is refused, with
   a message naming its replacement.
 
-Validity follows the case-modules "Valid configurations" requirement.
+Validity follows the case-modules "Which configurations are valid" requirement.
 
 The shipped set is:
 - **Full set:** every board × drawer × mechanism × plate × style, with
@@ -347,6 +410,9 @@ refuses any part attached outside the published bolt positions.
 - **[About 100 configurations slow CI]** → The parts library builds each
   part once. Profile the build and parallelise if it exceeds today's
   budget.
+  Measured: `build --all` writes 46 distinct parts for the 103 shipped
+  configurations in about 2.5 minutes on a desktop, and the full test
+  suite takes about 6 minutes, single process.
 
 ## Migration Plan
 

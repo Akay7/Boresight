@@ -102,6 +102,7 @@ def current_view(app: FastAPI) -> ViewPreferences:
         debug=app.state.settings.debug,
         marker_source=markers.source.value,
         overlay_extra_margin_px=markers.overlay_extra_margin_px,
+        overlay_picture_aspect=markers.overlay_picture_aspect or "",
         display=app.state.display,
     )
 

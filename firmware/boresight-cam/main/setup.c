@@ -145,7 +145,7 @@ void setup_run(void)
     }
     /* Absolute: a sign-in check asked for some other host, and must be
      * sent to this one. */
-    const char *home = "http://192.168.4.1/";
+    const char *home = SETUP_HOME;
 #endif
     if (setup_http_start(home) != ESP_OK) {
         status_led_set_link(BP_LINK_ERROR);

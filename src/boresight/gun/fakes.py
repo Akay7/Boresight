@@ -62,3 +62,29 @@ class RecordingSink:
 
     def close(self) -> None:
         self.closed = True
+
+
+class LoopingCamera:
+    """A recorded frame sequence played round and round at `fps`, as a
+    live camera would: the frames never run out until the gun stops."""
+
+    lossless = False
+
+    def __init__(self, frames_dir: Path | str, fps: float = 30.0) -> None:
+        recorded = FixtureCamera(frames_dir)
+        self._frames: list[np.ndarray] = []
+        while (grabbed := recorded.grab()) is not None:
+            self._frames.append(grabbed[0])
+        self._period = 1.0 / fps
+        self._next = 0
+
+    def grab(self) -> tuple[np.ndarray, float | None]:
+        import time
+
+        time.sleep(self._period)
+        frame = self._frames[self._next % len(self._frames)]
+        self._next += 1
+        return frame, None
+
+    def close(self) -> None:
+        pass

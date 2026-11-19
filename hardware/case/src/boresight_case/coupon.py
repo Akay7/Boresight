@@ -5,10 +5,11 @@ Two small plates, printed flat:
 - `coupon-sockets`: five square sockets, the module joint's fit at
   clearances 0.15, 0.20, 0.25, 0.30 and 0.35 mm, marked by 1 to 5 dots; three
   M3 nut pockets at press fits 0.00, 0.05 and 0.10 mm (1 to 3 dots); the MX
-  cut-out in its 1.5 mm web; and a latch notch.
+  cut-out in its 1.5 mm web; and a slot a carrier plate's 2 mm edge slides
+  in, at the default clearance.
 - `coupon-pegs`: a square tenon to try in each socket, pegs for a board's
-  2.75 mm hole at the same five clearances (1 to 5 dots), and a latch tongue
-  to snap into the notch.
+  2.75 mm hole at the same five clearances (1 to 5 dots), and a 2 mm tab to
+  slide into the slot.
 
 Push the tenon into each socket: the clearance of the one it slides into
 without play is the printer's. Set `clearance` in `[printer]` to it. The
@@ -61,9 +62,9 @@ def sockets() -> Part:
         box(mx_x - MX_CUTOUT / 2, mx_x + MX_CUTOUT / 2, 4, 4 + MX_CUTOUT, -1, t + 1)
     )
     cuts.append(box(mx_x - 8, mx_x + 8, 3, 5 + MX_CUTOUT, 1.5, t + 1))
-    # The latch notch: the drawer's hook catches its edge.
-    notch_x = width - 6
-    cuts.append(box(notch_x - 3, notch_x + 3, 19, 26.01, -1, t + 1))
+    # The carrier slot: a 2 mm plate's edge at the default clearance.
+    slot_x = width - 6
+    cuts.append(box(slot_x - 1.25, slot_x + 1.25, 12, 26.01, -1, t + 1))
     return plate - union(cuts) + union(dots)
 
 
@@ -78,11 +79,9 @@ def pegs() -> Part:
         x = 16 + i * PITCH
         holes.append(cylinder((x, 10, t - 0.01), Z, PI_HOLE_D / 2 - c, 4.0))
         dots.append(_dots(x, 3.0, i + 1, t))
-    # The latch tongue and its hook, as on the drawer's base.
-    tongue = box(width - 9, width - 3, 2, 14, t - 0.01, t + 1.2) + box(
-        width - 9, width - 3, 14, 15, t - 0.01, t + 2.1
-    )
-    return plate + tenon + union(holes) + union(dots) + tongue
+    # A tab as thick as a carrier plate, to slide into the slot.
+    tab = box(width - 9, width - 3, 2, 14, t - 0.01, t + 2.0)
+    return plate + tenon + union(holes) + union(dots) + tab
 
 
 def coupon_parts() -> list[Printed]:

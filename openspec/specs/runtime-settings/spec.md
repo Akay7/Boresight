@@ -13,18 +13,18 @@ The server SHALL read its settings from a TOML settings file, at
 `.boresight/config.toml` relative to the working directory unless
 another path is given with `--config`. The file SHALL be able to hold
 every setting the server takes: a `server` table (`host`, `port`,
-`token`, `token_auto`, `tls`, `certfile`, `keyfile`, `qr`), a `markers`
-table (`layout`), a `detection` table (`tracked`, `coarse_min_side_px`,
-`full_pass_every`, `backoff_frames`), a `recording` table (`seconds`,
-`max_mb`), a `tuning` table (`min_cutoff`, `beta`, `hold_s`,
-`rel_scale`) and a `view` table (`debug`, `marker_source`,
-`overlay_extra_margin_px`). Any key it omits takes its built-in
-default, and a missing file is the same as an empty one. Top-level
-tables the server does not know SHALL be ignored, so other state can
-share the file. A file that cannot be parsed, a value of the wrong type
-or outside its allowed range, or an unknown key inside a known table
-SHALL stop the server at startup with a message naming the file and the
-offending value.
+`token`, `token_auto`, `tls`, `certfile`, `keyfile`, `qr`, `announce`),
+a `markers` table (`layout`), a `detection` table (`tracked`,
+`coarse_min_side_px`, `full_pass_every`, `backoff_frames`), a
+`recording` table (`seconds`, `max_mb`), a `tuning` table
+(`min_cutoff`, `beta`, `hold_s`, `rel_scale`) and a `view` table
+(`debug`, `marker_source`, `overlay_extra_margin_px`). Any key it omits
+takes its built-in default, and a missing file is the same as an empty
+one. Top-level tables the server does not know SHALL be ignored, so
+other state can share the file. A file that cannot be parsed, a value
+of the wrong type or outside its allowed range, or an unknown key inside
+a known table SHALL stop the server at startup with a message naming the
+file and the offending value.
 
 #### Scenario: Values in the file take effect
 - **WHEN** the settings file sets `tuning.beta = 2.0` and nothing else
@@ -50,6 +50,12 @@ offending value.
 - **WHEN** the settings file sets `tuning.min_cutoff = -1`
 - **THEN** the server exits at startup with an error naming the file
   and `min_cutoff`, and serves nothing
+
+#### Scenario: Announcing is switched off from the file
+- **WHEN** the settings file sets `server.announce = false` and no flag
+  sets it
+- **THEN** the server starts without announcing itself on the local
+  network
 
 ### Requirement: Each setting is resolved with a fixed precedence
 Each setting SHALL be taken from, in decreasing precedence: its

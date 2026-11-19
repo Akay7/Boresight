@@ -77,6 +77,109 @@
             "env": {
                 "BORESIGHT_AIM_MIN_CUTOFF": "5.0"
             }
+        },
+        {
+            // For the ESP32-CAM: on the LAN, plain ws:// as the generic
+            // firmware connects, and announced over mDNS
+            // (_boresight._tcp), so a board whose server address is left
+            // empty finds this PC by itself. The terminal shows the board
+            // as it connects ("client identified: esp32-cam <ip>").
+            //
+            // The token is the one the board was given in setup mode. It
+            // is read from .boresight/config.toml (gitignored), so it is
+            // not written here:
+            //
+            //     [server]
+            //     token = "..."
+            //
+            // Without it the server refuses to listen on the LAN and says
+            // so. Also needs port 7331 open in the firewall, and UDP 5353
+            // for the announcement.
+            "name": "boresight server (LAN, ESP32-CAM)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/boresight/server.py",
+            "args": [
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "7331",
+                "--no-tls",
+                "--announce"
+            ],
+            // As above: the marker overlay is a separate program.
+            "subProcess": false,
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            // The on-screen markers on their own: ArUco tags drawn over
+            // the desktop, transparent to the mouse and keyboard.
+            //
+            // Usually not needed: a server started with this in
+            // .boresight/config.toml starts the overlay itself, and the
+            // phone's margin stepper then moves the tags live:
+            //
+            //     [view]
+            //     marker_source = "screen"
+            //     overlay_extra_margin_px = 50
+            //
+            // Run on its own, it pairs with a server whose layout is
+            // screen:<W>x<H> (--markers, or [markers] layout = ...), and
+            // the phone cannot move it: the margin is asked for here
+            // instead, in pixels in from every screen edge, so a taskbar
+            // does not cover the tags. `python -m boresight.overlay
+            // --report-only` prints the display's size and the geometry.
+            //
+            // Needs the overlay extra (uv sync --extra overlay) and the
+            // desktop session; nothing can draw over a fullscreen-
+            // exclusive game, so run games borderless.
+            "name": "boresight overlay (on-screen markers)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "boresight.overlay",
+            "args": [
+                "--extra-margin-px",
+                "${input:overlayMargin}"
+            ],
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            // The ESP32-CAM's serial log: boot, settings and where each
+            // came from, Wi-Fi and its IP, the server found, errors.
+            // Read-only on a board -- the typed commands (press, setup,
+            // ...) exist only in the emulator build.
+            //
+            // A terminal, not a debugger: "node-terminal" is VS Code's
+            // built-in way to run a command from this menu. pyserial is
+            // fetched by uvx for the run, so the project does not depend
+            // on it. --raw keeps the log's colours; DTR and RTS stay low
+            // so an adapter with auto-reset does not hold the board in
+            // reset or in its bootloader. Close it with Ctrl+].
+            //
+            // The port is asked for: /dev/ttyUSB0 for a CP210x or CH340
+            // adapter, /dev/ttyACM0 for one built on an ESP32-S2/S3.
+            // Only one program can hold it, so close this before
+            // flashing.
+            "name": "ESP32-CAM serial log",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": "uvx --from pyserial pyserial-miniterm --raw --dtr 0 --rts 0 ${input:serialPort} 115200"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "serialPort",
+            "type": "promptString",
+            "description": "The USB-serial adapter's port",
+            "default": "/dev/ttyUSB0"
+        },
+        {
+            "id": "overlayMargin",
+            "type": "promptString",
+            "description": "Move the markers in from the screen edges by (px), so a taskbar does not cover them",
+            "default": "50"
         }
     ]
 }

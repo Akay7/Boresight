@@ -66,7 +66,12 @@ from boresight.layout_source import resolve_layout
 from boresight.lens import LensModel
 from boresight.marker_map import MarkerMap
 from boresight.one_euro import OneEuroFilter
-from boresight.overlay.layout import overlay_layout
+from boresight.overlay.layout import (
+    OverlayGeometryError,
+    overlay_layout,
+    parse_picture_aspect,
+    picture_bar_layout,
+)
 from boresight.overlay.qt_backend import GEOMETRY_EVENT
 from boresight.pipeline import AimPipeline, FrameResult
 from boresight.settings import Tuning
@@ -129,17 +134,39 @@ class OverlayGeometry:
     # desktop's panels took their share. Positions are still expressed
     # against the full screen; this only says where they were placed.
     area_px: tuple[int, int, int, int]
+    # Set when the tags are in the bars beside a centred picture of this
+    # shape ("4:3"), with `margin_px` taken off the bars.
+    picture_aspect: str | None = None
+    margin_px: int = 0
+
+    def layout(self) -> MarkerMap:
+        """The solver's layout, from exactly the numbers the overlay
+        reported and with the function it drew with."""
+        if self.picture_aspect:
+            return picture_bar_layout(
+                self.screen_px, self.picture_aspect, self.margin_px
+            )
+        return overlay_layout(
+            self.screen_px, self.tag_px, self.inset_px, area_px=self.area_px
+        )
 
     def as_dict(self) -> dict:
-        return {
+        report = {
             "screen_px": list(self.screen_px),
             "area_px": list(self.area_px),
             "tag_px": self.tag_px,
             "inset_px": self.inset_px,
         }
+        if self.picture_aspect:
+            report["picture_aspect"] = self.picture_aspect
+        return report
 
 
-def _overlay_command(display: int | str | None, extra_margin_px: int = 0) -> list[str]:
+def _overlay_command(
+    display: int | str | None,
+    extra_margin_px: int = 0,
+    picture_aspect: str | None = None,
+) -> list[str]:
     """The command used to start the overlay.
 
     An argument list, never a shell line. `extra_margin_px` is rendered
@@ -155,6 +182,9 @@ def _overlay_command(display: int | str | None, extra_margin_px: int = 0) -> lis
         command.append(f"--display={display}")
     if extra_margin_px:
         command += ["--extra-margin-px", str(int(extra_margin_px))]
+    if picture_aspect:
+        # Checked before it gets here; passed as one `--opt=value` word.
+        command.append(f"--picture-aspect={picture_aspect}")
     return command
 
 
@@ -257,6 +287,7 @@ class MarkerSourceController:
         overlay_extra_margin_px: int = 0,
         tracked_detection: TrackerOptions | bool | None = True,
         tuning: Callable[[], Tuning] | None = None,
+        overlay_picture_aspect: str | None = None,
     ) -> None:
         # Unwrapped: smoothing belongs to each session (see
         # `session_pipeline`). This is only the pipeline's default
@@ -266,6 +297,11 @@ class MarkerSourceController:
         self._display = display
         self._launcher = launcher
         self._overlay_extra_margin_px = overlay_extra_margin_px
+        # Tags in the bars beside a centred picture of this shape ("4:3"),
+        # or None for the corners and edges of the screen.
+        if overlay_picture_aspect:
+            parse_picture_aspect(overlay_picture_aspect)  # refuse it now
+        self._overlay_picture_aspect = overlay_picture_aspect or None
         # Whether sessions detect through a `MarkerTracker` (see
         # `AimPipeline.session_detector`) or search every frame in full.
         self._tracked_detection = tracked_detection
@@ -320,6 +356,10 @@ class MarkerSourceController:
     @property
     def overlay_extra_margin_px(self) -> int:
         return self._overlay_extra_margin_px
+
+    @property
+    def overlay_picture_aspect(self) -> str | None:
+        return self._overlay_picture_aspect
 
     @property
     def overlay_area(self) -> tuple[tuple[int, int], tuple[int, int, int, int]] | None:
@@ -507,15 +547,14 @@ class MarkerSourceController:
             f", {reserved}px reserved by desktop panels" if reserved else "",
         )
         self._geometry = geometry
-        self._use(
-            overlay_layout(
-                geometry.screen_px,
-                geometry.tag_px,
-                geometry.inset_px,
-                area_px=geometry.area_px,
-            ),
-            MarkerSource.SCREEN,
-        )
+        try:
+            layout = geometry.layout()
+        except OverlayGeometryError as error:
+            self._last_error = str(error)
+            self._stop_overlay_locked()
+            self._use(self._printed_layout, MarkerSource.PRINTED)
+            raise MarkerSourceError(str(error)) from None
+        self._use(layout, MarkerSource.SCREEN)
         self._last_error = None
         return self._snapshot()
 
@@ -535,7 +574,11 @@ class MarkerSourceController:
     def _launch_and_read_geometry(self) -> OverlayGeometry:
         try:
             process = self._launcher(
-                _overlay_command(self._display, self._overlay_extra_margin_px),
+                _overlay_command(
+                    self._display,
+                    self._overlay_extra_margin_px,
+                    self._overlay_picture_aspect,
+                ),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -603,6 +646,8 @@ class MarkerSourceController:
             tag_px=int(message["tag_px"]),
             inset_px=int(message["inset_px"]),
             area_px=tuple(int(value) for value in area),
+            picture_aspect=message.get("picture_aspect") or None,
+            margin_px=int(message.get("margin_px", 0)),
         )
 
     def _overlay_alive(self) -> bool:

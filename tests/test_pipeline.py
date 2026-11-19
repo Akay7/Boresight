@@ -295,8 +295,10 @@ def test_debug_reports_each_detection_where_it_sat_in_the_image(
     assert [marker.marker_id for marker in debug.markers] == [0, 1, 2, 3]
     for reported, source in zip(debug.markers, detected, strict=True):
         assert reported.mapped
-        assert reported.corners_px == pytest.approx(
-            [tuple(corner) for corner in source.corners], abs=1e-3
+        # As arrays: approx compares an array element by element, but
+        # rejects a list of (x, y) tuples as nested.
+        assert np.asarray(reported.corners_px) == pytest.approx(
+            np.asarray(source.corners), abs=1e-3
         )
 
 

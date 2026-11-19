@@ -7,6 +7,7 @@ import sys
 from collections.abc import Sequence
 
 from boresight.overlay.backend import OverlayUnavailableError
+from boresight.overlay.layout import OverlayGeometryError
 
 
 def _display(value: str) -> int | str:
@@ -61,6 +62,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "detected automatically (default: 0, no change)",
     )
     parser.add_argument(
+        "--picture-aspect",
+        default=None,
+        metavar="W:H",
+        help="put the tags in the bars beside a centred picture of this "
+        "shape (e.g. 4:3 for an emulator on a 16:9 screen) instead of at "
+        "the screen's corners and edges; --extra-margin-px then narrows "
+        "the bars",
+    )
+    parser.add_argument(
         "--commands",
         action="store_true",
         help="read zeroing-target commands as JSON lines on stdin (used "
@@ -78,8 +88,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             report_only=args.report_only,
             extra_margin_px=args.extra_margin_px,
             commands=args.commands,
+            picture_aspect=args.picture_aspect,
         )
-    except OverlayUnavailableError as error:
+    except (OverlayUnavailableError, OverlayGeometryError) as error:
         # Includes the missing-dependency case, which subclasses this.
         # Both are explanations rather than tracebacks: neither means
         # the installation is broken.

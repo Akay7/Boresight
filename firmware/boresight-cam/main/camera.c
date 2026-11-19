@@ -3,6 +3,7 @@
 #include "esp_camera.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/semphr.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "camera";
@@ -41,14 +42,13 @@ static framesize_t configured_frame_size(void)
     }
 }
 
-esp_err_t camera_start(int *width, int *height)
-{
-    /* The white flash LED. Left floating it can glow faintly, lighting the
-     * markers differently from frame to frame; it is never used. */
-    gpio_reset_pin(FLASH_LED_GPIO);
-    gpio_set_direction(FLASH_LED_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(FLASH_LED_GPIO, 0);
+/* Held from a grab to its release, and by a pause or resume: the driver
+ * must not be stopped under a frame being sent. */
+static SemaphoreHandle_t s_lock;
+static bool s_paused;
 
+static esp_err_t start_driver(int *width, int *height)
+{
     const camera_config_t config = {
         .pin_pwdn = CAM_PIN_PWDN,
         .pin_reset = CAM_PIN_RESET,
@@ -115,10 +115,65 @@ esp_err_t camera_start(int *width, int *height)
     return ESP_OK;
 }
 
+esp_err_t camera_start(int *width, int *height)
+{
+    /* The white flash LED. Left floating it can glow faintly, lighting the
+     * markers differently from frame to frame; it is never used. */
+    gpio_reset_pin(FLASH_LED_GPIO);
+    gpio_set_direction(FLASH_LED_GPIO, GPIO_MODE_OUTPUT);
+    gpio_set_level(FLASH_LED_GPIO, 0);
+
+    s_lock = xSemaphoreCreateMutex();
+    if (s_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    return start_driver(width, height);
+}
+
+void camera_pause(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (!s_paused) {
+        esp_camera_deinit();
+        s_paused = true;
+        ESP_LOGI(TAG, "paused");
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void camera_resume(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_paused) {
+        int width;
+        int height;
+        if (start_driver(&width, &height) == ESP_OK) {
+            s_paused = false;
+        } else {
+            /* Grabs keep failing, which the stream reports as skipped
+             * frames; a restart starts the camera afresh. */
+            ESP_LOGE(TAG, "did not start again after a pause");
+        }
+    }
+    xSemaphoreGive(s_lock);
+}
+
 bool camera_grab(camera_frame_t *frame)
 {
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    if (s_paused) {
+        xSemaphoreGive(s_lock);
+        return false;
+    }
     camera_fb_t *buffer = esp_camera_fb_get();
     if (buffer == NULL) {
+        xSemaphoreGive(s_lock);
         return false;
     }
     frame->data = buffer->buf;
@@ -138,4 +193,5 @@ void camera_release(camera_frame_t *frame)
 {
     esp_camera_fb_return((camera_fb_t *)frame->handle);
     frame->handle = NULL;
+    xSemaphoreGive(s_lock);
 }

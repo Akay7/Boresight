@@ -257,7 +257,10 @@ with: the reachable address, the port, the frame socket path, whether
 TLS is on, and the token if one is configured. When TLS is on, it SHALL
 also print the path of the certificate in use and its SHA-256
 fingerprint, so the certificate embedded in a device can be checked
-against the one the server actually serves.
+against the one the server actually serves. It SHALL also state whether
+the server is announcing itself on the local network (see
+server-discovery), and when it is, that a device's address may be left
+empty to find the server that way.
 
 #### Scenario: Plain-text connection details are printed
 - **WHEN** the server starts bound to a network-reachable address with a
@@ -274,6 +277,17 @@ against the one the server actually serves.
 - **WHEN** the server is restarted with TLS enabled and a generated
   certificate already persisted
 - **THEN** the printed fingerprint is identical to the previous start's
+
+#### Scenario: Discovery is mentioned when the server is announced
+- **WHEN** the server starts bound to a network-reachable address with
+  announcing on
+- **THEN** the connection details state that it is announced and that a
+  device's address may be left empty
+
+#### Scenario: Discovery is not offered when announcing is off
+- **WHEN** the server starts with announcing turned off
+- **THEN** the connection details state that it is not announced, and
+  do not suggest leaving the address empty
 
 ### Requirement: Startup shows the phone URL as a scannable code
 When the server prints the URL a phone should open, it SHALL also print

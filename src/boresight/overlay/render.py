@@ -15,11 +15,12 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from boresight.marker_map import MarkerMap
 from boresight.markers import marker_grid
 from boresight.overlay.layout import (
-    QUIET_PATCH_FRACTION,
     default_inset_px,
     default_tag_px,
+    quiet_patch_px,
     tag_positions_px,
 )
 
@@ -31,7 +32,7 @@ TAG_LIGHT = 255
 
 
 def patch_margin_px(tag_px: int) -> int:
-    return max(1, round(tag_px * QUIET_PATCH_FRACTION))
+    return quiet_patch_px(tag_px)
 
 
 def tag_image(marker_id: int, tag_px: int) -> np.ndarray:
@@ -106,3 +107,33 @@ def target_image(size_px: int) -> np.ndarray:
     cv2.line(image, (0, centre), (size - 1, centre), TAG_DARK, 1)
     cv2.circle(image, (centre, centre), stroke, TAG_DARK, -1)
     return image
+
+
+def render_layout(screen_px: tuple[int, int], layout: MarkerMap) -> np.ndarray:
+    """The full screen as greyscale: black but for each tag of `layout` on
+    its opaque patch. Drawn from the layout itself, for a placement other
+    than `render_overlay`'s (`layout.bar_layout`), so what is drawn is
+    exactly what the solver is told."""
+    width, height = screen_px
+    canvas = np.zeros((height, width), dtype=np.uint8)
+    for marker in layout.markers.values():
+        x, y, tag = round(marker.x_mm), round(marker.y_mm), round(marker.size_mm)
+        margin = patch_margin_px(tag)
+        canvas[
+            max(0, y - margin) : y + tag + margin,
+            max(0, x - margin) : x + tag + margin,
+        ] = TAG_LIGHT
+        canvas[y : y + tag, x : x + tag] = tag_image(marker.marker_id, tag)
+    return canvas
+
+
+def layout_patches(layout: MarkerMap) -> list[tuple[int, int, int, int]]:
+    """The opaque rectangles `(x, y, w, h)` `render_layout` paints for
+    `layout`: what an overlay shows, leaving the rest of the screen alone."""
+    rectangles = []
+    for marker in layout.markers.values():
+        x, y, tag = round(marker.x_mm), round(marker.y_mm), round(marker.size_mm)
+        margin = patch_margin_px(tag)
+        left, top = max(0, x - margin), max(0, y - margin)
+        rectangles.append((left, top, x + tag + margin - left, y + tag + margin - top))
+    return rectangles

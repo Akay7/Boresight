@@ -4,7 +4,8 @@ Requires=boresight-gadget.service
 After=boresight-gadget.service
 
 [Service]
-ExecStart=/opt/boresight/bin/boresight-gun --config /etc/boresight-gun.toml
+# @GUN@ is filled in by install.sh: the boresight-gun in the checkout's venv.
+ExecStart=@GUN@ --config /etc/boresight-gun.toml
 Restart=always
 RestartSec=2
 # Root, because the USB gadget and /dev/hidg0 are root's. The rest of the
@@ -13,7 +14,8 @@ RestartSec=2
 User=root
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
+# Read-only, not hidden: the checkout, and so the program, may be in /home.
+ProtectHome=read-only
 PrivateTmp=yes
 
 [Install]

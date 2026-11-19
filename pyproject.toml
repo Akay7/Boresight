@@ -44,6 +44,20 @@ server = [
 # avoid a GUI stack, and most users run printed markers and never need
 # a toolkit at all. Install with `uv sync --extra overlay`.
 overlay = ["PySide6-Essentials>=6.8"]
+# The gun (`boresight-gun`): its trigger and status LED on GPIO. Install
+# with `uv sync --extra gun`, on a Pi as anywhere else.
+gun = [
+    "gpiozero>=2.0",
+    "lgpio>=0.2; sys_platform == 'linux'",
+]
+# The gun's local output: the uinput pointer, the on-screen overlay, and
+# the marker-source controller's settings types. `evdev` has no Arm wheel,
+# so pip builds it there, which needs a C compiler and kernel headers.
+local = [
+    "evdev>=1.9; sys_platform == 'linux'",
+    "PySide6-Essentials>=6.8",
+    "pydantic>=2.9",
+]
 
 [dependency-groups]
 # The project site (mkdocs.yml): `uv run --group docs mkdocs serve`. Not
@@ -51,10 +65,10 @@ overlay = ["PySide6-Essentials>=6.8"]
 docs = ["mkdocs-material>=9.5"]
 dev = [
     "boresight[server]",
-    "pytest>=8.3",
-    "ruff>=0.16.0",
-    "pre-commit>=4.6.1",
-    "httpx2>=2.9.1",
+    "pytest>=9.2",
+    "ruff>=0.17.5",
+    "pre-commit>=4.7.0",
+    "httpx2>=2.16.2",
 ]
 
 [build-system]

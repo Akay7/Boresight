@@ -1,5 +1,5 @@
-"""The trigger: its three mechanisms and the switch plates they share
-(tasks 6.1, 6.2, 12.2, 12.3)."""
+"""The trigger in the grip: its two mechanisms and the switch plates they
+share (tasks 6.1, 6.2)."""
 
 import math
 
@@ -9,15 +9,13 @@ from conftest import MECHANISM_CONFIGS, assembly, meshes, oriented
 from boresight_case import catalog, checks
 from boresight_case import layout as L
 from boresight_case.config import Config
-from boresight_case.geom import cylinder
 from boresight_case.interfaces import Fit
-from boresight_case.joints import CASSETTE_SCREW
 from boresight_case.mesh import intersection_volume, to_manifold
 from boresight_case.parts import button as B
 from boresight_case.parts import trigger as T
-from boresight_case.vendor import M3_HEAD_H, MX_STEM_TOP
+from boresight_case.vendor import MX_STEM_TOP
 
-LEVERS = [c for c in MECHANISM_CONFIGS if c.mechanism != "button"]
+LEVERS = [c for c in MECHANISM_CONFIGS if c.mechanism == "bolt"]
 BUTTONS = [c for c in MECHANISM_CONFIGS if c.mechanism == "button"]
 
 
@@ -25,13 +23,13 @@ def _id(c: Config) -> str:
     return f"{c.mechanism}-{c.trigger}"
 
 
-def _printed(cfg):
-    a = assembly(cfg)
-    return {n: mm for n, mm in meshes(cfg).items() if n in a.printed}
+def _printed(cfg, skins=False):
+    a = assembly(cfg, skins)
+    return {n: mm for n, mm in meshes(cfg, skins).items() if n in a.printed}
 
 
 @pytest.mark.parametrize("cfg", MECHANISM_CONFIGS, ids=_id)
-def test_mechanism_parts_print_without_support_and_fit_the_bed(cfg):
+def test_trigger_parts_print_without_support_and_fit_the_bed(cfg):
     names = (*catalog.MECHANISM_PARTS[cfg.mechanism], f"switch-plate-{cfg.trigger}")
     for name in names:
         part = oriented(cfg, name)
@@ -40,162 +38,169 @@ def test_mechanism_parts_print_without_support_and_fit_the_bed(cfg):
 
 
 @pytest.mark.parametrize("cfg", MECHANISM_CONFIGS, ids=_id)
-def test_cassette_fits_the_receiver_with_one_screw(cfg):
+def test_the_module_sits_in_the_grip_held_by_one_bolt(cfg):
     a = assembly(cfg)
     m = meshes(cfg)
-    body = catalog.MECHANISM_PARTS[cfg.mechanism][0]
-    assert intersection_volume(m[body], m["receiver"]) < 1.0
-    teardown = [b for b in a.bought if b.module == "trigger-cassette" and b.teardown]
-    assert [b.label for b in teardown] == ["cassette screw"]
+    housing = catalog.MECHANISM_PARTS[cfg.mechanism][0]
+    assert intersection_volume(m[housing], m["grip"]) < 1.0
+    assert intersection_volume(m[housing], m["receiver"]) < 1.0
+    teardown = [b for b in a.bought if b.module == "trigger" and b.teardown]
+    assert [(b.label, b.key) for b in teardown] == [("trigger bolt", "m3x12")]
+    assert m["trigger bolt"].min_gap(m["nut, trigger bolt"], 1.0) < 0.05
 
 
 @pytest.mark.parametrize("cfg", MECHANISM_CONFIGS, ids=_id)
-def test_cassette_screw_stays_reachable_from_below(cfg):
-    """A hex key goes straight up to the cassette screw's head, past every
-    printed part."""
-    entry = CASSETTE_SCREW.entry
-    key = to_manifold(
-        cylinder((entry[0], entry[1], entry[2] - 0.5), (0, 0, -1), 1.4, 60)
-    )
-    assert checks.overlapping(key, _printed(cfg), "hex key", "cassette screw") == []
+def test_the_mounting_bolt_is_reached_from_below(cfg):
+    """A hex key goes straight up to its head, past every printed part."""
+    key = to_manifold(T.key_way())
+    assert checks.overlapping(key, _printed(cfg), "hex key", "trigger bolt") == []
 
 
-def test_every_mechanism_shares_the_plates_switch_and_lead():
+def test_every_mechanism_shares_the_plates_and_switch():
+    from boresight_case.export import part_signature
+
     for trigger in ("mx", "microswitch"):
-        keys = {}
-        for mechanism in ("filament", "bolt", "button"):
+        seen = set()
+        for mechanism in ("bolt", "button"):
             a = assembly(Config(mechanism=mechanism, trigger=trigger))
-            plate = a.printed[f"switch-plate-{trigger}"].shape
-            labels = a.bought_by_label()
-            keys[mechanism] = (
-                round(plate.volume, 3),
-                labels["trigger switch"].key,
-                labels["trigger plug"].key,
+            plate = a.printed[f"switch-plate-{trigger}"]
+            seen.add(
+                (
+                    part_signature(plate.oriented()),
+                    a.bought_by_label()["trigger switch"].key,
+                )
             )
-        assert len(set(keys.values())) == 1, keys
+        assert len(seen) == 1, seen
 
 
-# -- the levers (filament pin and bolt) -----------------------------------------------
+# -- the lever ------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("cfg", LEVERS, ids=_id)
-def test_lever_sweep_clears_every_printed_part(cfg):
-    """From rest to the stop, the lever touches nothing printed: only the
-    switch, which it presses, and the spring."""
-    lever = catalog.MECHANISM_PARTS[cfg.mechanism][1]
-    sweep = to_manifold(T.lever_sweep(cfg.trigger, mechanism=cfg.mechanism))
-    others = {n: mm for n, mm in _printed(cfg).items() if n != lever}
-    assert checks.overlapping(sweep, others, "lever travel", "lever") == []
+def test_the_blades_travel_clears_every_printed_part(cfg):
+    """From rest to the stop, the blade touches nothing printed: only the
+    switch, which its tail presses, and the spring."""
+    sweep = to_manifold(T.lever_sweep(cfg.trigger))
+    others = {n: mm for n, mm in _printed(cfg).items() if n != "trigger-blade"}
+    assert checks.overlapping(sweep, others, "lever travel", "blade") == []
+
+
+@pytest.mark.parametrize("style", ("minimal", "blaster"))
+def test_the_blades_travel_clears_the_covers(style):
+    cfg = Config(style=style)
+    a = assembly(cfg, True)
+    sweep = to_manifold(T.lever_sweep("mx"))
+    covers = {
+        n: mm
+        for n, mm in meshes(cfg, True).items()
+        if n in a.printed and a.printed[n].kind != "core"
+    }
+    assert checks.overlapping(sweep, covers, "lever travel", "blade") == []
 
 
 @pytest.mark.parametrize("trigger", ("mx", "microswitch"))
-def test_lever_default_stop_is_past_actuation_and_short_of_end_of_travel(trigger):
+def test_the_default_stop_is_past_actuation_and_short_of_end_of_travel(trigger):
     actuate, end = T.switch_limits(trigger)
     stop = T.pad_travel(T.angle_for_travel(L.STOP_TRAVEL[trigger]))
     assert actuate < stop < end
-    if trigger == "mx":
-        assert 2.0 < stop < 4.0
 
 
-@pytest.mark.parametrize("trigger", ("mx", "microswitch"))
-def test_lever_at_rest_does_not_actuate_the_switch(trigger):
-    actuate, _ = T.switch_limits(trigger)
+def test_at_rest_the_tail_just_touches_the_switch():
     assert T.pad_travel(0.0) == pytest.approx(0.0)
-    assert T.pad_travel(0.0) < actuate
-
-
-def test_mx_stem_just_touches_the_contact_line_at_rest():
-    assert T.MX_FACE_X + MX_STEM_TOP == pytest.approx(T.CONTACT_X)
+    assert T.MX_FACE_X - MX_STEM_TOP == pytest.approx(T.CONTACT_X)
 
 
 @pytest.mark.parametrize("cfg", LEVERS, ids=_id)
-def test_stop_screw_meets_the_upper_arm_at_the_stop(cfg):
-    """Just short of the stop angle the lever clears the screw; just past
-    it, the lever runs into it."""
+def test_the_stop_screw_meets_the_arm_at_the_stop(cfg):
+    """Just short of the stop angle the blade's arm clears the screw; just
+    past it, the arm runs into it."""
     screw = meshes(cfg)["stop screw"]
     stop = T.angle_for_travel(L.STOP_TRAVEL[cfg.trigger])
-    before = to_manifold(T.lever_shape(stop - math.radians(0.5), cfg.mechanism))
-    after = to_manifold(T.lever_shape(stop + math.radians(1.5), cfg.mechanism))
+    before = to_manifold(T.lever_shape(stop - math.radians(0.5)))
+    after = to_manifold(T.lever_shape(stop + math.radians(1.5)))
     assert intersection_volume(before, screw) < 0.05
     assert intersection_volume(after, screw) > 0.3
 
 
+@pytest.mark.parametrize("cfg", LEVERS, ids=_id)
+def test_the_spring_holds_the_blade_against_the_switch(cfg):
+    """The return spring bears on the blade's back below the pivot, so it
+    turns the tail back off the switch."""
+    m = meshes(cfg)
+    assert m["return spring"].min_gap(m["trigger-blade"], 0.5) < 0.05
+    spring = assembly(cfg).bought_by_label()["return spring"].shape.bounding_box()
+    assert spring.center().Z < T.P.Z  # below the pivot
+
+
 @pytest.mark.parametrize("trigger", ("mx", "microswitch"))
-def test_pivot_bolt_runs_through_the_lever_into_its_nut(trigger):
-    """The M3 x 12 spans the lever and both bosses: its head and nut are
-    sunk into the bosses, it clears the lever's hub and the cassette, and
-    it reaches through the nut."""
-    m = meshes(Config(mechanism="bolt", trigger=trigger))
+def test_the_pivot_bolt_runs_through_the_blade_into_its_nut(trigger):
+    m = meshes(Config(trigger=trigger))
     bolt, nut = m["pivot bolt"], m["nut, pivot bolt"]
-    assert intersection_volume(bolt, m["trigger-lever-bolt"]) < 0.05
-    assert intersection_volume(bolt, m["trigger-cassette-bolt"]) < 0.05
+    assert intersection_volume(bolt, m["trigger-blade"]) < 0.05
+    assert intersection_volume(bolt, m["trigger-housing-bolt"]) < 0.05
     assert bolt.min_gap(nut, 1.0) < 0.05
     lo, hi = bolt.bounding_box()[1], bolt.bounding_box()[4]
-    w = L.CASSETTE_HALF_W
-    assert -w < lo and hi < w  # nothing proud of the cassette's flanks
-    nut_lo = nut.bounding_box()[1]
-    assert lo < nut_lo  # the bolt's tip is past the nut
+    assert -L.TRIGGER_HALF_W < lo and hi < L.TRIGGER_HALF_W
 
 
-def test_filament_and_bolt_levers_differ_only_in_their_bore():
-    pin = T.lever_shape(0.0, "filament")
-    bolt = T.lever_shape(0.0, "bolt")
-    bore = math.pi * L.LEVER_W * ((T.M3_CLEAR / 2) ** 2 - (T.PIN_D / 2 + 0.1) ** 2)
-    assert pin.volume - bolt.volume == pytest.approx(bore, rel=0.02)
+@pytest.mark.parametrize("mechanism", ("bolt", "button"))
+def test_the_reach_from_the_grips_back_is_60_to_70_mm(mechanism):
+    """At the finger's height, from the grip's back to the face it pulls."""
+    z = T.P.Z - L.SPRING_R
+    face = T.CONTACT_X + 1.0 if mechanism == "bolt" else B.FRONT_X
+    reach = face - L.grip_back_x(z)
+    assert 60.0 <= reach <= 70.0, reach
 
 
 # -- the push button ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("cfg", BUTTONS, ids=_id)
-def test_button_travel_clears_every_printed_part(cfg):
+def test_the_buttons_travel_clears_every_printed_part(cfg):
     sweep = to_manifold(B.button_sweep(cfg.trigger))
-    others = {
-        n: mm
-        for n, mm in _printed(cfg).items()
-        if n not in ("button-plunger", "button-cap")
-    }
+    others = {n: mm for n, mm in _printed(cfg).items() if n != "button-plunger"}
     assert checks.overlapping(sweep, others, "button travel", "button") == []
 
 
 @pytest.mark.parametrize("cfg", BUTTONS, ids=_id)
-def test_button_stops_past_actuation_and_short_of_end_of_travel(cfg):
-    """The cap meets the stop screw's head after the plate's default
-    travel, which lies between the switch's actuation and its end."""
-    m = meshes(cfg)
-    gap = m["button-cap"].min_gap(m["stop screw"], 10.0)
+def test_the_button_stops_past_actuation_and_short_of_end_of_travel(cfg):
+    """Pressed just short of the plate's stop travel the plunger clears the
+    stop screw; just past it, its pad runs into the screw's head."""
+    screw = meshes(cfg)["stop screw"]
+    travel = L.STOP_TRAVEL[cfg.trigger]
     actuate, end = T.switch_limits(cfg.trigger)
-    assert gap == pytest.approx(L.STOP_TRAVEL[cfg.trigger], abs=0.05)
-    assert actuate < gap < end
+    assert actuate < travel < end
+    before = to_manifold(B.plunger_shape(travel - 0.05))
+    after = to_manifold(B.plunger_shape(travel + 0.3))
+    assert intersection_volume(before, screw) < 0.05
+    assert intersection_volume(after, screw) > 0.3
 
 
 @pytest.mark.parametrize("cfg", BUTTONS, ids=_id)
-def test_button_meets_the_switch_on_the_contact_line(cfg):
-    """At rest the plunger's head is on the same line the lever's pad was,
-    so the button moves as far as the switch does."""
-    plunger = assembly(cfg).printed["button-plunger"].shape.bounding_box()
-    assert plunger.min.X == pytest.approx(T.CONTACT_X)
-    switch = meshes(cfg)["trigger switch"]
-    assert meshes(cfg)["button-plunger"].min_gap(switch, 1.0) < 0.05
+def test_the_button_meets_the_switch_on_its_contact_line(cfg):
+    """At rest the plunger's head is on the switch's line, so the button
+    moves exactly as far as the switch does."""
+    m = meshes(cfg)
+    assert m["button-plunger"].min_gap(m["trigger switch"], 1.0) < 0.05
 
 
-def test_button_stop_head_clears_the_cap_at_rest():
-    for trigger in ("mx", "microswitch"):
-        gap = B.stroke_gap(L.STOP_TRAVEL[trigger])
-        assert 0 < gap < B.CAP_X[0] - B.FRONT - M3_HEAD_H
+@pytest.mark.parametrize("cfg", BUTTONS, ids=_id)
+def test_the_button_returns_on_its_spring(cfg):
+    m = meshes(cfg)
+    assert m["return spring"].min_gap(m["button-plunger"], 0.5) < 0.05
 
 
 def test_switch_plates_share_the_seat():
     """Both plates have the same outline where they slide into the
-    cassette, so either fits every mechanism."""
+    housing, so either fits every mechanism."""
     from boresight_case.geom import box
 
     fit = Fit()
     seat = T._plate_outline(fit).bounding_box()
-    # Within the seat's thickness, where the plate rides in the grooves.
-    slab = box(L.PLATE_X[0], L.PLATE_X[1] - 0.05, -20, 20, -80, 0)
+    # In the right-hand groove, where neither plate has anything of its own.
+    slab = box(T.PLATE_X[0], T.PLATE_X[1] - 0.05, -20, -T.INNER, -80, 0)
     for plate in (T.mx_plate(fit), T.micro_carrier(fit)):
         bb = (plate & slab).bounding_box()
         assert bb.min.Y == pytest.approx(seat.min.Y)
-        assert bb.max.Y == pytest.approx(seat.max.Y)
-        assert bb.min.Z >= seat.min.Z - 1e-6 and bb.max.Z <= seat.max.Z + 1e-6
+        assert bb.min.Z == pytest.approx(seat.min.Z)
+        assert bb.max.Z == pytest.approx(seat.max.Z)

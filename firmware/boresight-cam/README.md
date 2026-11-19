@@ -25,6 +25,8 @@ the full walkthrough. This file is the build reference.
     tools/idf.sh              idf.py inside the pinned ESP-IDF container
     tools/run-emulator.sh     boot an image in QEMU, in the same container
     docs/flashing.py          draws docs/flashing.svg, the flashing wiring
+    docs/trigger.py           draws docs/trigger.svg, the trigger wiring
+    docs/board.py             the board both diagrams draw
     components/boresight_proto/
                               wire format, debouncer, pin allowlist,
                               back-off and LED patterns -- no ESP-IDF
@@ -55,8 +57,22 @@ delete, and it handles rootless Docker.
 
 The two profiles build into `build/` and `build-emulator/` from separate
 configuration. The emulator's `sdkconfig` lives inside `build-emulator/`,
-so building it never touches the device's, which holds your Wi-Fi password
-and token.
+so building it never touches the device's.
+
+A board's Wi-Fi network, server address and port, and token are not
+build settings: they are set in
+[setup mode](../../README.md#setup-mode) and stored on the board, so no
+board image carries them. `menuconfig` has the camera's defaults and ranges,
+the pins and TLS. The emulator is the exception: it has no Wi-Fi and
+cannot discover the server, so `sdkconfig.emulator` builds in the server
+it reaches through QEMU (`10.0.2.2`, port 7391) and the test token, and
+the end-to-end suite starts connected.
+
+A `sdkconfig` from before this has Wi-Fi, server and token lines that no
+longer apply. Reconfigure once so the build stops carrying them, which
+also deletes them from the file:
+
+    tools/idf.sh device reconfigure
 
 ## Run without a board
 
@@ -155,12 +171,12 @@ Requires ESP-IDF v5.1 or later
 ([install guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/get-started/)).
 
     idf.py set-target esp32
-    idf.py menuconfig          # Boresight camera -> Network, Camera, Pins
+    idf.py menuconfig          # optional: Boresight camera -> Camera, Pins, TLS
     idf.py build
 
-The configuration lands in `sdkconfig`, which is gitignored: it holds your
-Wi-Fi password and token. `sdkconfig.defaults` is tracked and holds no
-secrets.
+The configuration lands in `sdkconfig`, which is gitignored.
+`sdkconfig.defaults` is tracked. Neither holds a secret: the network and
+token are set in setup mode once the board is flashed.
 
 The ESP32-CAM has no USB port of its own. Flash through a USB-serial
 adapter (3.3 V logic, 5 V to the board's 5V pin), with **GPIO0 held to GND
@@ -179,6 +195,9 @@ no EN pin, so the jumper does their job.
 - If the board does not answer, move the GND wire to another GND pin.
 - If the adapter has no 5V pin, wire its 3.3 V to the board's **3V3**
   pin instead, and check every wire before plugging the adapter in.
+  That is enough to flash, but not to run: an ESP-01 adapter's 3.3 V
+  output browns the board out once its radio is busy, for instance as
+  soon as setup mode opens its network. Run it from 5 V.
 
 The diagram is drawn by `docs/flashing.py` with
 [schemdraw](https://schemdraw.readthedocs.io/). After editing it,
@@ -192,7 +211,8 @@ the one run, so the project does not depend on it:
 
 The flasher is a page of the project site (`mkdocs.yml` and `website/` at
 the repository root), not of the Boresight server. Served locally, it
-flashes the build in `build/` from Chrome or Edge over Web Serial:
+flashes the build in `build/` from Chrome, Edge or Firefox over Web
+Serial:
 
     uv run --group docs mkdocs serve      # http://127.0.0.1:8000/Boresight/flash/
 

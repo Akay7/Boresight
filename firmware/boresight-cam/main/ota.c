@@ -81,10 +81,18 @@ void ota_mark_good(void)
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running != NULL && esp_ota_get_state_partition(running, &state) == ESP_OK &&
         state == ESP_OTA_IMG_PENDING_VERIFY) {
-        if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+        /* Marking it erases a flash sector: with the camera running, its
+         * interrupt crashed the board mid-erase (see camera_pause), and
+         * the bootloader then rolled back an update that had worked. */
+        camera_pause();
+        const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        forget_pending();
+        camera_resume();
+        if (err == ESP_OK) {
             ESP_LOGI(TAG, "firmware %s started: kept",
                      esp_app_get_description()->version);
         }
+        return;
     }
     forget_pending();
 }

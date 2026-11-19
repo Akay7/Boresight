@@ -87,6 +87,14 @@ void setup_http_stop(void);
 size_t setup_networks(char names[][BP_SSID_MAX + 1], size_t max);
 void setup_rescan(void);
 #if !CONFIG_BORESIGHT_EMULATOR
+/* The board's address on its own setup network, and the page there.
+ * Public-looking, as WLED's is, not 192.168.4.1: an Android phone given a
+ * private address for its sign-in check's public name never makes the
+ * check, and says "no internet" instead of offering the page. The setup
+ * network has no internet, so the address collides with nothing. */
+#define SETUP_ADDRESS_BYTES 4, 3, 2, 1
+#define SETUP_HOME "http://4.3.2.1/"
+
 /* Opens the setup network; `name` gets its SSID. */
 esp_err_t setup_network_start(char *name, size_t size);
 void setup_network_stop(void);
@@ -118,6 +126,15 @@ typedef struct {
  * grabbed must be released. */
 bool camera_grab(camera_frame_t *frame);
 void camera_release(camera_frame_t *frame);
+
+/* Stops the camera, once the frame being sent is released, and starts it
+ * again with the same settings. A long flash write -- erasing a sector --
+ * must not run with the camera on: its interrupt stays live while flash
+ * is unreadable, and esp32-camera's overflow warning there reads its
+ * message from flash and crashes the board. No frame is grabbed while it
+ * is paused. Both do nothing before camera_start(). */
+void camera_pause(void);
+void camera_resume(void);
 
 /* Checked before anything starts: a button on a strapping pin can stop the
  * board booting at all, so it must be caught while the log is readable. */

@@ -23,6 +23,7 @@ import json
 import queue
 import sys
 import threading
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -31,8 +32,17 @@ from boresight.overlay.backend import (
     detect_environment,
     require_toolkit,
 )
-from boresight.overlay.layout import default_inset_px, default_tag_px
-from boresight.overlay.render import render_overlay, target_image
+from boresight.overlay.layout import (
+    default_inset_px,
+    default_tag_px,
+    picture_bar_layout,
+)
+from boresight.overlay.render import (
+    layout_patches,
+    render_layout,
+    render_overlay,
+    target_image,
+)
 
 # Written to stdout, one line, as soon as the geometry is known. A
 # parent process builds the solver's layout from exactly these numbers
@@ -49,18 +59,91 @@ def emit_geometry(
     tag_px: int,
     inset_px: int,
     area_px: tuple[int, int, int, int],
+    picture_aspect: str | None = None,
+    margin_px: int = 0,
 ) -> None:
-    print(
-        json.dumps(
-            {
-                "event": GEOMETRY_EVENT,
-                "screen_px": [screen_px[0], screen_px[1]],
-                "area_px": list(area_px),
-                "tag_px": tag_px,
-                "inset_px": inset_px,
-            }
-        ),
-        flush=True,
+    report = {
+        "event": GEOMETRY_EVENT,
+        "screen_px": [screen_px[0], screen_px[1]],
+        "area_px": list(area_px),
+        "tag_px": tag_px,
+        "inset_px": inset_px,
+    }
+    if picture_aspect:
+        # Tags in the bars beside a centred picture: the reader rebuilds
+        # the layout from these with `layout.picture_bar_layout`.
+        report["picture_aspect"] = picture_aspect
+        report["margin_px"] = margin_px
+    print(json.dumps(report), flush=True)
+
+
+@dataclass(frozen=True)
+class OverlayPlan:
+    """What the overlay will draw and report, decided before any window
+    exists. `rect` is where the overlay window sits, in screen-local
+    pixels; `canvas` and `rectangles` are in that window's pixels."""
+
+    rect: tuple[int, int, int, int]
+    canvas: np.ndarray
+    rectangles: list[tuple[int, int, int, int]]
+    tag_px: int
+    inset_px: int
+    area_px: tuple[int, int, int, int]
+    picture_aspect: str | None = None
+    margin_px: int = 0
+
+    def emit(self, screen_px: tuple[int, int]) -> None:
+        emit_geometry(
+            screen_px,
+            self.tag_px,
+            self.inset_px,
+            self.area_px,
+            self.picture_aspect,
+            self.margin_px,
+        )
+
+
+def plan_overlay(
+    screen_px: tuple[int, int],
+    area_px: tuple[int, int, int, int],
+    tag_px: int | None = None,
+    inset_px: int | None = None,
+    picture_aspect: str | None = None,
+    margin_px: int = 0,
+) -> OverlayPlan:
+    """The drawing and the report, for either placement. Pure, so both are
+    testable without a display.
+
+    With `picture_aspect`, the six tags go in the bars beside a centred
+    picture of that shape, over the whole screen: an emulator in windowed
+    full screen covers the desktop's panels. `margin_px` then narrows the
+    bars instead of the panel-free area.
+    """
+    if picture_aspect:
+        layout = picture_bar_layout(screen_px, picture_aspect, margin_px)
+        tag = round(next(iter(layout.markers.values())).size_mm)
+        whole = (0, 0, screen_px[0], screen_px[1])
+        return OverlayPlan(
+            rect=whole,
+            canvas=render_layout(screen_px, layout),
+            rectangles=layout_patches(layout),
+            tag_px=tag,
+            inset_px=0,
+            area_px=whole,
+            picture_aspect=picture_aspect,
+            margin_px=margin_px,
+        )
+    area_size = (area_px[2], area_px[3])
+    tag_px = default_tag_px(area_size) if tag_px is None else tag_px
+    inset_px = default_inset_px(tag_px) if inset_px is None else inset_px
+    canvas, rectangles = render_overlay(area_size, tag_px, inset_px)
+    return OverlayPlan(
+        rect=area_px,
+        canvas=canvas,
+        rectangles=rectangles,
+        tag_px=tag_px,
+        inset_px=inset_px,
+        area_px=area_px,
     )
 
 
@@ -105,10 +188,19 @@ def _to_qimage(canvas: np.ndarray, QtGui):
 
 
 def build_overlay_widget(
-    screen_px, tag_px=None, inset_px=None, QtCore=None, QtGui=None, QtWidgets=None
+    screen_px,
+    tag_px=None,
+    inset_px=None,
+    QtCore=None,
+    QtGui=None,
+    QtWidgets=None,
+    drawing=None,
 ):
-    """Construct the overlay widget for a display of `screen_px`."""
-    canvas, rectangles = render_overlay(screen_px, tag_px, inset_px)
+    """Construct the overlay widget for a display of `screen_px`, drawing
+    the default placement, or `drawing` (`(canvas, rectangles)`) if given."""
+    canvas, rectangles = (
+        render_overlay(screen_px, tag_px, inset_px) if drawing is None else drawing
+    )
     image = _to_qimage(canvas, QtGui)
     target = target_image(tag_px or default_tag_px(screen_px))
     target_qimage = _to_qimage(target, QtGui)
@@ -201,6 +293,7 @@ def run(
     report_only: bool = False,
     extra_margin_px: int = 0,
     commands: bool = False,
+    picture_aspect: str | None = None,
 ) -> int:
     """Show the overlay and run the Qt event loop until interrupted.
 
@@ -221,6 +314,9 @@ def run(
     multi-monitor setup, to report zero reservation for a monitor with
     a visibly occupied taskbar. Left at zero, this changes nothing.
 
+    `picture_aspect` ("4:3") puts the tags in the bars beside a centred
+    picture of that shape instead (see `plan_overlay`).
+
     `commands` reads target commands from stdin (see
     `parse_target_command`); the server starts its overlay this way to
     draw zeroing targets. Off, stdin is never touched.
@@ -240,34 +336,39 @@ def run(
     # above even an always-on-top window, and fighting it would break
     # the panel rather than fix the tag.
     available = screen.availableGeometry()
-    area_px = _area_px(geometry, available, extra_margin_px)
-    area_size = (area_px[2], area_px[3])
+    if picture_aspect:
+        area_px = (0, 0, screen_px[0], screen_px[1])
+        margin_px = extra_margin_px
+    else:
+        area_px = _area_px(geometry, available, extra_margin_px)
+        margin_px = 0
 
     # Resolved here rather than left to the renderer, because the
     # numbers have to be reported before anything is drawn.
-    tag_px = default_tag_px(area_size) if tag_px is None else tag_px
-    inset_px = default_inset_px(tag_px) if inset_px is None else inset_px
+    plan = plan_overlay(screen_px, area_px, tag_px, inset_px, picture_aspect, margin_px)
 
     if report_only:
-        emit_geometry(screen_px, tag_px, inset_px, area_px)
+        plan.emit(screen_px)
         return 0
 
     widget = build_overlay_widget(
-        area_size,
-        tag_px,
-        inset_px,
+        (plan.rect[2], plan.rect[3]),
+        plan.tag_px,
+        plan.inset_px,
         QtCore=QtCore,
         QtGui=QtGui,
         QtWidgets=QtWidgets,
+        drawing=(plan.canvas, plan.rectangles),
     )
-    widget.setGeometry(available)
+    x, y, width, height = plan.rect
+    widget.setGeometry(geometry.x() + x, geometry.y() + y, width, height)
     widget.show()
     _install_interrupt_handler(app, widget, QtCore)
     if commands:
-        _listen_for_commands(app, widget, area_px, QtCore)
+        _listen_for_commands(app, widget, plan.area_px, QtCore)
 
-    emit_geometry(screen_px, tag_px, inset_px, area_px)
-    reserved = (screen_px[1] - area_px[3]) + (screen_px[0] - area_px[2])
+    plan.emit(screen_px)
+    reserved = (screen_px[1] - plan.area_px[3]) + (screen_px[0] - plan.area_px[2])
     print(
         f"Overlay running on {screen_px[0]}x{screen_px[1]}"
         + (f" ({reserved}px reserved by desktop panels)" if reserved else "")
